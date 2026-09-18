@@ -8,6 +8,14 @@ with plain torch/numpy instead.
 
 import numpy as np
 import torch
+from collections import OrderedDict
+
+# Real torch: proper ModuleDict base so wrapped layers register as submodules.
+# Stub torch (test envs without a usable build): plain object — the class is
+# only ever constructed with real torch.
+_ModuleDictBase = getattr(torch, "nn", None) and getattr(torch.nn, "ModuleDict", None)
+if not isinstance(_ModuleDictBase, type):
+    _ModuleDictBase = object
 
 
 def normalize_(tensor: torch.Tensor, mean, std, inplace: bool = True) -> torch.Tensor:
@@ -74,26 +82,36 @@ def stat_mode(values: np.ndarray, axis: int = 0) -> np.ndarray:
     return out.reshape(arr.shape[1:] if axis != 0 else (1,) + arr.shape[1:])
 
 
-class IntermediateLayerGetter:
-    """Tiny stand-in for torchvision.models._utils.IntermediateLayerGetter:
-    wraps an nn.Module and returns chosen intermediate feature maps by name."""
+class IntermediateLayerGetter(_ModuleDictBase):
+    """Stand-in for torchvision.models._utils.IntermediateLayerGetter.
+
+    MUST register the wrapped layers as real submodules (nn.ModuleDict): the
+    RetinaFace detector stores this as ``self.body``, and facexlib checkpoints
+    contain ``body.*`` keys — with a plain-Python wrapper those keys never
+    appear in state_dict() and load_state_dict(strict=True) fails with
+    "Unexpected key(s): body.conv1.weight, ...". Semantics match torchvision:
+    run children in order, collect the feature maps named in return_layers
+    (keyed by their mapped value), stop after the last requested one.
+    """
 
     def __init__(self, model: torch.nn.Module, return_layers: dict):
-        self.model = model
+        if not set(return_layers).issubset(name for name, _ in model.named_children()):
+            raise ValueError("return_layers are not present in model")
+        layers = OrderedDict()
+        remaining = dict(return_layers)
+        for name, module in model.named_children():
+            layers[name] = module
+            if name in remaining:
+                del remaining[name]
+            if not remaining:
+                break
+        super().__init__(layers)
         self.return_layers = dict(return_layers)
 
-    def __call__(self, x):
+    def forward(self, x):
         out = {}
-        for name, module in self.model._modules.items():
+        for name, module in self.items():
             x = module(x)
             if name in self.return_layers:
                 out[self.return_layers[name]] = x
         return out
-
-    def eval(self):
-        self.model.eval()
-        return self
-
-    def to(self, device):
-        self.model.to(device)
-        return self
