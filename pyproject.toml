@@ -1,15 +1,26 @@
 [project]
-name = "comfyui-reactor"
-description = "(SFW-Friendly) The Fast and Simple Face Swap Extension Node for ComfyUI, based on ReActor SD-WebUI Face Swap Extension"
-version = "0.7.1-b1"
+name = "comfyui-reactor-refactor"
+description = "ReActor ReFactor — dependency-hygiene rework of the ReActor face swap node for ComfyUI (pure-Python ONNX engine, no insightface SDK, clash-free install)"
+version = "1.0.0-alpha1"
 license = { file = "LICENSE" }
-dependencies = ["onnx>=1.14.0", "opencv-python>=4.7.0.72", "numpy", "segment_anything", "albumentations>=1.4.16", "ultralytics"]
+requires-python = ">=3.10"
+dependencies = [
+    # Deliberately minimal hard dependencies.
+    # - onnx: pure-python, needed to read the swap model's emap matrix.
+    # - opencv: cv2 is a hard requirement of the face engine.
+    # onnxruntime is intentionally NOT listed: the onnxruntime / onnxruntime-gpu
+    # flavors collide inside one environment (both own the `onnxruntime` package),
+    # so install.py handles it flavor-aware — it never installs one flavor over
+    # the other. numpy / torch / pillow / tqdm / safetensors come with ComfyUI.
+    "onnx>=1.14.0",
+    "opencv-python>=4.8.0",
+]
 
 [project.urls]
-Repository = "https://github.com/Gourieff/ComfyUI-ReActor"
-# Used by Comfy Registry https://comfyregistry.org
+Repository = "https://github.com/Spirindzhiukas/ReAactor_node_ReFactor"
 
+# Used by Comfy Registry https://comfyregistry.org
 [tool.comfy]
-PublisherId = "gourieff"
-DisplayName = "ComfyUI-ReActor"
+PublisherId = "Spirindzhiukas"
+DisplayName = "ReActor ReFactor"
 Icon = ""
