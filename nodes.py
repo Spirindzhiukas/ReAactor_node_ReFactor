@@ -31,8 +31,7 @@ from .rfactor.swapper import (
 )
 from .rfactor.faceswap_script import FaceSwapScript, get_models
 from .rfactor.dlssnr import ReFactorDLSS5Enhancer
-from .rfactor.download import safe_download
-from .rfactor.torch_utils import masks_to_boxes, normalize_ as normalize, stat_mode
+from .rfactor.torch_utils import normalize_ as normalize, stat_mode
 from .rfactor.utils import (
     batch_tensor_to_pil,
     batched_pil_to_tensor,
@@ -521,7 +520,7 @@ class ReFactorFaceSwapOpt:
         else:
             self.face_boost_enabled = False
 
-        result = reactor.execute(
+        result = ReFactorFaceSwap.execute(
             self,enabled,input_image,swap_model,self.detect_gender_source,self.detect_gender_input,self.source_faces_index,self.input_faces_index,self.console_log_level,face_restore_model,face_restore_visibility,codeformer_weight,facedetection,source_image,face_model,self.faces_order, face_boost=face_boost
         )
 
@@ -634,7 +633,7 @@ class ReFactorSetWeight:
                 images_list.append(img)
 
             for image in images_list:
-                face = BuildFaceModel.build_face_model(self,image)
+                face = ReFactorBuildFaceModel.build_face_model(self,image)
                 if isinstance(face, str):
                     continue
                 faces.append(face)
@@ -918,7 +917,7 @@ class ReFactorRestoreFaceAdvanced:
             model_path = _faceboost_restorer.ensure_facerestore_model(face_restore_model)
             if model_path is None:
                 logger.error(f"Face restoration model '{face_restore_model}' could not be found or downloaded.")
-                return input_image
+                return image
 
             device = model_management.get_torch_device()
 

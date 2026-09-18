@@ -12,6 +12,8 @@ from .engine.inswap import INSwapper
 from .engine.hyperswap import HyperSwapper
 from .scripting import state
 from .log import logger
+
+import comfy.model_management as model_management
 from .ort_utils import resolve_providers
 from . import model_paths
 from .utils import get_image_md5hash, progress_bar, progress_bar_reset
@@ -54,15 +56,14 @@ def unload_model(model):
 def unload_all_models():
     global FS_MODEL, CURRENT_FS_MODEL_PATH
     FS_MODEL = unload_model(FS_MODEL)
+    CURRENT_FS_MODEL_PATH = None
     ANALYSIS_MODELS["320"] = unload_model(ANALYSIS_MODELS["320"])
     ANALYSIS_MODELS["640"] = unload_model(ANALYSIS_MODELS["640"])
 
 def get_current_faces_model():
-    global SOURCE_FACES
     return SOURCE_FACES
 
 def getAnalysisModel(det_size = (640, 640)):
-    global ANALYSIS_MODELS
     with _model_lock:
         _getAnalysisModel_locked(det_size)
     return ANALYSIS_MODELS[str(det_size[0])]
@@ -386,7 +387,7 @@ def swap_face_many(
     codeformer_weight: float = 0.5,
     interpolation: str = "Bicubic",
 ):
-    global SOURCE_FACES, SOURCE_IMAGE_HASH, TARGET_FACES, TARGET_IMAGE_HASH, TARGET_FACES_LIST, TARGET_IMAGE_LIST_HASH
+    global SOURCE_FACES, SOURCE_IMAGE_HASH, TARGET_FACES_LIST, TARGET_IMAGE_LIST_HASH
     result_images = target_imgs
     bbox = []
     swapped_indexes = []

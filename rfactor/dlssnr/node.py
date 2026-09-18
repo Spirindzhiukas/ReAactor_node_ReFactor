@@ -8,7 +8,6 @@ useful as new DLSS 5.x DLL releases appear.
 """
 
 import numpy as np
-import os
 import torch
 
 import comfy.model_management as model_management

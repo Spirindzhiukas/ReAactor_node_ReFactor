@@ -33,7 +33,7 @@ def masks_to_boxes(masks: torch.Tensor) -> torch.Tensor:
     if not any_mask.any():
         return boxes
     idx = torch.arange(flat.shape[1], device=device)
-    h, w = masks.shape[1], masks.shape[2]
+    w = masks.shape[2]
     ys = (idx // w).float()
     xs = (idx % w).float()
     for i in torch.nonzero(any_mask, as_tuple=False).flatten().tolist():

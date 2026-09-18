@@ -35,6 +35,38 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+FACE_RESTORE_MODEL_URLS = {
+    "GFPGANv1.3.pth": "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/GFPGANv1.3.pth",
+    "GFPGANv1.4.pth": "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/GFPGANv1.4.pth",
+    "codeformer-v0.1.0.pth": "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/codeformer-v0.1.0.pth",
+    "GPEN-BFR-512.onnx": "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/GPEN-BFR-512.onnx",
+}
+
+
+def ensure_facerestore_model(face_restore_model):
+    """Resolve a face-restoration model name to a path, downloading on first use.
+
+    Deliberately NOT called from INPUT_TYPES: listing node options must never
+    trigger multi-hundred-MB downloads (an upstream ReActor behavior).
+    """
+    if face_restore_model in (None, "", "none"):
+        return None
+    model_path = folder_paths.get_full_path("facerestore_models", face_restore_model)
+    if model_path:
+        return model_path
+    url = FACE_RESTORE_MODEL_URLS.get(face_restore_model)
+    if url is None:
+        return None
+    from ..download import safe_download
+
+    target = os.path.join(model_paths.facerestore_models_path, face_restore_model)
+    try:
+        safe_download(url, target, face_restore_model, min_bytes=1024 * 1024)
+    except Exception as e:
+        logger.error(f"Could not download {face_restore_model}: {e}")
+        return None
+    return target
+
 
 def get_restored_face(cropped_face,
                       face_restore_model,
@@ -85,7 +117,7 @@ def get_restored_face(cropped_face,
 
             if ".onnx" in face_restore_model:  # ONNX models
 
-                ort_session = create_session(model_path, providers=providers)
+                ort_session = create_session(model_path, providers=resolve_providers())
                 ort_session_inputs = {}
                 facerestore_model = ort_session
 

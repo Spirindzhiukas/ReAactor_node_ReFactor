@@ -3,13 +3,10 @@ import os
 
 from . import model_paths
 from .log import logger
-from .scripting import Processing, ProcessingImg2Img, state
+from .scripting import Processing, ProcessingImg2Img
 from .swapper import (
     swap_face,
     swap_face_many,
-    get_current_faces_model,
-    analyze_faces,
-    half_det_size,
 )
 
 
