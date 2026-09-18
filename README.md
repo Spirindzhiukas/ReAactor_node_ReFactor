@@ -74,7 +74,7 @@ The engine validates execution providers against the installed build and logs wh
 | `buffalo_l` (detect/embed) | `models/insightface/models/buffalo_l/` | auto-downloaded on first swap |
 | `reswapper_128/256.onnx` | `models/reswapper/` | manual |
 | `hyperswap_1x_256.onnx` | `models/hyperswap/` | manual (see [facefusion models](https://huggingface.co/facefusion/models-3.3.0/tree/main)) |
-| GFPGAN / CodeFormer / GPEN | `models/facerestore_models/` | downloaded on first use of the chosen model |
+| GFPGAN / CodeFormer / GPEN | `models/facerestore_models/` | downloaded when the FaceRestore Model Loader executes with a canonical entry |
 | DLSS-NR DLLs (3rd-party) | `models/dlssnr/<version>/` | **manual only** — see `rfactor/dlssnr/dll_README.md` |
 
 ## DLSS5 Frame Enhancer (3rd-party DLLs)
@@ -95,11 +95,35 @@ Connect any ComfyUI-native segmentation into the **Mask Builder**:
 
 ## Nodes
 
-`ReFactorFaceSwap`, `ReFactorFaceSwapOpt` (+ `ReFactorOptions`, `ReFactorFaceBoost`),
-`ReFactorMaskBuilder`, `ReFactorSetWeight`, `ReFactorSaveFaceModel` / `LoadFaceModel` /
-`BuildFaceModel` / `MakeFaceModelBatch`, `ReFactorRestoreFace` / `RestoreFaceAdvanced`,
-`ReFactorFaceSimilarity`, `ReFactorImageDuplicator`, `ReFactorImageRGBA2RGB`, `ReFactorUnload`,
-`ReFactorDLSS5Enhancer`.
+**Model loaders** (the facerestore_cf pattern — models via dedicated nodes, typed sockets):
+`ReFactorFaceSwapModelLoader` → `FACE_SWAP_MODEL`, `ReFactorFaceRestoreModelLoader` → `FACE_RESTORE_MODEL`,
+`ReFactorFaceDetectionModelLoader` → `FACE_DETECT_MODEL`. Swap models get their own loader (not shared
+with restore) because they are persistent cached ONNX sessions with family routing
+(inswapper / reswapper / hyperswap), unlike per-run restoration models.
+
+**Main:** `ReFactorFaceSwap` / `ReFactorFaceSwapOpt` with sockets
+`original_image`, `target_face_image` (the face donor image), `target_face_model` (prebuilt FACE_MODEL),
+`FaceSwap_model`, `FaceRestore_model`, `FaceDetection_model`, `face_boost`.
+The old monolithic `facedetection` / `face_restore_model` / `swap_model` dropdowns are gone —
+connect the loaders instead. CodeFormer's `codeformer_weight` is now named correctly everywhere:
+`codeformer_fidelity` (same CodeFormer `w` parameter that facerestore_cf calls fidelity).
+
+**Also:** `ReFactorOptions`, `ReFactorFaceBoost`, `ReFactorMaskBuilder`, `ReFactorSetWeight`,
+`ReFactorSaveFaceModel` / `ReFactorLoadFaceModel` / `ReFactorBuildFaceModel` / `ReFactorMakeFaceModelBatch`,
+`ReFactorRestoreFace` / `ReFactorRestoreFaceAdvanced` (both now take `FACE_RESTORE_MODEL` /
+`FACE_DETECT_MODEL` inputs), `ReFactorFaceSimilarity`, `ReFactorImageDuplicator`,
+`ReFactorImageRGBA2RGB`, `ReFactorUnload`, `ReFactorDLSS5Enhancer`.
+
+Typical graph:
+
+```
+[FaceSwap Model Loader]──FaceSwap_model─────────┐
+[FaceRestore Model Loader]──FaceRestore_model───┤
+[FaceDetection Model Loader]──FaceDetection_model┤
+[target face image]──target_face_image──────────┤
+                                                ▼
+[original image]────────────────────> ReFactor ⚡ Fast Face Swap ──> SWAPPED_IMAGE
+```
 
 ## Development
 

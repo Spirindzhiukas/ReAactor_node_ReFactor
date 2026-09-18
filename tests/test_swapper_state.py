@@ -7,6 +7,7 @@ The crash (reported from a live ComfyUI portable install):
 Usage: python tests/test_swapper_state.py
 """
 
+import os
 import sys
 import types
 from pathlib import Path
@@ -35,29 +36,51 @@ def main():
 
     import rfactor.swapper as swapper
 
-    # --- getFaceSwapModel: global-state read/write across the locked helper ---
-    class DummySwapper:
-        def __init__(self, path, providers=None):
-            self.path = path
+    # --- resolve_swap_model_path: no more UnboundLocalError on odd names -----
+    import tempfile
 
-    real_ins, real_hyper = swapper.INSwapper, swapper.HyperSwapper
-    swapper.INSwapper = DummySwapper
-    swapper.HyperSwapper = DummySwapper
-    try:
-        model = swapper.getFaceSwapModel("/models/insightface/inswapper_128.onnx")
-        check("first load returns a swapper", isinstance(model, DummySwapper))
-        check("FS_MODEL updated", swapper.FS_MODEL is model)
-        check("CURRENT_FS_MODEL_PATH recorded",
-              swapper.CURRENT_FS_MODEL_PATH == "/models/insightface/inswapper_128.onnx")
+    with tempfile.TemporaryDirectory() as td:
+        swap_file = os.path.join(td, "my_custom_swap_model.onnx")
+        open(swap_file, "wb").write(b"stub")
 
-        again = swapper.getFaceSwapModel("/models/insightface/inswapper_128.onnx")
-        check("cached path returns same object", again is model)
+        resolved = swapper.resolve_swap_model_path({"name": "my_custom_swap_model.onnx", "path": swap_file})
+        check("loader dict resolves", resolved == os.path.realpath(swap_file))
+        resolved = swapper.resolve_swap_model_path(swap_file)
+        check("abs path resolves", resolved == os.path.realpath(swap_file))
 
-        other = swapper.getFaceSwapModel("/models/reswapper/reswapper_128.onnx")
-        check("new path reloads", isinstance(other, DummySwapper) and other is not model)
-        check("unload+replace updates state", swapper.FS_MODEL is other)
-    finally:
-        swapper.INSwapper, swapper.HyperSwapper = real_ins, real_hyper
+        try:
+            swapper.resolve_swap_model_path("totally_unknown_name.onnx")
+            check("unknown name raises helpful error", False)
+        except FileNotFoundError as e:
+            check("unknown name raises helpful error", "totally_unknown_name" in str(e) and "models" in str(e))
+
+        try:
+            swapper.resolve_swap_model_path({"name": "ghost.onnx", "path": os.path.join(td, "missing.onnx")})
+            check("dict with dead path falls back to folder search -> raises", False)
+        except FileNotFoundError:
+            check("dict with dead path falls back to folder search -> raises", True)
+
+        # --- getFaceSwapModel: global-state read/write across the locked helper ---
+        class DummySwapper:
+            def __init__(self, path, providers=None):
+                self.path = path
+
+        real_ins, real_hyper = swapper.INSwapper, swapper.HyperSwapper
+        swapper.INSwapper = DummySwapper
+        swapper.HyperSwapper = DummySwapper
+        try:
+            model = swapper.getFaceSwapModel({"name": "m1.onnx", "path": swap_file})
+            check("first load returns a swapper", isinstance(model, DummySwapper))
+            check("FS_MODEL updated", swapper.FS_MODEL is model)
+            check("CURRENT_FS_MODEL_PATH recorded", swapper.CURRENT_FS_MODEL_PATH == os.path.realpath(swap_file))
+
+            again = swapper.getFaceSwapModel({"name": "m1.onnx", "path": swap_file})
+            check("cached path returns same object", again is model)
+
+            other = swapper.getFaceSwapModel({"name": "m2.onnx", "path": swap_file})
+            check("dict re-resolution to same path stays cached", other is model)
+        finally:
+            swapper.INSwapper, swapper.HyperSwapper = real_ins, real_hyper
 
     # --- unload_all_models resets everything ---
     swapper.unload_all_models()

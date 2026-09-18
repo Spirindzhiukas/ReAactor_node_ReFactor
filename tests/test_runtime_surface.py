@@ -81,6 +81,56 @@ def main():
     for fn in ("discover_dll_sets", "resolve_dll_dir", "combo_choices", "default_dll_dir"):
         check(f"dlssnr.discovery.{fn} exists", hasattr(discovery, fn))
 
+    # --- model loader nodes ---------------------------------------------------
+    from rfactor.loaders import (
+        ReFactorFaceSwapModelLoader,
+        ReFactorFaceRestoreModelLoader,
+        ReFactorFaceDetectionModelLoader,
+    )
+
+    for cls in (ReFactorFaceSwapModelLoader, ReFactorFaceRestoreModelLoader, ReFactorFaceDetectionModelLoader):
+        types_def = cls.INPUT_TYPES()
+        check(f"{cls.__name__}.INPUT_TYPES", "required" in types_def)
+
+    # 'none' swap model -> None passthrough (swap skipped, no crash)
+    inst = ReFactorFaceSwapModelLoader()
+    out = inst.load_model("none")
+    check("swap loader 'none' -> None model", out == (None,))
+
+    det = ReFactorFaceDetectionModelLoader()
+    info = det.load_model("retinaface_resnet50")[0]
+    check("detection loader returns name info", info == {"name": "retinaface_resnet50"})
+
+    # --- main node socket contract (owner spec) --------------------------------
+    sys.path.insert(0, str(REPO.parent))
+    pkg = __import__("ReAactor_node_ReFactor", fromlist=["NODE_CLASS_MAPPINGS"])
+    swap_node = pkg.NODE_CLASS_MAPPINGS["ReFactorFaceSwap"]
+    ti = swap_node.INPUT_TYPES()
+    for socket in ("original_image", "FaceSwap_model"):
+        check(f"required socket '{socket}'", socket in ti["required"])
+    for socket in ("target_face_image", "target_face_model", "FaceRestore_model",
+                   "FaceDetection_model", "face_boost"):
+        check(f"optional socket '{socket}'", socket in ti["optional"])
+    for gone in ("input_image", "swap_model", "facedetection", "face_restore_model", "source_image", "face_model"):
+        check(f"old socket '{gone}' removed", gone not in ti["required"] and gone not in ti["optional"])
+    check("codeformer_fidelity renamed", "codeformer_fidelity" in ti["required"]
+          and "codeformer_weight" not in ti["required"])
+
+    opt = pkg.NODE_CLASS_MAPPINGS["ReFactorFaceSwapOpt"].INPUT_TYPES()
+    check("OPT has loader sockets", "FaceSwap_model" in opt["required"]
+          and "FaceRestore_model" in opt["optional"])
+
+    boost = pkg.NODE_CLASS_MAPPINGS["ReFactorFaceBoost"].INPUT_TYPES()
+    check("FaceBoost uses fidelity + restore socket", "codeformer_fidelity" in boost["required"]
+          and "FaceRestore_model" in boost["optional"] and "boost_model" not in boost["required"])
+
+    adv = pkg.NODE_CLASS_MAPPINGS["ReFactorRestoreFaceAdvanced"].INPUT_TYPES()
+    check("RestoreFaceAdvanced loader sockets", "FaceRestore_model" in adv["required"]
+          and "FaceDetection_model" in adv["optional"])
+
+    check("loaders registered", all(n in pkg.NODE_CLASS_MAPPINGS for n in (
+        "ReFactorFaceSwapModelLoader", "ReFactorFaceRestoreModelLoader", "ReFactorFaceDetectionModelLoader")))
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

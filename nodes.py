@@ -29,7 +29,13 @@ from .rfactor.swapper import (
     half_det_size,
     get_current_faces_model,
 )
-from .rfactor.faceswap_script import FaceSwapScript, get_models
+from .rfactor.faceswap_script import FaceSwapScript
+from .rfactor.loaders import (
+    ReFactorFaceSwapModelLoader,
+    ReFactorFaceRestoreModelLoader,
+    ReFactorFaceDetectionModelLoader,
+    detection_model_name,
+)
 from .rfactor.dlssnr import ReFactorDLSS5Enhancer
 from .rfactor.torch_utils import normalize_ as normalize, stat_mode
 from .rfactor.utils import (
@@ -62,39 +68,14 @@ def get_facemodels():
         models.extend(glob.glob(os.path.join(d, "*")))
     return [x for x in models if x.endswith(".safetensors")]
 
-FACE_RESTORE_FALLBACKS = [
-    "GFPGANv1.3.pth",
-    "GFPGANv1.4.pth",
-    "codeformer-v0.1.0.pth",
-    "GPEN-BFR-512.onnx",
-]
-
-
-def get_restorers():
-    models_path = os.path.join(models_dir, "facerestore_models/*")
-    models = glob.glob(models_path)
-    return [x for x in models if (x.endswith(".pth") or x.endswith(".onnx"))]
-
-
 def get_model_names(get_models):
     models = get_models()
     names = []
     for x in models:
         names.append(os.path.basename(x))
-    if get_models is get_restorers:
-        # Offer the canonical face-restoration models even when nothing is
-        # downloaded yet; the file is fetched on first EXECUTION, never while
-        # merely listing node options.
-        for fallback in FACE_RESTORE_FALLBACKS:
-            if fallback not in names:
-                names.append(fallback)
     names.sort(key=str.lower)
     names.insert(0, "none")
     return names
-
-def model_names():
-    models = get_models()
-    return {os.path.basename(x): x for x in models}
 
 
 class ReFactorFaceSwap:
@@ -103,12 +84,11 @@ class ReFactorFaceSwap:
         return {
             "required": {
                 "enabled": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON"}),
-                "input_image": ("IMAGE",),
-                "swap_model": (list(model_names().keys()),),
-                "facedetection": (["retinaface_resnet50", "retinaface_mobile0.25", "YOLOv5l", "YOLOv5n"],),
-                "face_restore_model": (get_model_names(get_restorers),),
+                "original_image": ("IMAGE",),
+                "FaceSwap_model": ("FACE_SWAP_MODEL",),
                 "face_restore_visibility": ("FLOAT", {"default": 1, "min": 0.1, "max": 1, "step": 0.05}),
-                "codeformer_weight": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05}),
+                "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
+                                                  "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
                 "detect_gender_input": (["no","female","male"], {"default": "no"}),
                 "detect_gender_source": (["no","female","male"], {"default": "no"}),
                 "input_faces_index": ("STRING", {"default": "0"}),
@@ -116,8 +96,10 @@ class ReFactorFaceSwap:
                 "console_log_level": ([0, 1, 2], {"default": 1}),
             },
             "optional": {
-                "source_image": ("IMAGE",),
-                "face_model": ("FACE_MODEL",),
+                "target_face_image": ("IMAGE",),
+                "target_face_model": ("FACE_MODEL",),
+                "FaceRestore_model": ("FACE_RESTORE_MODEL",),
+                "FaceDetection_model": ("FACE_DETECT_MODEL",),
                 "face_boost": ("FACE_BOOST",),
             },
             "hidden": {"faces_order": "FACES_ORDER"},
@@ -147,9 +129,10 @@ class ReFactorFaceSwap:
         input_image,
         face_restore_model,
         face_restore_visibility,
-        codeformer_weight,
-        facedetection,
+        codeformer_fidelity,
+        face_detection_model="retinaface_resnet50",
     ):
+        """face_restore_model: FACE_RESTORE_MODEL dict {"name","path"} or None."""
 
         # from datetime import datetime
         # def _current_time():
@@ -173,28 +156,32 @@ class ReFactorFaceSwap:
         
         result = input_image
 
-        if face_restore_model != "none" and not model_management.processing_interrupted():
+        if face_restore_model is not None and not model_management.processing_interrupted():
 
             global FACE_SIZE, FACE_HELPER
 
             self.face_helper = FACE_HELPER
 
+            restore_model_name = face_restore_model.get("name") if isinstance(face_restore_model, dict) else face_restore_model
+
             faceSize = 512
-            if "1024" in face_restore_model.lower():
+            if "1024" in restore_model_name.lower():
                 faceSize = 1024
-            elif "2048" in face_restore_model.lower():
+            elif "2048" in restore_model_name.lower():
                 faceSize = 2048
 
-            logger.status(f"Restoring with {face_restore_model} | Face Size is set to {faceSize}")
+            logger.status(f"Restoring with {restore_model_name} | Face Size is set to {faceSize}")
 
-            model_path = _faceboost_restorer.ensure_facerestore_model(face_restore_model)
+            model_path = face_restore_model.get("path") if isinstance(face_restore_model, dict) else None
+            if not model_path or not os.path.exists(model_path):
+                model_path = _faceboost_restorer.ensure_facerestore_model(restore_model_name)
             if model_path is None:
-                logger.error(f"Face restoration model '{face_restore_model}' could not be found or downloaded.")
+                logger.error(f"Face restoration model '{restore_model_name}' could not be found or downloaded.")
                 return input_image
 
             device = model_management.get_torch_device()
 
-            if "codeformer" in face_restore_model.lower():
+            if "codeformer" in restore_model_name.lower():
 
                 codeformer_net = ARCH_REGISTRY.get("CodeFormer")(
                     dim_embd=512,
@@ -207,7 +194,7 @@ class ReFactorFaceSwap:
                 codeformer_net.load_state_dict(checkpoint)
                 facerestore_model = codeformer_net.eval()
 
-            elif ".onnx" in face_restore_model:
+            elif ".onnx" in restore_model_name:
 
                 ort_session = create_session(model_path, providers=resolve_providers())
                 ort_session_inputs = {}
@@ -220,7 +207,7 @@ class ReFactorFaceSwap:
                 facerestore_model.to(device)
 
             if faceSize != FACE_SIZE or self.face_helper is None:
-                self.face_helper = FaceRestoreHelper(1, face_size=faceSize, crop_ratio=(1, 1), det_model=facedetection, save_ext='png', use_parse=True, device=device)
+                self.face_helper = FaceRestoreHelper(1, face_size=faceSize, crop_ratio=(1, 1), det_model=face_detection_model, save_ext='png', use_parse=True, device=device)
                 FACE_SIZE = faceSize
                 FACE_HELPER = self.face_helper
 
@@ -318,7 +305,7 @@ class ReFactorFaceSwap:
 
                                 else: # PTH models
 
-                                    output = facerestore_model(cropped_face_t, w=codeformer_weight)[0] if "codeformer" in face_restore_model.lower() else facerestore_model(cropped_face_t)[0]
+                                    output = facerestore_model(cropped_face_t, w=codeformer_fidelity)[0] if "codeformer" in restore_model_name.lower() else facerestore_model(cropped_face_t)[0]
                                     restored_face = tensor2img(output, rgb2bgr=True, min_max=(-1, 1))
 
                             del output
@@ -373,22 +360,32 @@ class ReFactorFaceSwap:
         return result
 
 
-    def execute(self, enabled, input_image, swap_model, detect_gender_source, detect_gender_input, source_faces_index, input_faces_index, console_log_level, face_restore_model,face_restore_visibility, codeformer_weight, facedetection, source_image=None, face_model=None, faces_order=None, face_boost=None):
+    def execute(self, enabled, original_image, FaceSwap_model, detect_gender_source, detect_gender_input, source_faces_index, input_faces_index, console_log_level, face_restore_visibility, codeformer_fidelity, target_face_image=None, target_face_model=None, FaceRestore_model=None, FaceDetection_model=None, faces_order=None, face_boost=None):
 
         device = model_management.get_torch_device()
 
-        if isinstance(input_image, torch.Tensor) and input_image.device != device:
-            input_image = input_image.to(device)
+        if isinstance(original_image, torch.Tensor) and original_image.device != device:
+            original_image = original_image.to(device)
 
         if face_boost is not None:
             self.face_boost_enabled = face_boost["enabled"]
-            self.boost_model = face_boost["boost_model"]
+            self.boost_model = face_boost.get("face_restore_model")
             self.interpolation = face_boost["interpolation"]
             self.boost_model_visibility = face_boost["visibility"]
-            self.boost_cf_weight = face_boost["codeformer_weight"]
+            self.boost_cf_weight = face_boost["codeformer_fidelity"]
             self.restore = face_boost["restore_with_main_after"]
         else:
             self.face_boost_enabled = False
+
+        # Effective restore/detect models: the FaceBoost bundle wins when it
+        # carries one, otherwise the node's own loader inputs are used.
+        if self.face_boost_enabled and self.boost_model is not None:
+            restore_info = self.boost_model
+            restore_visibility, restore_fidelity = self.boost_model_visibility, self.boost_cf_weight
+        else:
+            restore_info = FaceRestore_model
+            restore_visibility, restore_fidelity = face_restore_visibility, codeformer_fidelity
+        det_name = detection_model_name(FaceDetection_model)
 
         if faces_order is None:
             faces_order = self.faces_order
@@ -396,24 +393,21 @@ class ReFactorFaceSwap:
         set_console_level(console_log_level)
 
         if not enabled:
-            return (input_image,face_model)
-        elif source_image is None and face_model is None:
-            logger.error("Please provide 'source_image' or `face_model`")
-            return (input_image,face_model)
-
-        if face_model == "none":
-            face_model = None
+            return (original_image, target_face_model)
+        elif target_face_image is None and target_face_model is None:
+            logger.error("Please provide 'target_face_image' or 'target_face_model'")
+            return (original_image, target_face_model)
 
         script = FaceSwapScript()
-        pil_images = batch_tensor_to_pil(input_image)
+        pil_images = batch_tensor_to_pil(original_image)
 
         if len(pil_images) > 0:
 
-            if source_image is not None:
-                source = tensor_to_pil(source_image)
+            if target_face_image is not None:
+                source = tensor_to_pil(target_face_image)
             else:
                 source = None
-            
+
             p = ProcessingImg2Img(pil_images)
             script.process(
                 p=p,
@@ -421,35 +415,32 @@ class ReFactorFaceSwap:
                 enable=True,
                 source_faces_index=source_faces_index,
                 faces_index=input_faces_index,
-                model=swap_model,
+                model=FaceSwap_model,
                 swap_in_source=True,
                 swap_in_generated=True,
                 gender_source=detect_gender_source,
                 gender_target=detect_gender_input,
-                face_model=face_model,
+                face_model=target_face_model,
                 faces_order=faces_order,
                 # face boost:
                 face_boost_enabled=self.face_boost_enabled,
                 face_restore_model=self.boost_model,
                 face_restore_visibility=self.boost_model_visibility,
-                codeformer_weight=self.boost_cf_weight,
+                codeformer_fidelity=self.boost_cf_weight,
                 interpolation=self.interpolation,
             )
             result = batched_pil_to_tensor(p.init_images)
-            # print(f"bbox={p.bbox}")
             if len(p.bbox) > 0:
                 self.last_swapped_bboxes = p.bbox
-                # self.last_swapped_indices = p.swapped_indexes
-            original_image = input_image
 
-            if face_model is None:
+            if target_face_model is None:
                 current_face_model = get_current_faces_model()
-                face_model_to_provide = current_face_model[0] if (current_face_model is not None and len(current_face_model) > 0) else face_model
+                face_model_to_provide = current_face_model[0] if (current_face_model is not None and len(current_face_model) > 0) else target_face_model
             else:
-                face_model_to_provide = face_model
+                face_model_to_provide = target_face_model
 
             if self.restore or not self.face_boost_enabled:
-                result = ReFactorFaceSwap.restore_face(self,result,face_restore_model,face_restore_visibility,codeformer_weight,facedetection)
+                result = ReFactorFaceSwap.restore_face(self, result, restore_info, restore_visibility, restore_fidelity, det_name)
 
         else:
             image_black = Image.new("RGB", (512, 512))
@@ -457,7 +448,7 @@ class ReFactorFaceSwap:
             face_model_to_provide = None
             original_image = result
 
-        return (result,face_model_to_provide,original_image)
+        return (result, face_model_to_provide, original_image)
 
 
 class ReFactorFaceSwapOpt:
@@ -466,17 +457,18 @@ class ReFactorFaceSwapOpt:
         return {
             "required": {
                 "enabled": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON"}),
-                "input_image": ("IMAGE",),
-                "swap_model": (list(model_names().keys()),),
-                "facedetection": (["retinaface_resnet50", "retinaface_mobile0.25", "YOLOv5l", "YOLOv5n"],),
-                "face_restore_model": (get_model_names(get_restorers),),
+                "original_image": ("IMAGE",),
+                "FaceSwap_model": ("FACE_SWAP_MODEL",),
                 "face_restore_visibility": ("FLOAT", {"default": 1, "min": 0.1, "max": 1, "step": 0.05}),
-                "codeformer_weight": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05}),
+                "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
+                                                  "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
             },
             "optional": {
-                "source_image": ("IMAGE",),
-                "face_model": ("FACE_MODEL",),
+                "target_face_image": ("IMAGE",),
+                "target_face_model": ("FACE_MODEL",),
                 "options": ("OPTIONS",),
+                "FaceRestore_model": ("FACE_RESTORE_MODEL",),
+                "FaceDetection_model": ("FACE_DETECT_MODEL",),
                 "face_boost": ("FACE_BOOST",),
             }
         }
@@ -503,7 +495,7 @@ class ReFactorFaceSwapOpt:
         self.boost_model_visibility = 1
         self.boost_cf_weight = 0.5
 
-    def execute(self, enabled, input_image, swap_model, facedetection, face_restore_model, face_restore_visibility, codeformer_weight, source_image=None, face_model=None, options=None, face_boost=None):
+    def execute(self, enabled, original_image, FaceSwap_model, face_restore_visibility, codeformer_fidelity, target_face_image=None, target_face_model=None, options=None, FaceRestore_model=None, FaceDetection_model=None, face_boost=None):
 
         if options is not None:
             self.faces_order = [options["input_faces_order"], options["source_faces_order"]]
@@ -521,7 +513,7 @@ class ReFactorFaceSwapOpt:
             self.face_boost_enabled = False
 
         result = ReFactorFaceSwap.execute(
-            self,enabled,input_image,swap_model,self.detect_gender_source,self.detect_gender_input,self.source_faces_index,self.input_faces_index,self.console_log_level,face_restore_model,face_restore_visibility,codeformer_weight,facedetection,source_image,face_model,self.faces_order, face_boost=face_boost
+            self,enabled,original_image,FaceSwap_model,self.detect_gender_source,self.detect_gender_input,self.source_faces_index,self.input_faces_index,self.console_log_level,face_restore_visibility,codeformer_fidelity,target_face_image,target_face_model,FaceRestore_model,FaceDetection_model,self.faces_order, face_boost=face_boost
         )
 
         return result
@@ -845,20 +837,24 @@ class ReFactorRestoreFace:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "facedetection": (["retinaface_resnet50", "retinaface_mobile0.25", "YOLOv5l", "YOLOv5n"],),
-                "model": (get_model_names(get_restorers),),
+                "FaceRestore_model": ("FACE_RESTORE_MODEL",),
                 "visibility": ("FLOAT", {"default": 1, "min": 0.0, "max": 1, "step": 0.05}),
-                "codeformer_weight": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05}),
+                "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
+                                                  "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
             },
+            "optional": {
+                "FaceDetection_model": ("FACE_DETECT_MODEL",),
+            }
         }
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "execute"
     CATEGORY = "ReFactor"
 
-    def execute(self, image, model, visibility, codeformer_weight, facedetection):
+    def execute(self, image, FaceRestore_model, visibility, codeformer_fidelity, FaceDetection_model=None):
         result = ReFactorFaceSwap.restore_face(
-            self, image, model, visibility, codeformer_weight, facedetection
+            self, image, FaceRestore_model, visibility, codeformer_fidelity,
+            detection_model_name(FaceDetection_model)
         )
         return (result,)
 
@@ -869,13 +865,14 @@ class ReFactorRestoreFaceAdvanced:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "facedetection": (["retinaface_resnet50", "retinaface_mobile0.25", "YOLOv5l", "YOLOv5n"],),
-                "model": (get_model_names(get_restorers),),
+                "FaceRestore_model": ("FACE_RESTORE_MODEL",),
                 "visibility": ("FLOAT", {"default": 1, "min": 0.0, "max": 1, "step": 0.05}),
-                "codeformer_weight": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05}),
+                "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
+                                                  "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
                 "face_selection": (["all", "filter", "largest"],{"default": "all"}),
             },
             "optional": {
+                "FaceDetection_model": ("FACE_DETECT_MODEL",),
                 "sort_by": (["area", "x_position", "y_position", "detection_confidence"],{"default": "area"}),
                 "reverse_order": ("BOOLEAN", {"default": False}),
                 "take_start": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
@@ -888,7 +885,7 @@ class ReFactorRestoreFaceAdvanced:
     CATEGORY = "ReFactor"
 
     def execute(
-            self, image, model, visibility, codeformer_weight, facedetection, face_selection, sort_by="area", reverse_order=False, take_start=0, take_count=1
+            self, image, FaceRestore_model, visibility, codeformer_fidelity, face_selection, sort_by="area", reverse_order=False, take_start=0, take_count=1, FaceDetection_model=None
         ):
 
         min_x_position=0.0
@@ -898,25 +895,29 @@ class ReFactorRestoreFaceAdvanced:
 
         result = image
 
-        face_restore_model = model
+        face_restore_model = FaceRestore_model
 
-        if face_restore_model != "none" and not model_management.processing_interrupted():
+        if face_restore_model is not None and not model_management.processing_interrupted():
 
             global FACE_SIZE, FACE_HELPER
 
             self.face_helper = FACE_HELPER
 
+            restore_model_name = face_restore_model.get("name") if isinstance(face_restore_model, dict) else face_restore_model
+
             faceSize = 512
-            if "1024" in face_restore_model.lower():
+            if "1024" in restore_model_name.lower():
                 faceSize = 1024
-            elif "2048" in face_restore_model.lower():
+            elif "2048" in restore_model_name.lower():
                 faceSize = 2048
 
-            logger.status(f"Restoring with {face_restore_model} | Face Size is set to {faceSize}")
+            logger.status(f"Restoring with {restore_model_name} | Face Size is set to {faceSize}")
 
-            model_path = _faceboost_restorer.ensure_facerestore_model(face_restore_model)
+            model_path = face_restore_model.get("path") if isinstance(face_restore_model, dict) else None
+            if not model_path or not os.path.exists(model_path):
+                model_path = _faceboost_restorer.ensure_facerestore_model(restore_model_name)
             if model_path is None:
-                logger.error(f"Face restoration model '{face_restore_model}' could not be found or downloaded.")
+                logger.error(f"Face restoration model '{restore_model_name}' could not be found or downloaded.")
                 return image
 
             device = model_management.get_torch_device()
@@ -934,7 +935,7 @@ class ReFactorRestoreFaceAdvanced:
                 codeformer_net.load_state_dict(checkpoint)
                 facerestore_model = codeformer_net.eval()
 
-            elif ".onnx" in face_restore_model:
+            elif ".onnx" in restore_model_name:
 
                 ort_session = create_session(model_path, providers=resolve_providers())
                 ort_session_inputs = {}
@@ -947,7 +948,7 @@ class ReFactorRestoreFaceAdvanced:
                 facerestore_model.to(device)
 
             if faceSize != FACE_SIZE or self.face_helper is None:
-                self.face_helper = FaceRestoreHelper(1, face_size=faceSize, crop_ratio=(1, 1), det_model=facedetection, save_ext='png', use_parse=True, device=device)
+                self.face_helper = FaceRestoreHelper(1, face_size=faceSize, crop_ratio=(1, 1), det_model=detection_model_name(FaceDetection_model), save_ext='png', use_parse=True, device=device)
                 FACE_SIZE = faceSize
                 FACE_HELPER = self.face_helper
 
@@ -1084,7 +1085,7 @@ class ReFactorRestoreFaceAdvanced:
 
                             else: # PTH models
 
-                                output = facerestore_model(cropped_face_t, w=codeformer_weight)[0] if "codeformer" in face_restore_model.lower() else facerestore_model(cropped_face_t)[0]
+                                output = facerestore_model(cropped_face_t, w=codeformer_fidelity)[0] if "codeformer" in restore_model_name.lower() else facerestore_model(cropped_face_t)[0]
                                 restored_face = tensor2img(output, rgb2bgr=True, min_max=(-1, 1))
 
                         del output
@@ -1247,11 +1248,14 @@ class ReFactorFaceBoost:
         return {
             "required": {
                 "enabled": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON"}),
-                "boost_model": (get_model_names(get_restorers),),
                 "interpolation": (["Nearest","Bilinear","Bicubic","Lanczos"], {"default": "Bicubic"}),
                 "visibility": ("FLOAT", {"default": 1, "min": 0.1, "max": 1, "step": 0.05}),
-                "codeformer_weight": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05}),
+                "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
+                                                  "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
                 "restore_with_main_after": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "FaceRestore_model": ("FACE_RESTORE_MODEL",),
             }
         }
 
@@ -1259,13 +1263,13 @@ class ReFactorFaceBoost:
     FUNCTION = "execute"
     CATEGORY = "ReFactor"
 
-    def execute(self,enabled,boost_model,interpolation,visibility,codeformer_weight,restore_with_main_after):
+    def execute(self, enabled, interpolation, visibility, codeformer_fidelity, restore_with_main_after, FaceRestore_model=None):
         face_boost: dict = {
             "enabled": enabled,
-            "boost_model": boost_model,
+            "face_restore_model": FaceRestore_model,
             "interpolation": interpolation,
             "visibility": visibility,
-            "codeformer_weight": codeformer_weight,
+            "codeformer_fidelity": codeformer_fidelity,
             "restore_with_main_after": restore_with_main_after,
         }
         return (face_boost, )
@@ -1363,6 +1367,10 @@ NODE_CLASS_MAPPINGS = {
     "ReFactorImageRGBA2RGB": ReFactorImageRGBA2RGB,
     "ReFactorUnload": ReFactorUnload,
     "ReFactorDLSS5Enhancer": ReFactorDLSS5Enhancer,
+    # --- Model Loaders ---
+    "ReFactorFaceSwapModelLoader": ReFactorFaceSwapModelLoader,
+    "ReFactorFaceRestoreModelLoader": ReFactorFaceRestoreModelLoader,
+    "ReFactorFaceDetectionModelLoader": ReFactorFaceDetectionModelLoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1386,4 +1394,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ReFactorImageRGBA2RGB": "Convert RGBA to RGB ⚡ ReFactor",
     "ReFactorUnload": "Unload ReFactor Models ⚡ ReFactor",
     "ReFactorDLSS5Enhancer": "DLSS5 Frame Enhancer ⚡ ReFactor",
+    # --- Model Loaders ---
+    "ReFactorFaceSwapModelLoader": "FaceSwap Model Loader ⚡ ReFactor",
+    "ReFactorFaceRestoreModelLoader": "FaceRestore Model Loader ⚡ ReFactor",
+    "ReFactorFaceDetectionModelLoader": "FaceDetection Model Loader ⚡ ReFactor",
 }

@@ -39,7 +39,7 @@ class FaceSwapScript:
         face_boost_enabled,
         face_restore_model,
         face_restore_visibility,
-        codeformer_weight,
+        codeformer_fidelity,
         interpolation,
     ):
         self.enable = enable
@@ -55,7 +55,7 @@ class FaceSwapScript:
             self.face_boost_enabled = face_boost_enabled
             self.face_restore_model = face_restore_model
             self.face_restore_visibility = face_restore_visibility
-            self.codeformer_weight = codeformer_weight
+            self.codeformer_fidelity = codeformer_fidelity
             self.interpolation = interpolation
             self.source_faces_index = [
                 int(x) for x in source_faces_index.strip(",").split(",") if x.isnumeric()
@@ -101,7 +101,7 @@ class FaceSwapScript:
                         face_boost_enabled=self.face_boost_enabled,
                         face_restore_model=self.face_restore_model,
                         face_restore_visibility=self.face_restore_visibility,
-                        codeformer_weight=self.codeformer_weight,
+                        codeformer_fidelity=self.codeformer_fidelity,
                         interpolation=self.interpolation,
                     )
                     p.init_images[0] = result
@@ -122,7 +122,7 @@ class FaceSwapScript:
                         face_boost_enabled=self.face_boost_enabled,
                         face_restore_model=self.face_restore_model,
                         face_restore_visibility=self.face_restore_visibility,
-                        codeformer_weight=self.codeformer_weight,
+                        codeformer_fidelity=self.codeformer_fidelity,
                         interpolation=self.interpolation,
                     )
                     p.init_images = result

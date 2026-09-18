@@ -1,0 +1,148 @@
+"""Dedicated model-loader nodes (the facerestore_cf pattern, generalized).
+
+Monolithic dropdowns inside the swap node are replaced by three small loader
+nodes, each with its own typed output — cleaner to maintain, cache-friendly,
+and the workflow itself documents which models are in play:
+
+- ReFactor FaceSwap Model Loader      -> FACE_SWAP_MODEL   (onnx swap engines:
+    inswapper_128 / reswapper / hyperswap families; persistent cached sessions)
+- ReFactor FaceRestore Model Loader   -> FACE_RESTORE_MODEL (GFPGAN / CodeFormer /
+    GPEN weights; loaded per-run on Comfy's device)
+- ReFactor FaceDetection Model Loader -> FACE_DETECT_MODEL (retinaface / yolov5face
+    detector weights used by the face-boost alignment step)
+
+Swap models cannot share the restore loader: they are ONNX sessions with a
+completely different lifecycle (single persistent session, family routing,
+emap extraction), hence the separate loader + type.
+"""
+
+import os
+
+import folder_paths
+
+from . import model_paths
+from .faceboost import restorer
+from .log import logger
+from .swapper import find_swap_model_file
+
+FACE_SWAP_MODEL = "FACE_SWAP_MODEL"
+FACE_RESTORE_MODEL = "FACE_RESTORE_MODEL"
+FACE_DETECT_MODEL = "FACE_DETECT_MODEL"
+
+DETECTION_MODELS = [
+    "retinaface_resnet50",
+    "retinaface_mobile0.25",
+    "YOLOv5l",
+    "YOLOv5n",
+]
+
+_DEFAULT_DETECTION = "retinaface_resnet50"
+
+
+def get_swap_model_choices():
+    """(display_name, abs_path) for every swap model in the three folders."""
+    choices = []
+    for folder in (model_paths.insightface_path, model_paths.reswapper_path, model_paths.hyperswap_path):
+        if not os.path.isdir(folder):
+            continue
+        for f in sorted(os.listdir(folder)):
+            if f.lower().endswith((".onnx", ".pth")):
+                choices.append((f, os.path.join(folder, f)))
+    return choices
+
+
+def get_restore_model_choices():
+    """Names available in models/facerestore_models, plus canonical downloads."""
+    names = set()
+    if os.path.isdir(model_paths.facerestore_models_path):
+        for f in os.listdir(model_paths.facerestore_models_path):
+            if f.lower().endswith((".pth", ".onnx", ".safetensors")):
+                names.add(f)
+    names.update(restorer.FACE_RESTORE_MODEL_URLS.keys())
+    return sorted(names, key=str.lower)
+
+
+class ReFactorFaceSwapModelLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        names = [name for name, _ in get_swap_model_choices()]
+        return {
+            "required": {
+                "FaceSwap_model": (["none"] + names,
+                                   {"tooltip": "Swap model from models/insightface, models/reswapper or "
+                                               "models/hyperswap. 'none' disables swapping (pass-through)."}),
+            }
+        }
+
+    RETURN_TYPES = (FACE_SWAP_MODEL,)
+    RETURN_NAMES = ("FaceSwap_model",)
+    FUNCTION = "load_model"
+    CATEGORY = "ReFactor/loaders"
+
+    def load_model(self, FaceSwap_model):
+        if FaceSwap_model == "none":
+            return (None,)
+        path = find_swap_model_file(FaceSwap_model)
+        if path is None:
+            raise FileNotFoundError(
+                f"[ReFactor] Swap model '{FaceSwap_model}' vanished from the models folders — refresh the workflow."
+            )
+        logger.status(f"FaceSwap model: {FaceSwap_model}")
+        return ({"name": FaceSwap_model, "path": path},)
+
+
+class ReFactorFaceRestoreModelLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "FaceRestore_model": (["none"] + get_restore_model_choices(),
+                                      {"tooltip": "Face-restoration weights from models/facerestore_models. "
+                                                  "Canonical GFPGAN/CodeFormer/GPEN entries download "
+                                                  "automatically when the loader executes."}),
+            }
+        }
+
+    RETURN_TYPES = (FACE_RESTORE_MODEL,)
+    RETURN_NAMES = ("FaceRestore_model",)
+    FUNCTION = "load_model"
+    CATEGORY = "ReFactor/loaders"
+
+    def load_model(self, FaceRestore_model):
+        if FaceRestore_model == "none":
+            return (None,)
+        path = restorer.ensure_facerestore_model(FaceRestore_model)
+        if path is None:
+            raise FileNotFoundError(
+                f"[ReFactor] Face-restore model '{FaceRestore_model}' could not be found or downloaded. "
+                f"Place it into {model_paths.facerestore_models_path}"
+            )
+        logger.status(f"FaceRestore model: {FaceRestore_model}")
+        return ({"name": FaceRestore_model, "path": path},)
+
+
+class ReFactorFaceDetectionModelLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "FaceDetection_model": (DETECTION_MODELS,
+                                        {"tooltip": "Face detector used by the face-boost alignment "
+                                                    "(weights download on first use)."}),
+            }
+        }
+
+    RETURN_TYPES = (FACE_DETECT_MODEL,)
+    RETURN_NAMES = ("FaceDetection_model",)
+    FUNCTION = "load_model"
+    CATEGORY = "ReFactor/loaders"
+
+    def load_model(self, FaceDetection_model):
+        return ({"name": FaceDetection_model},)
+
+
+def detection_model_name(info) -> str:
+    """Convenience: extraction of the detector name with the sane default."""
+    if isinstance(info, dict) and info.get("name"):
+        return info["name"]
+    return _DEFAULT_DETECTION

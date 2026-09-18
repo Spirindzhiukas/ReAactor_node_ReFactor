@@ -71,8 +71,18 @@ def ensure_facerestore_model(face_restore_model):
 def get_restored_face(cropped_face,
                       face_restore_model,
                       face_restore_visibility,
-                      codeformer_weight,
+                      codeformer_fidelity,
                       interpolation: str = "Bicubic"):
+    """face_restore_model: FACE_RESTORE_MODEL dict {"name","path"} or a plain filename."""
+
+    if isinstance(face_restore_model, dict):
+        restore_model_name = face_restore_model.get("name") or os.path.basename(face_restore_model.get("path") or "")
+        model_path = face_restore_model.get("path")
+        if not model_path or not os.path.exists(model_path):
+            model_path = ensure_facerestore_model(restore_model_name)
+    else:
+        restore_model_name = face_restore_model
+        model_path = ensure_facerestore_model(face_restore_model)
 
     if interpolation == "Bicubic":
         interpolate = cv2.INTER_CUBIC
@@ -84,14 +94,14 @@ def get_restored_face(cropped_face,
         interpolate = cv2.INTER_LANCZOS4
     
     face_size = 512
-    if "1024" in face_restore_model.lower():
+    if "1024" in restore_model_name.lower():
         face_size = 1024
-    elif "2048" in face_restore_model.lower():
+    elif "2048" in restore_model_name.lower():
         face_size = 2048
 
     scale = face_size / cropped_face.shape[0]
     
-    logger.status(f"Boosting the Face with {face_restore_model} | Face Size is set to {face_size} with Scale Factor = {scale} and '{interpolation}' interpolation")
+    logger.status(f"Boosting the Face with {restore_model_name} | Face Size is set to {face_size} with Scale Factor = {scale} and '{interpolation}' interpolation")
 
     cropped_face = cv2.resize(cropped_face, (face_size, face_size), interpolation=interpolate)
 
@@ -99,10 +109,9 @@ def get_restored_face(cropped_face,
     # and detail preservation. Nearest is predictably unusable, Linear produces too much aliasing, and Lanczos produces
     # too many hallucinations and artifacts/fringing.
 
-    model_path = ensure_facerestore_model(face_restore_model)
     if model_path is None:
         raise FileNotFoundError(
-            f"Face restoration model '{face_restore_model}' not found in models/facerestore_models "
+            f"Face restoration model '{restore_model_name}' not found in models/facerestore_models "
             "and could not be fetched."
         )
     device = model_management.get_torch_device()
@@ -134,7 +143,7 @@ def get_restored_face(cropped_face,
 
             else:  # PTH models
 
-                if "codeformer" in face_restore_model.lower():
+                if "codeformer" in restore_model_name.lower():
                     codeformer_net = ARCH_REGISTRY.get("CodeFormer")(
                         dim_embd=512,
                         codebook_size=1024,
@@ -150,8 +159,8 @@ def get_restored_face(cropped_face,
                     facerestore_model = model_loading.load_state_dict(sd).eval()
                     facerestore_model.to(device)
 
-                output = facerestore_model(cropped_face_t, w=codeformer_weight)[
-                    0] if "codeformer" in face_restore_model.lower() else facerestore_model(cropped_face_t)[0]
+                output = facerestore_model(cropped_face_t, w=codeformer_fidelity)[
+                    0] if "codeformer" in restore_model_name.lower() else facerestore_model(cropped_face_t)[0]
                 restored_face = tensor2img(output, rgb2bgr=True, min_max=(-1, 1))
 
         del facerestore_model

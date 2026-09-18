@@ -78,25 +78,67 @@ def _getAnalysisModel_locked(det_size=(640, 640)):
     ANALYSIS_MODEL.prepare(ctx_id=0, det_size=det_size)
     ANALYSIS_MODELS[str(det_size[0])] = ANALYSIS_MODEL
 
-def getFaceSwapModel(model_path: str):
+def find_swap_model_file(name: str):
+    """Search the swap-model folders for an exact filename match."""
+    for folder in (insightface_path, reswapper_path, hyperswap_path):
+        candidate = os.path.join(folder, name)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def resolve_swap_model_path(model):
+    """Resolve a swap-model selection to an existing absolute path.
+
+    Accepts:
+      - dict {"name": filename, "path": abs_path} from the FaceSwap Model Loader
+      - a plain filename (searched in the three swap-model folders)
+      - an existing absolute path
+
+    Raises FileNotFoundError with actionable guidance instead of leaving the
+    caller with an unset path (the historical UnboundLocalError source).
+    """
+    if isinstance(model, dict):
+        path = model.get("path")
+        name = model.get("name") or (os.path.basename(path) if path else None)
+        if path and os.path.exists(path):
+            return os.path.realpath(path)
+        if name:
+            found = find_swap_model_file(name)
+            if found:
+                return os.path.realpath(found)
+        raise FileNotFoundError(
+            f"[ReFactor] Swap model not found: {name!r} "
+            f"(searched {insightface_path}, {reswapper_path}, {hyperswap_path})"
+        )
+    if os.path.isabs(model) and os.path.exists(model):
+        return os.path.realpath(model)
+    found = find_swap_model_file(os.path.basename(model))
+    if found:
+        return os.path.realpath(found)
+    raise FileNotFoundError(
+        f"[ReFactor] Swap model not found: {model!r} — place it into "
+        f"{insightface_path} (or models/reswapper, models/hyperswap)"
+    )
+
+
+def getFaceSwapModel(model):
     with _model_lock:
-        _getFaceSwapModel_locked(model_path)
+        _getFaceSwapModel_locked(model)
     return FS_MODEL
 
 
-def _getFaceSwapModel_locked(model_path: str):
+def _getFaceSwapModel_locked(model):
     global FS_MODEL, CURRENT_FS_MODEL_PATH
+    model_path = resolve_swap_model_path(model)
     if FS_MODEL is None or CURRENT_FS_MODEL_PATH is None or CURRENT_FS_MODEL_PATH != model_path:
         CURRENT_FS_MODEL_PATH = model_path
         FS_MODEL = unload_model(FS_MODEL)
 
         model_filename = os.path.basename(model_path)
         if "hyperswap" in model_filename.lower(): # Hyperswap family
-            model_path = os.path.join(hyperswap_path, model_filename)
             FS_MODEL = HyperSwapper(model_path, providers=resolve_providers())
-        else: # INSwapper / Reswapper
-            if "reswapper" in model_filename.lower():
-                model_path = os.path.join(reswapper_path, model_filename)
+        else: # INSwapper / Reswapper families
             FS_MODEL = INSwapper(model_path, providers=resolve_providers())
 
 def sort_by_order(face, order: str):
@@ -217,7 +259,7 @@ def swap_face(
     face_boost_enabled: bool = False,
     face_restore_model = None,
     face_restore_visibility: int = 1,
-    codeformer_weight: float = 0.5,
+    codeformer_fidelity: float = 0.5,
     interpolation: str = "Bicubic",
 ):
     global SOURCE_FACES, SOURCE_IMAGE_HASH, TARGET_FACES, TARGET_IMAGE_HASH
@@ -322,14 +364,7 @@ def swap_face(
                 logger.status("No valid source face(s) found in the provided Index after gender filter")
             else:
                 result = target_img
-                if "inswapper" in model:
-                    model_path = os.path.join(insightface_path, model)
-                elif "reswapper" in model:
-                    model_path = os.path.join(reswapper_path, model)
-                elif "hyperswap" in model:
-                    model_path = os.path.join(hyperswap_path, model)
-                
-                face_swapper = getFaceSwapModel(model_path)
+                face_swapper = getFaceSwapModel(model)
 
                 source_face_idx = 0
 
@@ -346,7 +381,7 @@ def swap_face(
                         if face_boost_enabled and "hyperswap" not in model:
                             logger.status(f"Face Boost is enabled (inswapper/reswapper only)")
                             bgr_fake, M = face_swapper.get(result, target_face, source_face_to_use, paste_back=False)
-                            bgr_fake, scale = restorer.get_restored_face(bgr_fake, face_restore_model, face_restore_visibility, codeformer_weight, interpolation)
+                            bgr_fake, scale = restorer.get_restored_face(bgr_fake, face_restore_model, face_restore_visibility, codeformer_fidelity, interpolation)
                             M *= scale
                             result = swapper.in_swap(result, bgr_fake, M)
                         else:
@@ -384,7 +419,7 @@ def swap_face_many(
     face_boost_enabled: bool = False,
     face_restore_model = None,
     face_restore_visibility: int = 1,
-    codeformer_weight: float = 0.5,
+    codeformer_fidelity: float = 0.5,
     interpolation: str = "Bicubic",
 ):
     global SOURCE_FACES, SOURCE_IMAGE_HASH, TARGET_FACES_LIST, TARGET_IMAGE_LIST_HASH
@@ -503,14 +538,7 @@ def swap_face_many(
                 logger.status("No valid source face(s) found in the provided Index after gender filter")
             else:
                 results = target_imgs
-                if "inswapper" in model:
-                    model_path = os.path.join(insightface_path, model)
-                elif "reswapper" in model:
-                    model_path = os.path.join(reswapper_path, model)
-                elif "hyperswap" in model:
-                    model_path = os.path.join(hyperswap_path, model)
-
-                face_swapper = getFaceSwapModel(model_path)
+                face_swapper = getFaceSwapModel(model)
 
                 source_face_idx = 0
                 pbar = progress_bar(len(target_imgs))
@@ -529,7 +557,7 @@ def swap_face_many(
                             result = target_img
                             if face_boost_enabled and "hyperswap" not in model:
                                 bgr_fake, M = face_swapper.get(target_img, target_face_single, source_face_to_use, paste_back=False)
-                                bgr_fake, scale = restorer.get_restored_face(bgr_fake, face_restore_model, face_restore_visibility, codeformer_weight, interpolation)
+                                bgr_fake, scale = restorer.get_restored_face(bgr_fake, face_restore_model, face_restore_visibility, codeformer_fidelity, interpolation)
                                 M *= scale
                                 result = swapper.in_swap(target_img, bgr_fake, M)
                             else:
