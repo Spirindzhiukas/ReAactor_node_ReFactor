@@ -72,11 +72,18 @@ def get_restored_face(cropped_face,
 
     if isinstance(face_restore_model, dict):
         restore_model_name = face_restore_model.get("name") or os.path.basename(face_restore_model.get("path") or "")
+    else:
+        restore_model_name = face_restore_model
+
+    if not restore_model_name or restore_model_name == "none":
+        logger.status("Face Boost is enabled but no restore model is connected - boosting skipped")
+        return cropped_face, 1.0
+
+    if isinstance(face_restore_model, dict):
         model_path = face_restore_model.get("path")
         if not model_path or not os.path.exists(model_path):
             model_path = ensure_facerestore_model(restore_model_name)
     else:
-        restore_model_name = face_restore_model
         model_path = ensure_facerestore_model(face_restore_model)
 
     if interpolation == "Bicubic":

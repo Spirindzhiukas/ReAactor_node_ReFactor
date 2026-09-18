@@ -166,6 +166,8 @@ class ReFactorFaceSwap:
             self.face_helper = FACE_HELPER
 
             restore_model_name = face_restore_model.get("name") if isinstance(face_restore_model, dict) else face_restore_model
+            if restore_model_name in (None, "", "none"):
+                return input_image
 
             faceSize = 512
             if "1024" in restore_model_name.lower():
@@ -184,7 +186,12 @@ class ReFactorFaceSwap:
 
             device = model_management.get_torch_device()
 
-            if "codeformer" in restore_model_name.lower():
+            if ".onnx" in restore_model_name: # ONNX first ("codeformer.onnx" also contains "codeformer"!)
+
+                ort_session = create_session(model_path, providers=resolve_providers())
+                facerestore_model = ort_session
+
+            elif "codeformer" in restore_model_name.lower():
 
                 codeformer_net = ARCH_REGISTRY.get("CodeFormer")(
                     dim_embd=512,
@@ -196,11 +203,6 @@ class ReFactorFaceSwap:
                 checkpoint = torch.load(model_path, weights_only=True, map_location="cpu")["params_ema"]
                 codeformer_net.load_state_dict(checkpoint)
                 facerestore_model = codeformer_net.eval()
-
-            elif ".onnx" in restore_model_name:
-
-                ort_session = create_session(model_path, providers=resolve_providers())
-                facerestore_model = ort_session
 
             else:
 
@@ -303,16 +305,16 @@ class ReFactorFaceSwap:
                                     output = facerestore_model(cropped_face_t, w=codeformer_fidelity)[0] if "codeformer" in restore_model_name.lower() else facerestore_model(cropped_face_t)[0]
                                     restored_face = tensor2img(output, rgb2bgr=True, min_max=(-1, 1))
 
-                            del output
                             torch.cuda.empty_cache()
+                            restored_count += 1
 
                         except Exception as error:
 
-                            print(f"\tFailed inference: {error}", file=sys.stderr)
-                            # restored_face = tensor2img(cropped_face_t, rgb2bgr=True, min_max=(-1, 1))
+                            logger.error(f"Face restore inference failed for face #{idx} ({restore_model_name}): {error}")
                             restored_face = cropped_face.copy()
                         
                     else:
+                        logger.status(f"Face #{idx}: restore skipped (does not overlap any swapped face bbox)")
                         restored_face = cropped_face.copy()
                     
                     if face_restore_visibility < 1:
@@ -320,8 +322,6 @@ class ReFactorFaceSwap:
 
                     restored_face = restored_face.astype("uint8")
                     self.face_helper.add_restored_face(restored_face)
-                    restored_count += 1
-                    restored_count += 1
                 
                 self.face_helper.get_inverse_affine(None)
 
@@ -911,6 +911,8 @@ class ReFactorRestoreFaceAdvanced:
             self.face_helper = FACE_HELPER
 
             restore_model_name = face_restore_model.get("name") if isinstance(face_restore_model, dict) else face_restore_model
+            if restore_model_name in (None, "", "none"):
+                return image
 
             faceSize = 512
             if "1024" in restore_model_name.lower():
@@ -929,7 +931,12 @@ class ReFactorRestoreFaceAdvanced:
 
             device = model_management.get_torch_device()
 
-            if "codeformer" in face_restore_model.lower():
+            if ".onnx" in restore_model_name: # ONNX first ("codeformer.onnx" also contains "codeformer"!)
+
+                ort_session = create_session(model_path, providers=resolve_providers())
+                facerestore_model = ort_session
+
+            elif "codeformer" in restore_model_name.lower():
 
                 codeformer_net = ARCH_REGISTRY.get("CodeFormer")(
                     dim_embd=512,
@@ -941,11 +948,6 @@ class ReFactorRestoreFaceAdvanced:
                 checkpoint = torch.load(model_path, weights_only=True, map_location="cpu")["params_ema"]
                 codeformer_net.load_state_dict(checkpoint)
                 facerestore_model = codeformer_net.eval()
-
-            elif ".onnx" in restore_model_name:
-
-                ort_session = create_session(model_path, providers=resolve_providers())
-                facerestore_model = ort_session
 
             else:
 
@@ -1087,12 +1089,12 @@ class ReFactorRestoreFaceAdvanced:
                                 output = facerestore_model(cropped_face_t, w=codeformer_fidelity)[0] if "codeformer" in restore_model_name.lower() else facerestore_model(cropped_face_t)[0]
                                 restored_face = tensor2img(output, rgb2bgr=True, min_max=(-1, 1))
 
-                        del output
                         torch.cuda.empty_cache()
+                        restored_count += 1
 
                     except Exception as error:
 
-                        print(f"\tFailed inference: {error}", file=sys.stderr)
+                        logger.error(f"Face restore inference failed for face #{idx} ({restore_model_name}): {error}")
                         restored_face = cropped_face.copy()
 
                     if visibility < 1:

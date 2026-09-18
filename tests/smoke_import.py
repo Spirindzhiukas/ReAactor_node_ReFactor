@@ -147,6 +147,8 @@ def install_stubs():
     cu.ProgressBar = lambda n=0: types.SimpleNamespace(update=lambda *a: None, current=0)
     cu.load_torch_file = lambda *a, **k: {}
     cu.common_upscale = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("runtime op in stub env"))
+    comfy.model_management = mm  # so `import comfy.model_management as x` binds the configured stub
+    comfy.utils = cu
     sys.modules["comfy"] = comfy
     sys.modules["comfy.model_management"] = mm
     sys.modules["comfy.utils"] = cu

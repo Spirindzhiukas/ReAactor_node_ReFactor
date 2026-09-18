@@ -50,6 +50,149 @@ class FakeOrtSession:
         return [np.zeros((1, 3, h, w), dtype=np.float32)]
 
 
+class _FakeHelper:
+    """Minimal FaceRestoreHelper stand-in for the main restore path."""
+
+    def __init__(self, crops):
+        self.cropped_faces = list(crops)
+        self.det_faces = [(10.0, 10.0, 210.0, 210.0, 0.99) for _ in crops]
+        self.captured = []  # survives clean_all()
+        self.input_img = None
+
+    def clean_all(self):
+        pass
+
+    def read_image(self, img):
+        self.input_img = img
+
+    def get_face_landmarks_5(self, **k):
+        pass
+
+    def align_warp_face(self):
+        pass
+
+    def add_restored_face(self, face):
+        self.captured.append(face)
+
+    def get_inverse_affine(self, x):
+        pass
+
+    def paste_faces_to_input_image(self, **k):
+        return self.input_img.copy()
+
+
+class _WhiteOrt:
+    """ORT session that 'restores' by returning an all-white face."""
+
+    def __init__(self):
+        self.fed = False
+
+    def get_inputs(self):
+        class _I:
+            name = "input"
+        return [_I()]
+
+    def run(self, _names, feed):
+        self.fed = True
+        return [np.ones((1, 3, 512, 512), dtype=np.float32)]
+
+
+class _ImgWrap:
+    def __init__(self, arr):
+        self.arr = arr
+    def cpu(self):
+        return self
+    def numpy(self):
+        return self.arr
+
+
+def test_main_path_onnx(pkg, check):
+    """Regression: the ONNX branch in restore_face() used to fall through to
+    a leftover `del output` -> UnboundLocalError -> except -> the UNRESTORED
+    crop was pasted back, making every ONNX restorer produce identical output.
+    Also pins .onnx-before-codeformer dispatch (codeformer.onnx used to hit
+    torch.load) and the empty-model-name guard."""
+    import importlib
+    import tempfile
+
+    nodes_mod = importlib.import_module("ReAactor_node_ReFactor.nodes")
+
+    crop = np.zeros((512, 512, 3), dtype=np.uint8)
+    helper = _FakeHelper([crop])
+    white = _WhiteOrt()
+
+    saved = {k: getattr(nodes_mod, k) for k in ("FACE_SIZE", "FACE_HELPER", "ARCH_REGISTRY")}
+    nodes_mod.FACE_HELPER = helper
+    nodes_mod.FACE_SIZE = 512
+    nodes_mod.create_session = lambda path, providers=None: white
+    class _T:  # minimal tensor stand-in (the ONNX branch ignores it)
+        def unsqueeze(self, i):
+            return self
+        def to(self, d):
+            return self
+    nodes_mod.img2tensor = lambda img, bgr2rgb=True, float32=False: _T()
+    nodes_mod.normalize = lambda *a, **k: None
+
+    class _NoArch:
+        @staticmethod
+        def get(*a, **k):
+            raise AssertionError("CodeFormer arch must not be built for an ONNX restore model")
+
+    nodes_mod.ARCH_REGISTRY = _NoArch
+    _torch = sys.modules["torch"]
+    saved_torch = {k: getattr(_torch, k, None) for k in ("from_numpy", "no_grad", "cuda", "load")}
+
+    class _Ctx:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def __call__(self, f=None, **k):
+            return self if f is None else f
+
+    class _NoGradFactory2:
+        def __call__(self, *a, **k):
+            return _Ctx()
+    _torch.from_numpy = lambda a: a
+    _torch.no_grad = _NoGradFactory2()
+    _torch.cuda = types.SimpleNamespace(empty_cache=lambda: None, is_available=lambda: False)
+    def _no_torch_load(*a, **k):
+        raise AssertionError("torch.load must not be called for an ONNX restore model")
+    _torch.load = _no_torch_load
+    try:
+        ns = types.SimpleNamespace(restore_swapped_only=False, last_swapped_bboxes=None)
+        with tempfile.TemporaryDirectory() as td:
+            model = os.path.join(td, "GPEN-BFR-512.onnx")
+            open(model, "wb").write(b"stub")
+            inp = _ImgWrap(np.zeros((1, 512, 512, 3), dtype=np.float32))
+            main_cls = pkg.NODE_CLASS_MAPPINGS["ReFactorFaceSwap"]
+            main_cls.restore_face(
+                ns, inp, {"name": "GPEN-BFR-512.onnx", "path": model}, 1.0, 0.5, "retinaface_resnet50")
+            check("main path: ONNX session actually fed", white.fed)
+            check("main path: restored face differs from crop (no silent except-fallback)",
+                  len(helper.captured) == 1 and helper.captured[-1].min() == 255)
+
+            white.fed = False
+            model2 = os.path.join(td, "codeformer.onnx")
+            open(model2, "wb").write(b"stub")
+            main_cls = pkg.NODE_CLASS_MAPPINGS["ReFactorFaceSwap"]
+            main_cls.restore_face(
+                ns, inp, {"name": "codeformer.onnx", "path": model2}, 1.0, 0.5, "retinaface_resnet50")
+            check("main path: codeformer.onnx routed to ONNX session (never torch.load)", white.fed)
+
+            # empty restore-model name -> restore skipped, returns input unchanged
+            inp2 = _ImgWrap(np.full((1, 64, 64, 3), 0.5, dtype=np.float32))
+            out = main_cls.restore_face(
+                ns, inp2, {"name": None, "path": None}, 1.0, 0.5, "retinaface_resnet50")
+            check("main path: empty model name skips restore gracefully", out is inp2)
+    finally:
+        for k, v in saved.items():
+            setattr(nodes_mod, k, v)
+        for k, v in saved_torch.items():
+            if v is not None:
+                setattr(_torch, k, v)
+
+
 def main():
     sys.path.insert(0, str(REPO / "tests"))
     from smoke_import import install_stubs
@@ -98,13 +241,19 @@ def main():
     restorer.normalize = lambda *a, **k: None
 
     class _NullCtx:
+        """Context manager AND decorator, like real torch.no_grad."""
         def __enter__(self):
             return self
         def __exit__(self, *a):
             return False
+        def __call__(self, f=None, **k):
+            return self if f is None else f
 
     _torch_mod = sys.modules["torch"]
-    _torch_mod.no_grad = _NullCtx
+    class _NoGradFactory:
+        def __call__(self, *a, **k):
+            return _NullCtx()
+    _torch_mod.no_grad = _NoGradFactory()
     class _Cuda:
         @staticmethod
         def empty_cache():
@@ -156,6 +305,19 @@ def main():
     check("swap-family files filtered from restore choices",
           all(not any(h in n.lower() for h in loaders._SWAP_FAMILY_HINTS)
               for n in loaders.get_restore_model_choices()))
+
+    # ---- Face Boost with NO restore model connected: skip, don't crash ------
+    crop = np.zeros((64, 64, 3), dtype=np.uint8)
+    out, scale = restorer.get_restored_face(crop, None, 1, 0.5)
+    check("boost with None model: skipped gracefully", scale == 1.0 and (out == crop).all())
+    out, scale = restorer.get_restored_face(crop, {"name": None, "path": None}, 1, 0.5)
+    check("boost with empty model dict: skipped gracefully", scale == 1.0 and (out == crop).all())
+
+    # ---- main restore path end-to-end (stubbed helper + ORT) ----------------
+    import importlib
+    sys.path.insert(0, str(REPO.parent))
+    pkg = importlib.import_module("ReAactor_node_ReFactor")
+    test_main_path_onnx(pkg, check)
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
