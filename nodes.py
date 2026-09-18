@@ -39,6 +39,7 @@ from .rfactor.loaders import (
 from .rfactor.dlssnr import ReFactorDLSS5Enhancer
 from .rfactor.torch_utils import normalize_ as normalize, stat_mode
 from .rfactor.utils import (
+    run_facerestore_onnx,
     batch_tensor_to_pil,
     batched_pil_to_tensor,
     tensor_to_pil,
@@ -199,7 +200,6 @@ class ReFactorFaceSwap:
             elif ".onnx" in restore_model_name:
 
                 ort_session = create_session(model_path, providers=resolve_providers())
-                ort_session_inputs = {}
                 facerestore_model = ort_session
 
             else:
@@ -241,6 +241,8 @@ class ReFactorFaceSwap:
                 
                 # restored_face = None
                 restored_faces = []
+                detected_faces = len(self.face_helper.cropped_faces)
+                restored_count = 0
                 
                 # берем сохранённые bbox из swap (или None)
                 swapped_bboxes = getattr(self, "last_swapped_bboxes", None)
@@ -292,18 +294,9 @@ class ReFactorFaceSwap:
 
                             with torch.no_grad():
 
-                                if ".onnx" in face_restore_model: # ONNX models
+                                if ".onnx" in restore_model_name: # ONNX models
 
-                                    for ort_session_input in ort_session.get_inputs():
-                                        if ort_session_input.name == "input":
-                                            cropped_face_prep = prepare_cropped_face(cropped_face)
-                                            ort_session_inputs[ort_session_input.name] = cropped_face_prep
-                                        if ort_session_input.name == "weight":
-                                            weight = np.array([ 1 ], dtype = np.double)
-                                            ort_session_inputs[ort_session_input.name] = weight
-
-                                    output = ort_session.run(None, ort_session_inputs)[0][0]
-                                    restored_face = normalize_cropped_face(output)
+                                    restored_face = run_facerestore_onnx(ort_session, cropped_face)
 
                                 else: # PTH models
 
@@ -327,6 +320,8 @@ class ReFactorFaceSwap:
 
                     restored_face = restored_face.astype("uint8")
                     self.face_helper.add_restored_face(restored_face)
+                    restored_count += 1
+                    restored_count += 1
                 
                 self.face_helper.get_inverse_affine(None)
 
@@ -335,6 +330,10 @@ class ReFactorFaceSwap:
 
                 if original_resolution != restored_img.shape[0:2]:
                     restored_img = cv2.resize(restored_img, (0, 0), fx=original_resolution[1]/restored_img.shape[1], fy=original_resolution[0]/restored_img.shape[0], interpolation=cv2.INTER_AREA)
+
+                logger.status(f"Face restoration applied to {restored_count}/{detected_faces} detected face(s)")
+                if restored_count == 0:
+                    logger.status("No faces were restored (none matched the swapped regions or none detected)")
 
                 self.face_helper.clean_all()
 
@@ -362,7 +361,7 @@ class ReFactorFaceSwap:
         return result
 
 
-    def execute(self, enabled, original_image, FaceSwap_model, detect_gender_source, detect_gender_input, source_faces_index, input_faces_index, console_log_level, face_restore_visibility, codeformer_fidelity, target_face_image=None, target_face_model=None, FaceRestore_model=None, FaceDetection_model=None, faces_order=None, face_boost=None):
+    def execute(self, enabled, original_image, face_restore_visibility, codeformer_fidelity, detect_gender_source, detect_gender_input, source_faces_index, input_faces_index, console_log_level, FaceSwap_model=None, FaceRestore_model=None, FaceDetection_model=None, target_face_image=None, target_face_model=None, face_boost=None, faces_order=None):
 
         device = model_management.get_torch_device()
 
@@ -503,7 +502,7 @@ class ReFactorFaceSwapOpt:
         self.boost_model_visibility = 1
         self.boost_cf_weight = 0.5
 
-    def execute(self, enabled, original_image, FaceSwap_model, face_restore_visibility, codeformer_fidelity, target_face_image=None, target_face_model=None, options=None, FaceRestore_model=None, FaceDetection_model=None, face_boost=None):
+    def execute(self, enabled, original_image, face_restore_visibility, codeformer_fidelity, FaceSwap_model=None, FaceRestore_model=None, FaceDetection_model=None, target_face_image=None, target_face_model=None, options=None, face_boost=None):
 
         if options is not None:
             self.faces_order = [options["input_faces_order"], options["source_faces_order"]]
@@ -946,7 +945,6 @@ class ReFactorRestoreFaceAdvanced:
             elif ".onnx" in restore_model_name:
 
                 ort_session = create_session(model_path, providers=resolve_providers())
-                ort_session_inputs = {}
                 facerestore_model = ort_session
 
             else:
@@ -1067,6 +1065,8 @@ class ReFactorRestoreFaceAdvanced:
                 # Face-Filter Mode END
                 
                 restored_face = None
+                detected_faces = len(self.face_helper.cropped_faces)
+                restored_count = 0
 
                 for idx, cropped_face in enumerate(self.face_helper.cropped_faces):
 
@@ -1078,18 +1078,9 @@ class ReFactorRestoreFaceAdvanced:
 
                         with torch.no_grad():
 
-                            if ".onnx" in face_restore_model: # ONNX models
+                            if ".onnx" in restore_model_name: # ONNX models
 
-                                for ort_session_input in ort_session.get_inputs():
-                                    if ort_session_input.name == "input":
-                                        cropped_face_prep = prepare_cropped_face(cropped_face)
-                                        ort_session_inputs[ort_session_input.name] = cropped_face_prep
-                                    if ort_session_input.name == "weight":
-                                        weight = np.array([ 1 ], dtype = np.double)
-                                        ort_session_inputs[ort_session_input.name] = weight
-
-                                output = ort_session.run(None, ort_session_inputs)[0][0]
-                                restored_face = normalize_cropped_face(output)
+                                restored_face = run_facerestore_onnx(ort_session, cropped_face)
 
                             else: # PTH models
 
@@ -1117,6 +1108,10 @@ class ReFactorRestoreFaceAdvanced:
 
                 if original_resolution != restored_img.shape[0:2]:
                     restored_img = cv2.resize(restored_img, (0, 0), fx=original_resolution[1]/restored_img.shape[1], fy=original_resolution[0]/restored_img.shape[0], interpolation=cv2.INTER_AREA)
+
+                logger.status(f"Face restoration applied to {restored_count}/{detected_faces} detected face(s)")
+                if restored_count == 0:
+                    logger.status("No faces were restored (none matched the swapped regions or none detected)")
 
                 self.face_helper.clean_all()
 

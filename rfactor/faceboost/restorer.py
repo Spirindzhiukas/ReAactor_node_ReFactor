@@ -23,16 +23,11 @@ from ..utils import (
     tensor2img,
     img2tensor,
     prepare_cropped_face,
-    normalize_cropped_face
+    normalize_cropped_face,
+    run_facerestore_onnx
 )
 
 from ..ort_utils import create_session, resolve_providers
-
-
-def __getattr__(name):
-    if name == "providers":
-        return resolve_providers()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 FACE_RESTORE_MODEL_URLS = {
@@ -124,22 +119,11 @@ def get_restored_face(cropped_face,
 
         with torch.no_grad():
 
-            if ".onnx" in face_restore_model:  # ONNX models
+            if ".onnx" in restore_model_name:  # ONNX models
 
                 ort_session = create_session(model_path, providers=resolve_providers())
-                ort_session_inputs = {}
                 facerestore_model = ort_session
-
-                for ort_session_input in ort_session.get_inputs():
-                    if ort_session_input.name == "input":
-                        cropped_face_prep = prepare_cropped_face(cropped_face)
-                        ort_session_inputs[ort_session_input.name] = cropped_face_prep
-                    if ort_session_input.name == "weight":
-                        weight = np.array([1], dtype=np.double)
-                        ort_session_inputs[ort_session_input.name] = weight
-
-                output = ort_session.run(None, ort_session_inputs)[0][0]
-                restored_face = normalize_cropped_face(output)
+                restored_face = run_facerestore_onnx(ort_session, cropped_face)
 
             else:  # PTH models
 

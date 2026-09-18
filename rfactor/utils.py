@@ -114,6 +114,31 @@ def normalize_cropped_face(cropped_face):
     return cropped_face.astype(np.uint8)[:, :, ::-1]
 
 
+# -------------------------------------------------- ONNX face restoration
+
+
+def run_facerestore_onnx(ort_session, cropped_face):
+    """Run an ONNX face-restoration model on a BGR crop.
+
+    Maps inputs by name (case-insensitive: 'input' -> prepared crop,
+    'weight' -> fidelity scalar, CodeFormer-style). If the export uses a
+    single differently-named input, the prepared crop is fed to it — this
+    keeps third-party ONNX exports (GPEN / RestoreFormer / GFPGAN / CodeFormer)
+    working without per-model special cases.
+    """
+    inputs = {i.name.lower(): i.name for i in ort_session.get_inputs()}
+    feed = {}
+    if "input" in inputs:
+        feed[inputs["input"]] = prepare_cropped_face(cropped_face)
+    if "weight" in inputs:
+        feed[inputs["weight"]] = np.array([1], dtype=np.double)
+    if not feed and len(inputs) == 1:
+        only_name = next(iter(inputs.values()))
+        feed[only_name] = prepare_cropped_face(cropped_face)
+    output = ort_session.run(None, feed)[0][0]
+    return normalize_cropped_face(output)
+
+
 # ------------------------------------------------------------- face models
 
 

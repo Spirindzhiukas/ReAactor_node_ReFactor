@@ -208,6 +208,37 @@ def main():
             print(f"[FAIL] INPUT_TYPES {name}: {err}")
         return 1
 
+    # --- signature gate: every optional socket needs a defaulted parameter ---
+    # (ComfyUI omits disconnected optional sockets from the execute() call, so a
+    #  required parameter for an optional socket raises TypeError at runtime.)
+    import inspect
+
+    sig_problems = []
+    for name, cls in sorted(pkg.NODE_CLASS_MAPPINGS.items()):
+        fn = getattr(cls, cls.FUNCTION, None)
+        if fn is None:
+            sig_problems.append((name, f"FUNCTION {cls.FUNCTION!r} not found on class"))
+            continue
+        params = inspect.signature(fn).parameters
+        has_varkw = any(pp.kind == pp.VAR_KEYWORD for pp in params.values())
+        tdef = cls.INPUT_TYPES()
+        for sock in tdef.get("required", {}):
+            if sock not in params and not has_varkw:
+                sig_problems.append((name, f"required socket '{sock}' has no execute() parameter"))
+        for sock in tdef.get("optional", {}):
+            if has_varkw:
+                continue
+            if sock not in params:
+                sig_problems.append((name, f"optional socket '{sock}' has no execute() parameter"))
+            elif params[sock].default is inspect._empty:
+                sig_problems.append((name, f"optional socket '{sock}' is a REQUIRED parameter "
+                                           "(crashes when the socket is unconnected)"))
+    if sig_problems:
+        for name, err in sig_problems:
+            print(f"[FAIL] signature {name}: {err}")
+        return 1
+    print("[OK] every socket maps to a execute()-parameter with a safe default")
+
     names = sorted(pkg.NODE_CLASS_MAPPINGS)
     print("[OK] all node INPUT_TYPES construct cleanly:")
     for n in names:

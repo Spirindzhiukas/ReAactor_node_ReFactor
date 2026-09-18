@@ -18,6 +18,10 @@ REPO = Path(__file__).resolve().parent.parent
 IGNORE_SUBSTRINGS = (
     "unable to detect undefined names",              # star-import advisory header
     "may be undefined, or defined from star imports",  # vendored CodeFormer arch
+    # NOTE: never add a module-level __getattr__ to rfactor/*.py — pyflakes
+    # silently skips ALL undefined-name detection for such modules (it assumes
+    # any missing name could come from the PEP 562 hook). Two such shims hid a
+    # missing import (run_facerestore_onnx) that only surfaced at user runtime.
 )
 
 

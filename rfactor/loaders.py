@@ -51,12 +51,21 @@ def get_swap_model_choices():
     return choices
 
 
+_SWAP_FAMILY_HINTS = ("inswapper", "reswapper", "hyperswap")
+
+
 def get_restore_model_choices():
-    """Names available in models/facerestore_models, plus canonical downloads."""
+    """Names available in models/facerestore_models, plus canonical downloads.
+
+    Swap-family files (inswapper/reswapper/hyperswap) that users sometimes keep
+    in this folder are excluded — they are swap engines, not restorers.
+    """
     names = set()
     if os.path.isdir(model_paths.facerestore_models_path):
         for f in os.listdir(model_paths.facerestore_models_path):
             if f.lower().endswith((".pth", ".onnx", ".safetensors")):
+                if any(h in f.lower() for h in _SWAP_FAMILY_HINTS):
+                    continue
                 names.add(f)
     names.update(restorer.FACE_RESTORE_MODEL_URLS.keys())
     return sorted(names, key=str.lower)

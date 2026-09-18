@@ -24,13 +24,6 @@ insightface_models_path = model_paths.insightface_models_path
 reswapper_path = model_paths.reswapper_path
 hyperswap_path = model_paths.hyperswap_path
 
-def __getattr__(name):
-    # PEP 562: providers resolve lazily so the package imports without onnxruntime
-    if name == "providers":
-        return resolve_providers()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
 _model_lock = threading.RLock()
 
 FS_MODEL = None
