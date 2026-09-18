@@ -106,19 +106,28 @@ def main():
     pkg = __import__("ReAactor_node_ReFactor", fromlist=["NODE_CLASS_MAPPINGS"])
     swap_node = pkg.NODE_CLASS_MAPPINGS["ReFactorFaceSwap"]
     ti = swap_node.INPUT_TYPES()
-    for socket in ("original_image", "FaceSwap_model"):
+    for socket in ("original_image",):
         check(f"required socket '{socket}'", socket in ti["required"])
-    for socket in ("target_face_image", "target_face_model", "FaceRestore_model",
-                   "FaceDetection_model", "face_boost"):
+    for socket in ("FaceSwap_model", "FaceRestore_model", "FaceDetection_model",
+                   "target_face_image", "target_face_model", "face_boost"):
         check(f"optional socket '{socket}'", socket in ti["optional"])
     for gone in ("input_image", "swap_model", "facedetection", "face_restore_model", "source_image", "face_model"):
         check(f"old socket '{gone}' removed", gone not in ti["required"] and gone not in ti["optional"])
     check("codeformer_fidelity renamed", "codeformer_fidelity" in ti["required"]
           and "codeformer_weight" not in ti["required"])
 
+    # UI grouping: the three model sockets are contiguous at the top of optional
+    optional_order = list(ti["optional"].keys())
+    trio = ["FaceSwap_model", "FaceRestore_model", "FaceDetection_model"]
+    check("model sockets grouped (contiguous, first)", optional_order[:3] == trio)
+
     opt = pkg.NODE_CLASS_MAPPINGS["ReFactorFaceSwapOpt"].INPUT_TYPES()
-    check("OPT has loader sockets", "FaceSwap_model" in opt["required"]
-          and "FaceRestore_model" in opt["optional"])
+    check("OPT has grouped loader sockets", list(opt["optional"].keys())[:3] == trio
+          and "FaceSwap_model" not in opt["required"])
+
+    # CodeFormer must be registered (regression: silent missing import broke restore)
+    from rfactor.faceboost.archs.registry import ARCH_REGISTRY
+    check("CodeFormer registered in arch registry", "CodeFormer" in ARCH_REGISTRY)
 
     boost = pkg.NODE_CLASS_MAPPINGS["ReFactorFaceBoost"].INPUT_TYPES()
     check("FaceBoost uses fidelity + restore socket", "codeformer_fidelity" in boost["required"]

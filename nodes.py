@@ -15,7 +15,7 @@ import folder_paths
 
 from .rfactor import model_paths
 from .rfactor.engine.face_objects import Face
-from .rfactor.faceboost.archs.registry import ARCH_REGISTRY
+from .rfactor.faceboost.archs import ARCH_REGISTRY  # noqa: F401 (package __init__ registers CodeFormer)
 from .rfactor.faceboost.archs import model_loading
 from .rfactor.faceboost import restorer as _faceboost_restorer
 from .rfactor.faceboost.facelib.utils.face_restoration_helper import FaceRestoreHelper
@@ -85,7 +85,6 @@ class ReFactorFaceSwap:
             "required": {
                 "enabled": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON"}),
                 "original_image": ("IMAGE",),
-                "FaceSwap_model": ("FACE_SWAP_MODEL",),
                 "face_restore_visibility": ("FLOAT", {"default": 1, "min": 0.1, "max": 1, "step": 0.05}),
                 "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
                                                   "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
@@ -96,10 +95,13 @@ class ReFactorFaceSwap:
                 "console_log_level": ([0, 1, 2], {"default": 1}),
             },
             "optional": {
-                "target_face_image": ("IMAGE",),
-                "target_face_model": ("FACE_MODEL",),
+                # --- the three model sockets grouped together, in load order ---
+                "FaceSwap_model": ("FACE_SWAP_MODEL",),
                 "FaceRestore_model": ("FACE_RESTORE_MODEL",),
                 "FaceDetection_model": ("FACE_DETECT_MODEL",),
+                # ---------------------------------------------------------------
+                "target_face_image": ("IMAGE",),
+                "target_face_model": ("FACE_MODEL",),
                 "face_boost": ("FACE_BOOST",),
             },
             "hidden": {"faces_order": "FACES_ORDER"},
@@ -394,6 +396,10 @@ class ReFactorFaceSwap:
 
         if not enabled:
             return (original_image, target_face_model)
+        elif FaceSwap_model is None and target_face_image is None and target_face_model is None:
+            # Restore-only mode: no swap model connected -> swapping is skipped,
+            # face restoration still applies to the original image.
+            logger.status("No FaceSwap model connected - restore-only mode")
         elif target_face_image is None and target_face_model is None:
             logger.error("Please provide 'target_face_image' or 'target_face_model'")
             return (original_image, target_face_model)
@@ -458,17 +464,19 @@ class ReFactorFaceSwapOpt:
             "required": {
                 "enabled": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON"}),
                 "original_image": ("IMAGE",),
-                "FaceSwap_model": ("FACE_SWAP_MODEL",),
                 "face_restore_visibility": ("FLOAT", {"default": 1, "min": 0.1, "max": 1, "step": 0.05}),
                 "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
                                                   "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
             },
             "optional": {
+                # --- the three model sockets grouped together, in load order ---
+                "FaceSwap_model": ("FACE_SWAP_MODEL",),
+                "FaceRestore_model": ("FACE_RESTORE_MODEL",),
+                "FaceDetection_model": ("FACE_DETECT_MODEL",),
+                # ---------------------------------------------------------------
                 "target_face_image": ("IMAGE",),
                 "target_face_model": ("FACE_MODEL",),
                 "options": ("OPTIONS",),
-                "FaceRestore_model": ("FACE_RESTORE_MODEL",),
-                "FaceDetection_model": ("FACE_DETECT_MODEL",),
                 "face_boost": ("FACE_BOOST",),
             }
         }

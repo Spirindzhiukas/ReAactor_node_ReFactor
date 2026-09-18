@@ -105,8 +105,12 @@ with restore) because they are persistent cached ONNX sessions with family routi
 `original_image`, `target_face_image` (the face donor image), `target_face_model` (prebuilt FACE_MODEL),
 `FaceSwap_model`, `FaceRestore_model`, `FaceDetection_model`, `face_boost`.
 The old monolithic `facedetection` / `face_restore_model` / `swap_model` dropdowns are gone —
-connect the loaders instead. CodeFormer's `codeformer_weight` is now named correctly everywhere:
+connect the loaders instead. The three model sockets sit **grouped together** at the top of the
+optional inputs (in load order). CodeFormer's `codeformer_weight` is now named correctly everywhere:
 `codeformer_fidelity` (same CodeFormer `w` parameter that facerestore_cf calls fidelity).
+
+**Restore-only mode:** leave `FaceSwap_model` unconnected and the node skips swapping entirely while
+still applying face restoration to `original_image` — useful as a standalone restorer pipeline stage.
 
 **Also:** `ReFactorOptions`, `ReFactorFaceBoost`, `ReFactorMaskBuilder`, `ReFactorSetWeight`,
 `ReFactorSaveFaceModel` / `ReFactorLoadFaceModel` / `ReFactorBuildFaceModel` / `ReFactorMakeFaceModelBatch`,
