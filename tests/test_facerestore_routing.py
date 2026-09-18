@@ -313,6 +313,68 @@ def main():
     out, scale = restorer.get_restored_face(crop, {"name": None, "path": None}, 1, 0.5)
     check("boost with empty model dict: skipped gracefully", scale == 1.0 and (out == crop).all())
 
+    # ---- swap models: analysis models (antelopev2 etc.) must be rejected -----
+    import tempfile
+    from rfactor.engine.inswap import INSwapper
+
+    with tempfile.TemporaryDirectory() as td:
+        fake = os.path.join(td, "genderage.onnx")
+        open(fake, "wb").write(b"stub-onnx")
+        # stand-in ORT session: single 'input' (analysis-model shape), no 'target'/'source'
+        import rfactor.ort_utils as _ort_utils
+        _ort_mod = _ort_utils.get_onnxruntime()
+
+        class _FakeInp:
+            name = "input"
+            shape = [1, 3, 112, 112]
+
+        class _FakeOut:
+            name = "output"
+
+        class _FakeSess:
+            def get_inputs(self):
+                return [_FakeInp()]
+            def get_outputs(self):
+                return [_FakeOut()]
+
+        _ort_mod.InferenceSession = lambda *a, **k: _FakeSess()
+        try:
+            INSwapper(fake, providers=["CPUExecutionProvider"])
+            check("analysis model rejected as swapper", False)
+        except ValueError as e:
+            check("analysis model rejected as swapper", "not a supported face SWAP model" in str(e))
+
+    # ---- swap loader choices: only swap-family files under insightface/ ------
+    with tempfile.TemporaryDirectory() as td:
+        ins_dir = os.path.join(td, "insightface")
+        res_dir = os.path.join(td, "reswapper")
+        hyp_dir = os.path.join(td, "hyperswap")
+        for d in (ins_dir, res_dir, hyp_dir):
+            os.makedirs(d)
+        for name in ("inswapper_128.onnx", "genderage.onnx", "scrfd_10g_bnkps.onnx",
+                     "glintr100.onnx", "1k3d68.onnx", "2d106det.onnx"):
+            open(os.path.join(ins_dir, name), "wb").write(b"x")
+        open(os.path.join(res_dir, "reswapper_256.onnx"), "wb").write(b"x")
+        open(os.path.join(hyp_dir, "hyperswap_1a_256.onnx"), "wb").write(b"x")
+
+        from rfactor import loaders
+        saved_paths = {k: getattr(loaders.model_paths, k)
+                       for k in ("insightface_path", "reswapper_path", "hyperswap_path")}
+        loaders.model_paths.insightface_path = ins_dir
+        loaders.model_paths.reswapper_path = res_dir
+        loaders.model_paths.hyperswap_path = hyp_dir
+        try:
+            names = [n for n, _ in loaders.get_swap_model_choices()]
+            check("insightface analysis models not offered as swappers",
+                  "genderage.onnx" not in names and "scrfd_10g_bnkps.onnx" not in names
+                  and "glintr100.onnx" not in names and "1k3d68.onnx" not in names
+                  and "2d106det.onnx" not in names)
+            check("real swap models still offered",
+                  set(names) == {"inswapper_128.onnx", "reswapper_256.onnx", "hyperswap_1a_256.onnx"})
+        finally:
+            for k, v in saved_paths.items():
+                setattr(loaders.model_paths, k, v)
+
     # ---- main restore path end-to-end (stubbed helper + ORT) ----------------
     import importlib
     sys.path.insert(0, str(REPO.parent))

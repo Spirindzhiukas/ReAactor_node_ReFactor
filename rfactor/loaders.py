@@ -39,6 +39,12 @@ DETECTION_MODELS = [
 _DEFAULT_DETECTION = "retinaface_resnet50"
 
 
+# The insightface folder also hosts ANALYSIS models (scrfd_*/det_*, glintr*,
+# genderage, 1k3d68, 2d106det, w600k*) used internally for detection and
+# embeddings. They are NOT swappers and must not be offered as one.
+_SWAP_MODEL_PREFIXES = ("inswapper", "reswapper", "hyperswap")
+
+
 def get_swap_model_choices():
     """(display_name, abs_path) for every swap model in the three folders."""
     choices = []
@@ -46,8 +52,11 @@ def get_swap_model_choices():
         if not os.path.isdir(folder):
             continue
         for f in sorted(os.listdir(folder)):
-            if f.lower().endswith((".onnx", ".pth")):
-                choices.append((f, os.path.join(folder, f)))
+            if not f.lower().endswith((".onnx", ".pth")):
+                continue
+            if folder == model_paths.insightface_path and not f.lower().startswith(_SWAP_MODEL_PREFIXES):
+                continue
+            choices.append((f, os.path.join(folder, f)))
     return choices
 
 

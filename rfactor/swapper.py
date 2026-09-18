@@ -52,6 +52,8 @@ def unload_all_models():
     CURRENT_FS_MODEL_PATH = None
     ANALYSIS_MODELS["320"] = unload_model(ANALYSIS_MODELS["320"])
     ANALYSIS_MODELS["640"] = unload_model(ANALYSIS_MODELS["640"])
+    from .ort_utils import clear_sessions
+    clear_sessions()  # release cached ONNX sessions and their GPU arenas
 
 def get_current_faces_model():
     return SOURCE_FACES

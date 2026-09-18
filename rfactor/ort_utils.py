@@ -79,16 +79,56 @@ def resolve_providers() -> list:
         return list(chosen)
 
 
+_MAX_SESSIONS = 4  # LRU: abandoned restorers must release their GPU arenas
+
+
+def _gpu_provider_options():
+    """Cap ORT GPU arenas: without this the arena grows unbounded across runs
+    (new allocations are never returned to torch/CUDA) and big restorers
+    (RestoreFormer etc.) eventually OOM with 'Free (according to CUDA): 0 bytes'."""
+    import os
+
+    try:
+        limit_mb = int(os.environ.get("REFACTOR_ORT_GPU_MEM_MB", "2048"))
+    except ValueError:
+        limit_mb = 2048
+    options = {"arena_extend_strategy": "kSameAsRequested"}
+    if limit_mb > 0:
+        options["gpu_mem_limit"] = limit_mb * 1024 * 1024
+    return options
+
+
 def create_session(model_path: str, providers=None):
-    """Create (and cache) an InferenceSession for a model path."""
+    """Create (and cache, LRU-capped) an InferenceSession for a model path."""
     ort = get_onnxruntime()
-    providers = providers or resolve_providers()
+    providers = list(providers or resolve_providers())
+    provider_options = None
+    if any(p in providers for p in ("CUDAExecutionProvider", "DmlExecutionProvider")):
+        provider_options = [
+            _gpu_provider_options() if p in ("CUDAExecutionProvider", "DmlExecutionProvider") else {}
+            for p in providers
+        ]
     key = (os_path_key(model_path), tuple(providers))
     with _lock:
         session = _sessions.get(key)
         if session is None:
-            session = ort.InferenceSession(model_path, providers=providers)
+            try:
+                if provider_options is not None:
+                    session = ort.InferenceSession(
+                        model_path, providers=providers, provider_options=provider_options)
+                else:
+                    session = ort.InferenceSession(model_path, providers=providers)
+            except Exception:
+                # Retry once with a clean arena slate (recovers from fragmentation)
+                _sessions.clear()
+                if provider_options is not None:
+                    session = ort.InferenceSession(
+                        model_path, providers=providers, provider_options=provider_options)
+                else:
+                    session = ort.InferenceSession(model_path, providers=providers)
             _sessions[key] = session
+            while len(_sessions) > _MAX_SESSIONS:
+                _sessions.pop(next(iter(_sessions)))
         return session
 
 

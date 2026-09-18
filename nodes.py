@@ -248,6 +248,16 @@ class ReFactorFaceSwap:
                 
                 # берем сохранённые bbox из swap (или None)
                 swapped_bboxes = getattr(self, "last_swapped_bboxes", None)
+                if swapped_bboxes:
+                    # Swap bboxes live in the swapped-image frame; det_faces live in the
+                    # helper's frame (read_image() upscales any image with min side < 512).
+                    # Bring the swap bboxes into the helper's frame before comparing.
+                    sh, sw = self.face_helper.input_img.shape[:2]
+                    sx = sw / float(cur_image_np.shape[1])
+                    sy = sh / float(cur_image_np.shape[0])
+                    if abs(sx - 1.0) > 1e-3 or abs(sy - 1.0) > 1e-3:
+                        swapped_bboxes = [(x1 * sx, y1 * sy, x2 * sx, y2 * sy)
+                                          for (x1, y1, x2, y2) in swapped_bboxes]
                 # флаги, чтобы одно сохранённое bbox не совпало с несколькими лицами
                 used_swapped = [False] * len(swapped_bboxes) if swapped_bboxes else None
 
@@ -314,7 +324,15 @@ class ReFactorFaceSwap:
                             restored_face = cropped_face.copy()
                         
                     else:
-                        logger.status(f"Face #{idx}: restore skipped (does not overlap any swapped face bbox)")
+                        try:
+                            det_repr = tuple(round(v) for v in current_bbox) if current_bbox is not None else None
+                            swap_repr = [tuple(round(v) for v in sb) for sb in (swapped_bboxes or [])][:4]
+                        except Exception:
+                            det_repr, swap_repr = None, None
+                        logger.status(
+                            f"Face #{idx}: restore skipped (no overlap with any swapped bbox; "
+                            f"detected={det_repr}, swapped={swap_repr})"
+                        )
                         restored_face = cropped_face.copy()
                     
                     if face_restore_visibility < 1:

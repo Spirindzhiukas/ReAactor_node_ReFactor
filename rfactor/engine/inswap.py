@@ -1,5 +1,8 @@
+import os
+
 import cv2
 import numpy as np
+from ..log import logger
 from .face_objects import BaseONNXModel
 from .meanshape_68 import MEANSHAPE_68
 
@@ -268,6 +271,25 @@ class INSwapper(BaseONNXModel):
         self.input_std = 255.0
         self.input_size = tuple(self.input_shape[2:4][::-1])
 
+        # Structural guard: real swap models have 'target' + 'source' inputs.
+        # Everything else (scrfd_*, glintr100, genderage, 1k3d68, 2d106det, ...)
+        # is an insightface ANALYSIS model and would produce garbage here.
+        missing = [n for n in ("target", "source") if n not in self.input_names]
+        if missing:
+            raise ValueError(
+                f"'{os.path.basename(model_file)}' is not a supported face SWAP model "
+                f"(its inputs are {self.input_names}, expected 'target' + 'source'). "
+                "This looks like an insightface analysis model (detector / landmarks / "
+                "gender-age / recognition) — those are used internally and cannot swap faces. "
+                "Use an inswapper_* / reswapper_* / hyperswap_* model instead."
+            )
+        if "fp16" in os.path.basename(model_file).lower():
+            logger.status(
+                "Note: fp16 swap model loaded. If you see blurry/garbled faces, use the "
+                "fp32 build (e.g. inswapper_128.onnx) — fp16 exports misbehave on some "
+                "execution providers."
+            )
+
         # Хак для экономии памяти: импортируем onnx только здесь,
         # читаем нужную матрицу emap и сразу выгружаем тяжелую модель из RAM.
         try:
@@ -281,6 +303,12 @@ class INSwapper(BaseONNXModel):
         model = onnx.load(self.model_file, load_external_data=False)
         self.emap = numpy_helper.to_array(model.graph.initializer[-1])
         del model
+        if getattr(self.emap, "ndim", 0) != 2 or self.emap.shape[0] != self.emap.shape[1] or self.emap.shape[0] < 64:
+            raise ValueError(
+                f"'{os.path.basename(model_file)}' does not look like a valid swap model "
+                f"(emap matrix has shape {getattr(self.emap, 'shape', '?')}, expected a square "
+                "embedding matrix). Use an inswapper_* / reswapper_* / hyperswap_* model."
+            )
 
     def get(self, img, target_face, source_face, paste_back=True):
         # 1. Идеальное позиционирование (1 в 1 как в оригинальном C++ Insightface)
