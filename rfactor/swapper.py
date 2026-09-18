@@ -78,13 +78,13 @@ def _getAnalysisModel_locked(det_size=(640, 640)):
     ANALYSIS_MODELS[str(det_size[0])] = ANALYSIS_MODEL
 
 def getFaceSwapModel(model_path: str):
-    global FS_MODEL, CURRENT_FS_MODEL_PATH
     with _model_lock:
         _getFaceSwapModel_locked(model_path)
     return FS_MODEL
 
 
 def _getFaceSwapModel_locked(model_path: str):
+    global FS_MODEL, CURRENT_FS_MODEL_PATH
     if FS_MODEL is None or CURRENT_FS_MODEL_PATH is None or CURRENT_FS_MODEL_PATH != model_path:
         CURRENT_FS_MODEL_PATH = model_path
         FS_MODEL = unload_model(FS_MODEL)

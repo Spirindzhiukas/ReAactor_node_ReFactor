@@ -151,6 +151,14 @@ def install_stubs():
     sys.modules["comfy.model_management"] = mm
     sys.modules["comfy.utils"] = cu
 
+    # ---- onnxruntime (stub: CPU provider only) ------------------------------
+    ort = magic_module("onnxruntime")
+    ort.get_available_providers = lambda: ["CPUExecutionProvider"]
+    ort.set_default_logger_severity = lambda sev: None
+    ort.InferenceSession = lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("runtime inference not available in stub env"))
+    sys.modules["onnxruntime"] = ort
+
     # ---- yaml (comfy core dep; stub for the sandbox) -----------------------
     yaml = magic_module("yaml")
     yaml.safe_load = lambda *a, **k: {}
