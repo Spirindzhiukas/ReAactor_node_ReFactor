@@ -540,6 +540,11 @@ def main():
     import ctypes as _ct2
     check("nr: parameter object is 64-byte padded (stray-read safe)",
           _ct2.sizeof(sess.ngx.params._object) == 64)
+    check("nr: Init buffers retained on the session (runtime reads them lazily; "
+          "freed ones = use-after-free at first evaluate)",
+          len(sess.ngx._init_keep) >= 3
+          and isinstance(sess.ngx._init_keep[0], ctypes.Array)
+          and sess.ngx._init_keep[1] is not None)
 
     payload2 = bytes((i * 7 + 3) & 0xFF for i in range(W * H * 4))
     out2 = sess.evaluate(payload2, reset=False)

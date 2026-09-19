@@ -237,7 +237,15 @@ class NgxSession:
         app_data = app_data_path or os.path.join(writable_cache_dir("appdata"), "logs")
         os.makedirs(app_data, exist_ok=True)
 
+        # The runtime RETAINS the appDataPath / FeatureCommonInfo pointers
+        # past Init and reads them lazily (first evaluate, log writes, model
+        # loads) - freed temporaries here become use-after-free crashes
+        # inside the first EvaluateFeature (rig run 16; DVT keeps them alive
+        # for exactly this reason). Keep every init buffer on the session.
+        self._init_keep = []
+        app_data_wide = win32.wide(app_data)
         info = FeatureCommonInfo(list(search_paths) or [os.path.dirname(module_path)])
+        self._init_keep += [app_data_wide, info, info._wide]
         init_ext = self.module.fn("NVSDK_NGX_D3D12_Init_Ext",
                                   [_CVOID, _CVOID, _CVOID, _CI32, _CVOID])
         init4 = self.module.fn("NVSDK_NGX_D3D12_Init",
@@ -250,16 +258,16 @@ class NgxSession:
                 # Snippet-direct runtimes (ReShade/RenoDX builds) target the
                 # classic 4-arg Init - DVT's rig-proven NR flow. Init_Ext is
                 # only the fallback (its extra arg may be ignored or worse).
-                hr4 = init4(ctypes.c_void_p(app_id), win32.wide(app_data),
+                hr4 = init4(ctypes.c_void_p(app_id), app_data_wide,
                             gpu.device.ptr, ctypes.c_int32(NGX_VERSION_API))
                 if hr4 == 1:
                     return 1
-            hr = init_ext(ctypes.c_void_p(app_id), win32.wide(app_data),
+            hr = init_ext(ctypes.c_void_p(app_id), app_data_wide,
                           gpu.device.ptr, ctypes.c_int32(NGX_VERSION_API), info.ptr)
             if hr == 1:
                 return 1
             if not use_own_parameters:
-                hr4 = init4(ctypes.c_void_p(app_id), win32.wide(app_data),
+                hr4 = init4(ctypes.c_void_p(app_id), app_data_wide,
                             gpu.device.ptr, ctypes.c_int32(NGX_VERSION_API))
                 if hr4 == 1:
                     return 1

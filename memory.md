@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 286 checks + gates (details below, fixes after)
+- **Suite:** ALL GREEN — 287 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -167,6 +167,21 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - LEGACY engine: helper locates files by LITERAL 'nvngx_dlssnr.dll' name;
   owner's RenoDX-named build -> stage_legacy_runtime() copies the set to
   a writable dir under canonical names; manager gets the stage dir.
+- RIG run 16: same exact crash at first EvaluateFeature (padding fix
+  insufficient). ROOT-CAUSE CANDIDATE #1 FOUND: DVT's initExt does
+  `this.keep.push(path, featureInfo)` - the runtime RETAINS the
+  appDataPath wide-string and FeatureCommonInfo POINTERS and reads them
+  lazily; ours were temporaries (wide died inside try_init, FeatureCommonInfo
+  freed at __init__ return) -> use-after-free exactly when the runtime first
+  touches them (first evaluate: its own log write / model load path reads).
+  This ALSO explains why no NGX log materializes in
+  %LOCALAPPDATA%/ANTs/appdata/logs - the log WRITE through the freed
+  appDataPath pointer may BE the crash. FIXED: _init_keep on the session
+  holds wide + info + path strings for the session's lifetime (pinned by
+  test). Run 17 verdict: crash gone = confirmed use-after-free; still
+  crashes = next suspects (runtime's ReShade-host expectations), and the
+  three diagnostics remain (NGX log dir, Task Manager alive/gone, Event
+  Viewer faulting module).
 - RIG run 15 (post-unwind-info): **Init(classic) hr=1 + CreateFeature(18)
   hr=1 on the RenoDX runtime - the host handshake is ACCEPTED**; death is
   INSIDE the first EvaluateFeature (server stuck/dies, frontend
