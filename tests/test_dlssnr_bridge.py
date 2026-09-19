@@ -236,6 +236,7 @@ def main():
 
     # ---- per-category selectors (owner restructure) ----
     import importlib as _il
+    import pathlib as _pl
     sys.path.insert(0, str(REPO.parent))
     _pkg = _il.import_module(REPO.name)
     types_def = _pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5Enhancer"].INPUT_TYPES()
@@ -253,6 +254,11 @@ def main():
     check("dlss5: pre_denoise_mode present, defaults to SR",
           req["pre_denoise_mode"][1]["default"] == "SR (DLSS denoise)"
           and "SR (DLSS denoise)" in req["pre_denoise_mode"][0])
+    node_src = _pl.Path(REPO / "ants" / "dlssnr" / "node.py").read_text()
+    check("dlss5: NR + SR session factories share _ensure_native_gpu (run-8 ordering fix)",
+          node_src.count("self._ensure_native_gpu()") >= 2
+          and "def _ensure_native_gpu" in node_src
+          and node_src.count("if self.native_gpu is None:") == 1)
     check("dlss5: no 'refresh' entries in the category combos",
           all("refresh" not in req[w][0]
               for w in ("nr_dll_version", "sr_dll_version", "fg_dll_version")))

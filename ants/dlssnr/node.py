@@ -260,12 +260,18 @@ class ReFactorDLSS5Enhancer:
             gpu = self.manager.gpu_name() or f"GPU {self._ordinal}"
             logger.status(f"DLSS-5 Bridge initialized on {gpu} using DLL set: {dll_dir}")
 
-    def _native_session_for(self, width, height, pass_settings):
-        """Size-keyed native NR session (created lazily, reused across frames)."""
-        key = (self.native_dll_path, width, height, self._nr_preset)
+    def _ensure_native_gpu(self):
+        """The D3D12 GPU context is created once, on demand - whichever
+        session type (NR or the SR pre-denoise) needs it first."""
         if self.native_gpu is None:
             from ..dlsssr.d3d12 import D3D12Device, GpuContext
             self.native_gpu = GpuContext(D3D12Device.create(), adapter_index=self._ordinal)
+        return self.native_gpu
+
+    def _native_session_for(self, width, height, pass_settings):
+        """Size-keyed native NR session (created lazily, reused across frames)."""
+        key = (self.native_dll_path, width, height, self._nr_preset)
+        self._ensure_native_gpu()
         if self.native_session is None or self.native_key != key:
             if self.native_session is not None:
                 try:
@@ -286,6 +292,7 @@ class ReFactorDLSS5Enhancer:
         """Lazily created 1:1 DLAA SR session (pre-denoise pass), keyed by
         dll stage / size / preset so model swaps never churn the GPU side."""
         from ..dlsssr import discovery as sr_disc
+        self._ensure_native_gpu()  # may run before the NR session exists
         if self._sr_stage_dir is None:
             dll_path = sr_disc.resolve_sr_dll(self._sr_choice)
             self._sr_stage_dir = sr_disc.stage_sr_dll(dll_path)

@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 276 checks + gates (details below, fixes after)
+- **Suite:** ALL GREEN — 277 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -151,6 +151,14 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   CreateCommandAllocator, CreateCommandList (slots + IIDs + call plumbing).
   Sandbox CANNOT verify: shim machine-thunk on Windows, real NGX runtime
   responses, remaining slot behavior under real drivers.
+- RIG run 8 = **Init_Ext threshold reached** (shim exports resolved, module
+  identity clean, GpuContext live on the 4090): new error was gpu=None at
+  the init_ext CALL SITE - _sr_session_for built the SR pre-denoise session
+  with self.native_gpu still None (it was only created inside
+  _native_session_for, which runs AFTER pre-denoise). FIXED: shared
+  _ensure_native_gpu() used by both session factories (+ regression check;
+  Gemini's torch-device-binding theory was off - the None was OUR
+  GpuContext creation order). Run 9 = the first real NGX Init_Ext answer.
 - RIG run 7: IDENTITY CHECK PASSED (no collision error) -> Windows maps
   our hand-built shim PE cleanly (loader acceptance proven). New error:
   callable_at crashed = CFUNCTYPE ctor rejects c_void_p INSTANCES (needs
