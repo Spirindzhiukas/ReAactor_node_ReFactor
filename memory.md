@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 245 checks + gates (details below)
+- **Suite:** ALL GREEN — 258 checks + gates (details below)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -109,7 +109,7 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | smoke_import.py | — | import + 18-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 245 checks, all green at the dlsssr commit (20 nodes; package `ants/`).** Sandbox venv: numpy, opencv-python-headless,
+**Total: 258 checks, all green at the native-flow commit (20 nodes; package `ants/`).** Sandbox venv: numpy, opencv-python-headless, Sandbox venv: numpy, opencv-python-headless,
 pillow, pyflakes, pefile (NO torch — stub harness only). huggingface.co is TLS-blocked from the
 sandbox (DLL zips can't be downloaded there — verify engine versions on the owner rig).
 

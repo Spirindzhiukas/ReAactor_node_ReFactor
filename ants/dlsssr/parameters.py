@@ -135,7 +135,9 @@ class OwnParameterObject:
         self.store[name] = int(value)
 
     def set_resource(self, name, pointer):
-        self.store[name] = int(pointer)
+        self.store[name] = (pointer.value
+                            if isinstance(pointer, ctypes.c_void_p)
+                            else int(pointer))
 
     def close(self):
         self._callbacks.clear()
@@ -172,7 +174,7 @@ class CoreParameterObject(ComObject):
 
     def set_resource(self, name, pointer):
         buf = ctypes.create_string_buffer(name.encode() + b"\x00")
-        self._setter(SLOT_SET_D3D12, _CVOID)(self.ptr, buf, ctypes.c_void_p(int(pointer)))
+        self._setter(SLOT_SET_D3D12, _CVOID)(self.ptr, buf, ctypes.c_void_p(pointer.value if isinstance(pointer, ctypes.c_void_p) else int(pointer)))
 
     def get_u32(self, name):
         buf = ctypes.create_string_buffer(name.encode() + b"\x00")

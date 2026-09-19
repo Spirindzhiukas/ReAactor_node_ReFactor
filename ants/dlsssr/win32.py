@@ -79,7 +79,7 @@ def close_handle(handle):
 
 
 def wide(text):
-    return (ctypes.c_wchar * (len(text) + 1))(text)
+    return ctypes.create_unicode_buffer(text)
 
 
 # D3D12CreateDevice / CreateDXGIFactory1 -------------------------------

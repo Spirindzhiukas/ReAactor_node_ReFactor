@@ -36,6 +36,7 @@ class DlssNrSession:
                  skin_structure=0.5, color_strength=0.5, tone_preservation=0.5,
                  face_skin_protection=0.0, grain_preservation=0.0,
                  auto_mask=False, nr_preset=0, app_data_path=None):
+        self.gpu = gpu
         self.w, self.h = int(width), int(height)
         self.settings = {
             "style": _STYLE_TO_INT.get(style, 0),

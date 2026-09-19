@@ -67,7 +67,7 @@ _QUEUE_SIGNAL = 14
 # ID3D12GraphicsCommandList
 _LIST_CLOSE = 9
 _LIST_RESET = 10
-_LIST_COPY_RESOURCE = 17
+_LIST_COPY_TEXTURE_REGION = 16  # CopyTextureRegion (works across types)
 _LIST_RESOURCE_BARRIER = 26
 
 
@@ -119,6 +119,29 @@ def _resource_desc_buffer(size):
     return desc
 
 
+def _addr(p):
+    """int address from an int or c_void_p (never int(c_void_p) - that parses
+    the pointed-to memory as a string literal)."""
+    return int(p.value) if isinstance(p, ctypes.c_void_p) else int(p)
+
+
+def _copy_location_texture(resource_ptr, subresource=0):
+    # D3D12_TEXTURE_COPY_LOCATION { pResource, Type=SUBRESOURCE_INDEX,
+    # { SubresourceIndex } } = 48 bytes
+    buf = _pack("<QI4xQ24x", _addr(resource_ptr), 0, subresource)
+    assert len(buf) == 48
+    return buf
+
+
+def _copy_location_footprint(resource_ptr, fmt, width, height, row_pitch, offset=0):
+    # D3D12_TEXTURE_COPY_LOCATION { pResource, Type=PLACED_FOOTPRINT,
+    # { Offset, Footprint { Format, Width, Height, Depth, RowPitch } } }
+    buf = _pack("<QI4xQIIIIQ", _addr(resource_ptr), 1, offset, fmt,
+                int(width), int(height), 1, int(row_pitch))
+    assert len(buf) == 48
+    return buf
+
+
 def _transition_barrier(resource_ptr, before, after):
     # D3D12_RESOURCE_BARRIER: Type u32, Flags u32, [pad], Transition {
     # pResource (ptr, aligned 8), StateBefore u32, StateAfter u32 }
@@ -129,8 +152,9 @@ def _transition_barrier(resource_ptr, before, after):
     struct_pack_into(0, 0)  # D3D12_RESOURCE_BARRIER_TYPE_TRANSITION
     struct_pack_into(4, 0)  # D3D12_RESOURCE_BARRIER_FLAG_NONE
     ctypes.cast(ctypes.addressof(buf) + 8, ctypes.POINTER(ctypes.c_void_p))[0] = resource_ptr
-    struct_pack_into(16, before)
-    struct_pack_into(20, after)
+    struct_pack_into(16, 0xFFFFFFFF)  # ALL_SUBRESOURCES
+    struct_pack_into(20, before)
+    struct_pack_into(24, after)
     return buf
 
 
@@ -147,17 +171,21 @@ class D3D12Resource(ComObject):
         range_buf = _pack("<QQ", 0, 0)  # D3D12_RANGE {0, 0} = whole resource
         out = ctypes.c_void_p()
         self.call_hr(_RESOURCE_MAP, [_CVOID_U32(), _CVOID_P(), _CVOID_P()],
-                     ctypes.c_void_p(0), range_buf, ctypes.byref(out), what="Map")
+                     ctypes.c_uint32(0), range_buf, ctypes.byref(out), what="Map")
         return out.value
 
     def unmap(self):
         range_buf = _pack("<QQ", 0, 0)
         self.call(_RESOURCE_UNMAP, [_CVOID_U32(), _CVOID_P()], None,
-                  ctypes.c_void_p(0), range_buf)
+                  ctypes.c_uint32(0), range_buf)
 
 
 def _CVOID_U32():
     return ctypes.c_uint32
+
+
+def _CVOID_U64():
+    return ctypes.c_uint64
 
 
 def _CVOID_P():
@@ -180,10 +208,13 @@ class D3D12Device(ComObject):
         hresult_check(hr, "D3D12CreateDevice")
         return D3D12Device(out.value)
 
-    def _create(self, slot, what, argtypes, *args, iid=None):
+    def _create(self, slot, what, argtypes, *args):
+        # callers pass the IID as the last positional arg; we only append the
+        # out-pointer (an extra forwarded None here would land in the driver's
+        # out-parameter register - a guaranteed access violation)
         out = ctypes.c_void_p()
-        self.call_hr(slot, argtypes + (_CVOID_P(),), *args, iid, ctypes.byref(out),
-                     what=what)
+        self.call_hr(slot, list(argtypes) + [_CVOID_P()], *args,
+                     ctypes.byref(out), what=what)
         return out.value
 
     def create_command_queue(self):
@@ -211,7 +242,7 @@ class D3D12Device(ComObject):
     def create_fence(self, initial=0):
         return ComObject(
             self._create(_DEVICE_CREATE_FENCE, "CreateFence",
-                         [_CVOID_U32(), _CVOID_U32()],
+                         [_CVOID_U64(), _CVOID_U32()],
                          ctypes.c_uint64(initial), ctypes.c_uint32(0), IID_ID3D12Fence),
             "ID3D12Fence")
 
@@ -309,8 +340,13 @@ class GpuContext:
         staging.unmap()
         self.transition(staging, D3D12_RESOURCE_STATE_COPY_SOURCE)
         self.transition(texture, D3D12_RESOURCE_STATE_COPY_DEST)
-        self.list.call(_LIST_COPY_RESOURCE, [_CVOID_P(), _CVOID_P()], None,
-                       texture.ptr, staging.ptr)
+        src_loc = _copy_location_footprint(staging.ptr, texture.format,
+                                           texture.width, texture.height, row_pitch)
+        dst_loc = _copy_location_texture(texture.ptr)
+        self.list.call(_LIST_COPY_TEXTURE_REGION,
+                       [_CVOID_P(), _CVOID_U32(), _CVOID_U32(), _CVOID_U32(),
+                        _CVOID_P(), _CVOID_P()],
+                       None, dst_loc, 0, 0, 0, src_loc, None)
         self.transition(texture, final_state)
         self.transition(staging, D3D12_RESOURCE_STATE_COMMON)
         staging.release()
@@ -319,8 +355,13 @@ class GpuContext:
         _, row_pitch, total = linear_layout(texture.width, texture.height, texture.format)
         self.transition(texture, D3D12_RESOURCE_STATE_COPY_SOURCE)
         readback = self.device.create_buffer(total, D3D12_HEAP_TYPE_READBACK, "readback staging")
-        self.list.call(_LIST_COPY_RESOURCE, [_CVOID_P(), _CVOID_P()], None,
-                       readback.ptr, texture.ptr)
+        dst_loc = _copy_location_footprint(readback.ptr, texture.format,
+                                           texture.width, texture.height, row_pitch)
+        src_loc = _copy_location_texture(texture.ptr)
+        self.list.call(_LIST_COPY_TEXTURE_REGION,
+                       [_CVOID_P(), _CVOID_U32(), _CVOID_U32(), _CVOID_U32(),
+                        _CVOID_P(), _CVOID_P()],
+                       None, dst_loc, 0, 0, 0, src_loc, None)
         self.transition(texture, state)
         self.submit_and_wait()
         addr = readback.map()
@@ -340,11 +381,11 @@ class GpuContext:
         self.queue.call(_QUEUE_EXECUTE_COMMAND_LISTS, [_CVOID_U32(), _CVOID_P()], None,
                         ctypes.c_uint32(1), cell)
         self.fence_value += 1
-        self.queue.call_hr(_QUEUE_SIGNAL, [_CVOID_P(), _CVOID_U32()],
+        self.queue.call_hr(_QUEUE_SIGNAL, [_CVOID_P(), _CVOID_U64()],
                            self.fence.ptr, ctypes.c_uint64(self.fence_value), what="Signal")
         done = self.fence.call(_FENCE_GET_COMPLETED, [], ctypes.c_uint64)
         if done < self.fence_value:
-            self.fence.call_hr(_FENCE_SET_EVENT, [_CVOID_U32(), _CVOID_P()],
+            self.fence.call_hr(_FENCE_SET_EVENT, [_CVOID_U64(), _CVOID_P()],
                                ctypes.c_uint64(self.fence_value), ctypes.c_void_p(self.event),
                                what="SetEventOnCompletion")
             if not win32.wait_event(self.event, timeout_ms):

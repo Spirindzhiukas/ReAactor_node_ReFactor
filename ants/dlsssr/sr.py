@@ -66,6 +66,7 @@ class DlssSrSession:
             raise DlssSrError(f"[ANTs] Unknown SR mode {mode!r}. Known: {sorted(PERF_QUALITY)}.")
         if preset not in DLSS_RENDER_PRESETS:
             raise DlssSrError(f"[ANTs] Unknown SR preset {preset!r}. Known: {sorted(DLSS_RENDER_PRESETS)}.")
+        self.gpu = gpu
         self.rw, self.rh = int(render_width), int(render_height)
         self.ow, self.oh = int(output_width), int(output_height)
         quality = PERF_QUALITY[mode]
