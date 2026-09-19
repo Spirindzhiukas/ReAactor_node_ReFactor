@@ -271,9 +271,15 @@ class NgxSession:
         hr = self._create(self.gpu.list.ptr, ctypes.c_int32(feature_id),
                           self.params.ptr, ctypes.byref(out))
         if hr != 1:
+            code = hr & 0xFFFFFFFF
+            known = {0xBAD0000B: "FeatureNotSupported",
+                     0xBAD00003: "InvalidParameter",
+                     0xBAD00004: "FeatureNotFound",
+                     0xBAD0000C: "PlatformNotSupported"}
+            name = known.get(code, "NGX error")
             raise DlssSrError(
                 f"[ANTs] NGX CreateFeature(feature {feature_id}) failed "
-                f"(0x{hr & 0xFFFFFFFF:08X}). The installed runtime may not "
+                f"(0x{code:08X} = {name}). The installed runtime may not "
                 "support this feature or parameter set.")
         self.handle = out.value
         self.gpu.submit_and_wait()

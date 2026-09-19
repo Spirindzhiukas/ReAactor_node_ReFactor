@@ -13,6 +13,8 @@ DVT-proven pattern). The caller gets the OUTPUT-resolution RGBA bytes and
 resizes back to the input resolution on the torch side.
 """
 
+import os
+
 from . import d3d12 as d3d
 from .errors import DlssSrError
 from .ngx import FEATURE_SR, NgxSession, locate_ngx_core
@@ -71,26 +73,35 @@ class DlssSrSession:
         self.ow, self.oh = int(output_width), int(output_height)
         quality = PERF_QUALITY[mode]
 
+        from .ngx import NGX_MODELS_DIR
         core_path = locate_ngx_core()
+        # Stage dir FIRST (owner's chosen build), then NVIDIA's own managed
+        # models dir - the stock core prefers its properly-installed runtime.
+        search = [d for d in (sr_dll_dir, NGX_MODELS_DIR) if d]
         self.ngx = NgxSession(
-            gpu, core_path, search_paths=[sr_dll_dir] if sr_dll_dir else [],
-            app_data_path=app_data_path)
-
-        p = self.ngx.params
-        p.set_u32("PerfQualityValue", quality)
-        p.set_u32("Width", self.rw)
-        p.set_u32("Height", self.rh)
-        p.set_u32("OutWidth", self.ow)
-        p.set_u32("OutHeight", self.oh)
-        flags = DLSS_CREATE_FLAG_AUTO_EXPOSURE | DLSS_CREATE_FLAG_MVLOW_RES
-        if hdr:
-            flags |= DLSS_CREATE_FLAG_IS_HDR
-        p.set_u32("DLSS.Feature.Create.Flags", flags)
-        p.set_u32(_PRESET_PARAM.get(quality, _PRESET_PARAM[0]), DLSS_RENDER_PRESETS[preset])
-        p.set_u32("CreationNodeMask", 1)
-        p.set_u32("VisibilityNodeMask", 1)
-
-        self.ngx.create_feature(FEATURE_SR)
+            gpu, core_path, search_paths=search, app_data_path=app_data_path)
+        self._apply_create_params(quality, hdr, preset)
+        try:
+            self.ngx.create_feature(FEATURE_SR)
+        except DlssSrError as core_err:
+            if "0xBAD0000B" not in str(core_err):
+                raise
+            # FeatureNotSupported from the DRIVER CORE: most often the core
+            # refusing to load a snippet outside its managed models root.
+            # Fallback: snippet-direct - load nvngx_dlss.dll as the provider
+            # with OUR parameter object (same route as the NR host).
+            from ..log import dlss_logger as logger
+            logger.status("DLSS SR: driver core rejected feature 1 (FeatureNotSupported) "
+                          "- retrying snippet-direct with our own parameter object.")
+            self.ngx.close()
+            snippet = os.path.join(sr_dll_dir, "nvngx_dlss.dll")
+            if not os.path.isfile(snippet):
+                raise core_err from None
+            self.ngx = NgxSession(
+                gpu, snippet, search_paths=[sr_dll_dir],
+                use_own_parameters=True, app_data_path=app_data_path)
+            self._apply_create_params(quality, hdr, preset)
+            self.ngx.create_feature(FEATURE_SR)
 
         dev = gpu.device
         self.color = dev.create_texture2d(self.rw, self.rh, d3d.DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -106,6 +117,21 @@ class DlssSrSession:
         self.gpu.upload_texture(self.depth, zeros, d3d.D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
         self.gpu.upload_texture(self.motion, zeros, d3d.D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
         self.gpu.submit_and_wait()
+
+    def _apply_create_params(self, quality, hdr, preset):
+        p = self.ngx.params
+        p.set_u32("PerfQualityValue", quality)
+        p.set_u32("Width", self.rw)
+        p.set_u32("Height", self.rh)
+        p.set_u32("OutWidth", self.ow)
+        p.set_u32("OutHeight", self.oh)
+        flags = DLSS_CREATE_FLAG_AUTO_EXPOSURE | DLSS_CREATE_FLAG_MVLOW_RES
+        if hdr:
+            flags |= DLSS_CREATE_FLAG_IS_HDR
+        p.set_u32("DLSS.Feature.Create.Flags", flags)
+        p.set_u32(_PRESET_PARAM.get(quality, _PRESET_PARAM[0]), DLSS_RENDER_PRESETS[preset])
+        p.set_u32("CreationNodeMask", 1)
+        p.set_u32("VisibilityNodeMask", 1)
 
     def evaluate(self, color_rgba, reset=True):
         """Upscale one render-size RGBA8 frame; returns the output-size frame."""

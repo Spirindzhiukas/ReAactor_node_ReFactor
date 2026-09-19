@@ -209,6 +209,9 @@ def build_device_graph():
         return 0
 
     def create_committed(heap, heap_flags, desc, initial_state, clear, iid, out):
+        heap_type = _u32_at(heap, 0)
+        if heap_type not in (1, 2, 3):  # DEFAULT/UPLOAD/READBACK - 0 is UNKNOWN
+            return -2147024809
         dim = _u32_at(desc, 0)
         width = _u64_at(desc, 16)
         height = _u32_at(desc, 24)
@@ -233,7 +236,8 @@ def build_device_graph():
         obj = make_resource(size, fmt, f"res(dim={dim},fmt={fmt})",
                             width_px=int(width) if dim != 1 else 0)
         _write_ptr(out, obj.ptr)
-        RECORD.append(("CreateCommittedResource", dim, int(width), int(height)))
+        RECORD.append(("CreateCommittedResource", dim, int(width), int(height),
+                       heap_type))
         return 0
 
     device = FakeObject({

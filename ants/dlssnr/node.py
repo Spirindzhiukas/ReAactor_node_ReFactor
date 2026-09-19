@@ -244,7 +244,8 @@ class ReFactorDLSS5Enhancer:
             return
         # Legacy helper engine
         self._close_native()
-        dll_dir = discovery.resolve_legacy_dir(nr_choice)
+        dll_path = discovery.resolve_nr_runtime_path(nr_choice)
+        dll_dir = discovery.stage_legacy_runtime(dll_path)  # canonical names
         if self.manager is None or self.manager_dll_dir != dll_dir:
             if self.manager is not None:
                 try:

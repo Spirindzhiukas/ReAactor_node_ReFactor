@@ -204,6 +204,9 @@ def main():
     check("d3d12: RESOURCE_DESC is 56 bytes, TEXTURE2D(3) + zero alignment",
           len(tex) == 56 and len(buf) == 56
           and tex[0:4] == (3).to_bytes(4, "little") and tex[4:12] == b"\x00" * 8)
+    check("d3d12: HEAP_TYPE_DEFAULT is 1 (0 = UNKNOWN -> E_INVALIDARG, rig run 11)",
+          _d3d12.D3D12_HEAP_TYPE_DEFAULT == 1 and _d3d12.D3D12_HEAP_TYPE_UNKNOWN == 0
+          and _d3d12.D3D12_HEAP_TYPE_UPLOAD == 2 and _d3d12.D3D12_HEAP_TYPE_READBACK == 3)
     check("d3d12: buffer desc is BUFFER(1) + ROW_MAJOR layout (driver rule)",
           buf[0:4] == (1).to_bytes(4, "little")
           and buf[44:48] == (1).to_bytes(4, "little"))

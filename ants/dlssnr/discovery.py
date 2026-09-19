@@ -260,3 +260,24 @@ def resolve_legacy_dir(choice: str):
         if choice and entry["name"] == choice:
             return entry["path"] if entry["kind"] == "dir" else os.path.dirname(entry["path"])
     return resolve_dll_dir("auto")
+
+
+def stage_legacy_runtime(dll_path):
+    """A dir the legacy helper engine can consume.
+
+    The helper locates files by LITERAL name ('nvngx_dlssnr.dll'), so a
+    build under any other name (nvngx_dlssnr_RenoDX_4000_series_friendly,
+    ...) is staged under the canonical name next to copies of the whole
+    set. Returns the stage directory."""
+    import shutil
+    from ..dlsssr.ngx import writable_cache_dir
+    dll_path = os.path.abspath(dll_path)
+    src_dir = os.path.dirname(dll_path)
+    stage = os.path.join(writable_cache_dir("nr_legacy_staged"),
+                         os.path.basename(src_dir) or "set")
+    os.makedirs(stage, exist_ok=True)
+    for f in dll_files(src_dir):
+        shutil.copyfile(os.path.join(src_dir, f), os.path.join(stage, f))
+    if os.path.basename(dll_path).lower() != "nvngx_dlssnr.dll":
+        shutil.copyfile(dll_path, os.path.join(stage, "nvngx_dlssnr.dll"))
+    return stage

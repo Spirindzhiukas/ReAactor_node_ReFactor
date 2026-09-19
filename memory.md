@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 278 checks + gates (details below, fixes after; adaptive-texture commit)
+- **Suite:** ALL GREEN — 280 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -151,6 +151,22 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   CreateCommandAllocator, CreateCommandList (slots + IIDs + call plumbing).
   Sandbox CANNOT verify: shim machine-thunk on Windows, real NGX runtime
   responses, remaining slot behavior under real drivers.
+- RIG run 11 = **NGX CONVERSATION LIVE**: SR path passed Init_Ext +
+  AllocateParameters + CreateFeature THROUGH THE SHIM on the real driver
+  core (caller-check satisfied - no fault); core ANSWERED 0xBAD0000B
+  (FeatureNotSupported) for feature 1 -> most likely the core refusing a
+  snippet outside its managed models root (SR 310.9.1 IS 40-series-ok;
+  the 50-series lock is the NR runtime - already solved by using the
+  RenoDX-unlocked build). SR now: search_paths include NGX_MODELS_DIR +
+  AUTOMATIC snippet-direct fallback (load nvngx_dlss.dll with OWN params,
+  same route as NR) on 0xBAD0000B; create_feature decodes result names.
+- TEXTURE ROOT CAUSE (all combos failing incl. flagless): 
+  D3D12_HEAP_TYPE_DEFAULT was 0 (=UNKNOWN!) -> E_INVALIDARG on ANY desc;
+  DEFAULT=1 (UPLOAD 2/READBACK 3 were right by luck). Fixed + fake now
+  validates heap types + constant pins.
+- LEGACY engine: helper locates files by LITERAL 'nvngx_dlssnr.dll' name;
+  owner's RenoDX-named build -> stage_legacy_runtime() copies the set to
+  a writable dir under canonical names; manager gets the stage dir.
 - RIG run 10: E_INVALIDARG PERSISTED on the first texture even with
   TEXTURE2D=3 (line numbers confirm the fix was live; desc/heap bytes now
   byte-identical to DVT's rig-proven layout; UAV+COMMON creation is legal
