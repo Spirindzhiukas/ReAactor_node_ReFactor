@@ -20,10 +20,16 @@ def hresult_check(hr, what):
 
 
 def guid(text):
-    """'{xxxxxxxx-...}' -> 16-byte GUID buffer."""
-    hexpart = text.strip("{}")
-    parts = hexpart.split("-")
-    raw = bytes.fromhex(parts[3] + parts[2] + parts[1] + parts[0]) + bytes.fromhex("".join(parts[4:]))
+    """'{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}' -> 16-byte GUID buffer.
+
+    Windows wire layout: Data1 u32 LE, Data2 u16 LE, Data3 u16 LE, then
+    Data4's 8 bytes verbatim.
+    """
+    parts = text.strip("{}").split("-")
+    raw = (int(parts[0], 16).to_bytes(4, "little")
+           + int(parts[1], 16).to_bytes(2, "little")
+           + int(parts[2], 16).to_bytes(2, "little")
+           + bytes.fromhex(parts[3] + parts[4]))
     return (ctypes.c_char * 16).from_buffer_copy(raw)
 
 

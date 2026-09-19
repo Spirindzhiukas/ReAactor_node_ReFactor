@@ -156,6 +156,19 @@ def main():
           len(pkg.NODE_CLASS_MAPPINGS) == 20
           and "ANTsDLSSSRUpscaler" in pkg.NODE_CLASS_MAPPINGS)
 
+    # ---- IID wire bytes (canonical GUID layout; reference bytes are
+    # ---- hand-written literals, NOT derived from guid() - the rig hit
+    # ---- E_NOINTERFACE because guid() once reversed the field order) ----
+    from ants.dlsssr.com import guid as _guid
+    check("iid: ID3D12Device wire bytes match the canonical literal",
+          bytes(_guid("{189819f1-1db6-4b57-be54-1821339b85f7}"))
+          == bytes([0xf1, 0x19, 0x98, 0x18, 0xb6, 0x1d, 0x57, 0x4b,
+                    0xbe, 0x54, 0x18, 0x21, 0x33, 0x9b, 0x85, 0xf7]))
+    check("iid: IDXGIFactory1 wire bytes match the canonical literal",
+          bytes(_guid("{770aae78-f26f-4dba-a829-253c83d1b387}"))
+          == bytes([0x78, 0xae, 0x0a, 0x77, 0x6f, 0xf2, 0xba, 0x4d,
+                    0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87]))
+
     # ---- d3d12 struct packs (sizes/fields per d3d12.h, PE32+) ----
     from ants.dlsssr import d3d12 as d12
     tex = d12._resource_desc_texture(64, 48, d12.DXGI_FORMAT_R8G8B8A8_UNORM,
