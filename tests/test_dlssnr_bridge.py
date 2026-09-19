@@ -306,6 +306,40 @@ def main():
     finally:
         discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, discovery.PACKAGE_DLL_DIR = saved
 
+    # ---- regression: pre-denoise frames must reach the dlls C-contiguous.
+    # A planar movedim view (tiled upscale mirror) handed to the raw pointer
+    # produced the rig's "9 gray tiles" output: planar RGB decoded as
+    # interleaved (3 wrapped bands per plane, R then G then B). ----
+    node_src = (REPO / "ants" / "dlssnr" / "node.py").read_text()
+    core_src = (REPO / "ants" / "dlssnr" / "core.py").read_text()
+    check("denoise: blend_frames contiguous-izes the processed view",
+          "processed = processed.contiguous()" in node_src
+          and "np.ascontiguousarray(processed)" in node_src)
+    check("denoise: _pre_denoise_frame returns a contiguous tensor",
+          ".to(device=frame.device, dtype=torch.float32).contiguous()" in node_src)
+    check("denoise: CUDA legacy path does not empty_like a movedim view",
+          "dest = torch.empty(tuple(frame.shape)" in node_src
+          and "torch.empty_like(frame)" not in node_src)
+    check("denoise: CUDA legacy path contiguousizes frame before data_ptr",
+          "if not frame.is_contiguous():" in node_src)
+    check("process_host normalizes a non-contiguous source before ctypes",
+          "np.ascontiguousarray(source, dtype=np.float32)" in core_src)
+    check("process_host rejects a non-contiguous destination loudly",
+          "destination buffer must be a" in core_src)
+
+    # ---- native: rig-proven force-terminator builds are refused up front ----
+    check("native: RenoDX-named builds match the force-terminator matcher",
+          discovery.is_known_force_terminator(
+              r"C:\m\DLSS\NR\nvngx_dlssnr_RenoDX_4000_series_friendly.dll")
+          and not discovery.is_known_force_terminator(
+              r"C:\m\DLSS\NR\nvngx_dlssnr.dll"))
+    check("native: the engine refuses force-terminators unless overridden",
+          "is_known_force_terminator(dll_path)" in node_src
+          and "ANTS_ALLOW_KNOWN_BAD_NR" in node_src)
+    check("native: the force-terminator list credits RenoDX provenance",
+          '"renodx"' in (REPO / "ants" / "dlssnr" / "discovery.py").read_text()
+          and "clshortfuse" in (REPO / "ants" / "dlssnr" / "discovery.py").read_text())
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

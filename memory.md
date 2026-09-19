@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 290 checks + gates (details below, fixes after)
+- **Suite:** ALL GREEN — 295 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -180,6 +180,27 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   models/DLSS/staged/ANTs/<tag> per owner directive (AppData only as
   read-only fallback) - after next run: shim, staging AND the NGX log
   all live under models/DLSS/staged/ANTs/.
+- RIG run 19 VERDICTS (two): (1) NATIVE NR ON THE RENODX BUILD IS CLOSED -
+  native-crash.log present but 0 bytes + the first-in-process VECTORED
+  handler saw NO exception + instant death = the dll FORCE-TERMINATES the
+  process (ExitProcess/fail-fast) at first evaluate: a deliberate host
+  check, not an accident (accidents raise first). SHIPPED GUARD:
+  dlssnr/discovery.py KNOWN_FORCE_TERMINATOR_MARKERS ("renodx") +
+  is_known_force_terminator(); the native engine now refuses such builds
+  with a loud [ANTs] RuntimeError (env ANTS_ALLOW_KNOWN_BAD_NR=1
+  overrides). Optional clean-fail experiment: stock nvngx_dlssnr from
+  DLSS Swapper. (2) THE 9-TILE LEGACY BUG ROOT-CAUSED + FIXED: owner's
+  discriminator (no denoise model = correct image; model = 9 gray tiles)
+  pinned it to the pre-denoise path: upscale_image_with_model returns a
+  movedim VIEW (planar memory); _pre_denoise_frame .to() keeps the
+  non-contiguous strides; blend_frames fast path (default strength 1.0)
+  returned the view verbatim; process_host/process_cuda passed its RAW
+  POINTER to the dll -> planar RGB decoded as interleaved = 3 wrapped
+  bands per plane (R,G,B) x 3 phases = the 9 gray tiles. FIXED at 4
+  layers: blend_frames contiguous-izes processed; _pre_denoise_frame
+  .contiguous(); CUDA loop no empty_like (preserves strides) + frame
+  .contiguous() before data_ptr; process_host ascontiguousarray source +
+  loud destination validation. Suite 295 (dlssnr_bridge 61).
 - RIG run 18: crash again at first evaluate; the param-KEYS dump printed
   (names match DVT's table exactly); NO faulthandler trace, NO NGX log.
   Node masks verified = 1/1 (DVT parity). SHIPPED ants/dlsssr/crashlog.py:

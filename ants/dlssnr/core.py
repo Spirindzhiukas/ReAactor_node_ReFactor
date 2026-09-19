@@ -270,6 +270,17 @@ class DLSSStandaloneManager:
 
     def process_host(self, source: np.ndarray, destination: np.ndarray, settings: dict, reset: bool, mask: np.ndarray = None):
         with self._lock:
+            # The dll reads interleaved [H,W,C] float32 through a raw
+            # pointer. A strided (e.g. planar movedim-view) source would be
+            # decoded as sheared 3x3-mosaic garbage, so normalize it; the
+            # destination is the preallocated ping-pong buffer - it must
+            # already be correct (replacing it would break caller identity).
+            if source.dtype != np.float32 or not source.flags["C_CONTIGUOUS"]:
+                source = np.ascontiguousarray(source, dtype=np.float32)
+            if destination.dtype != np.float32 or not destination.flags["C_CONTIGUOUS"]:
+                raise NeuralBridgeError(
+                    "[ANTs] process_host: the destination buffer must be a "
+                    "C-contiguous float32 array of shape [H,W,C].")
             error = ctypes.create_string_buffer(4096)
 
             params = _render_parameters(settings, reset, mask,

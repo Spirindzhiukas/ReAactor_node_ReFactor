@@ -8,6 +8,7 @@ useful as new DLSS 5.x DLL releases appear.
 """
 
 import numpy as np
+import os
 import torch
 
 import comfy.model_management as model_management
@@ -57,8 +58,17 @@ def blend_frames(base, processed, amount: float):
     """Lerp two same-layout frames: amount 0 -> base, 1 -> processed.
 
     Numpy or torch, agnostic (used for the pre-SR denoise strength).
+    ALWAYS returns a C-contiguous frame: the engine entry points take raw
+    pointers and assume interleaved [H,W,C] float memory. `processed`
+    commonly arrives as a movedim VIEW with planar memory (from the tiled
+    upscale mirror) - handing that view's pointer to the dll produced the
+    rig's "9 gray tiles" output (planar RGB decoded as interleaved).
     """
     amount = float(amount)
+    if hasattr(processed, "contiguous"):  # torch (may be a non-contig view)
+        processed = processed.contiguous()
+    else:  # numpy
+        processed = np.ascontiguousarray(processed)
     if amount >= 1.0 - 1e-4:
         return processed
     if amount <= 1e-4:
@@ -234,6 +244,18 @@ class ReFactorDLSS5Enhancer:
                 del self.manager
                 self.manager = None
             dll_path = discovery.resolve_nr_runtime_path(nr_choice)
+            if (discovery.is_known_force_terminator(dll_path)
+                    and not os.environ.get("ANTS_ALLOW_KNOWN_BAD_NR")):
+                raise RuntimeError(
+                    "[ANTs] Refusing to load '" + os.path.basename(dll_path) + "': "
+                    "this RenoDX-derived NR build force-terminates the whole "
+                    "process at the first NGX evaluate on a plain D3D12 host "
+                    "(rig-proven: instant silent death, no exception, no log - "
+                    "it expects to run behind ReShade inside a game). Pick a "
+                    "different NR build in models/DLSS/NR (a stock nvngx_dlssnr "
+                    "from DLSS Swapper fails cleanly and is a valid experiment), "
+                    "or set the environment variable ANTS_ALLOW_KNOWN_BAD_NR=1 "
+                    "to try it anyway at the risk of losing the session.")
             self._ordinal = self.device.index if getattr(self.device, "index", None) is not None else 0
             # Sessions are size-keyed and created lazily on the first frame
             # (see _native_session_for); NGX providers must not be churned.
@@ -347,7 +369,7 @@ class ReFactorDLSS5Enhancer:
         if tuple(out.shape[1:3]) != (height, width):
             out = comfy.utils.common_upscale(out.movedim(-1, 1), width, height,
                                              "lanczos", "disabled").movedim(1, -1)
-        out = out[0].to(device=frame.device, dtype=torch.float32)
+        out = out[0].to(device=frame.device, dtype=torch.float32).contiguous()
         return blend_frames(frame, out, float(strength))
 
     def enhance(self, image, nr_dll_version, sr_dll_version, fg_dll_version,
@@ -535,7 +557,12 @@ class ReFactorDLSS5Enhancer:
                 elif use_cuda:
                     if denoise_this:
                         frame = self._pre_denoise_frame(frame, d_model, d_strength)
-                    dest = torch.empty_like(frame)
+                    if not frame.is_contiguous():
+                        frame = frame.contiguous()
+                    # not empty_like: it preserves the planar strides of a
+                    # movedim view, and the engine writes interleaved rows
+                    dest = torch.empty(tuple(frame.shape), device=frame.device,
+                                       dtype=torch.float32)
                     self.manager.process_cuda(
                         frame.data_ptr(), dest.data_ptr(),
                         frame.shape[1], frame.shape[0],

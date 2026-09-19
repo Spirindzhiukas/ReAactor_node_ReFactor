@@ -236,6 +236,25 @@ def category_choices(category: str):
     return ["auto"] + [e["name"] for e in category_entries(category)]
 
 
+# Rig-proven (runs 14-19): RenoDX-derived NR builds force-terminate the
+# whole process inside their first EvaluateFeature on a plain D3D12 host -
+# no exception is raised (a first-in-process vectored handler sees nothing)
+# and no NGX log is written. These builds are made to sit behind ReShade's
+# NGX dispatcher inside a game; a headless host hits a deliberate exit
+# path. Provenance/credit: the RenoDX project (clshortfuse) and the
+# community "4000 series friendly" repack. We refuse to select them by
+# default so a whole ComfyUI session cannot be lost mid-queue; the
+# ANTS_ALLOW_KNOWN_BAD_NR=1 environment variable overrides for
+# experimentation.
+KNOWN_FORCE_TERMINATOR_MARKERS = ("renodx",)
+
+
+def is_known_force_terminator(dll_path):
+    """True when the dll filename matches a rig-proven force-terminator."""
+    name = os.path.basename(str(dll_path)).lower()
+    return any(marker in name for marker in KNOWN_FORCE_TERMINATOR_MARKERS)
+
+
 def resolve_nr_runtime_path(choice: str):
     """The NR runtime .dll for the native host: a chosen flat dll directly,
     a chosen set's nvngx_dlssnr*.dll, or (auto/vanished) the first found."""
