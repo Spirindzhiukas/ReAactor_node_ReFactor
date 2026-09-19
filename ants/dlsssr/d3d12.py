@@ -30,7 +30,7 @@ D3D12_HEAP_TYPE_UPLOAD = 2
 D3D12_HEAP_TYPE_READBACK = 3
 D3D12_HEAP_FLAG_NONE = 0
 D3D12_RESOURCE_FLAG_NONE = 0
-D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS = 0x4
+D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS = 0x8
 D3D12_RESOURCE_STATE_COMMON = 0
 D3D12_RESOURCE_STATE_UNORDERED_ACCESS = 0x8
 D3D12_RESOURCE_STATE_COPY_DEST = 0x400
@@ -86,7 +86,9 @@ def linear_layout(width, height, fmt):
 def _heap_properties(heap_type):
     # D3D12_HEAP_PROPERTIES: Type, CPUPageProperty, MemoryPoolPreference,
     # CreationNodeMask, VisibleNodeMask (20 bytes)
-    return struct_pack("<IIIII", heap_type, 0, 0, 1, 1)
+    heap = struct_pack("<IIIII", heap_type, 0, 0, 1, 1)
+    assert len(heap) == 20
+    return heap
 
 
 def struct_pack(fmt, *values):
@@ -99,15 +101,22 @@ def _pack(fmt, *values):
     return ctypes.create_string_buffer(_s.pack(fmt, *values), _s.calcsize(fmt))
 
 
+_RESOURCE_DESC_FMT = "<I4xQQIHHIIIIQ"  # 56 bytes (d3d12.h layout, PE32+)
+
+
 def _resource_desc_texture(width, height, fmt, flags):
-    # D3D12_RESOURCE_DESC (PE32+ layout): Dimension u32, Alignment u64,
-    # Width u64, Height u32, DepthOrArraySize u16, MipLevels u16, Format u32,
-    # SampleDesc {Count u32, Quality u32}, Layout u32, Flags u32
-    return _pack("<IQIHHHIIII", 2, 0, width, height, 1, 1, fmt, 1, 0, 64 | flags, 4, flags)
+    # D3D12_RESOURCE_DESC: Dimension u32 (+4 pad), Alignment u64, Width u64,
+    # Height u32, DepthOrArraySize u16, MipLevels u16, Format u32,
+    # SampleDesc {Count u32, Quality u32}, Layout u32, Flags u64
+    desc = _pack(_RESOURCE_DESC_FMT, 2, 0, width, height, 1, 1, fmt, 1, 0, 0, flags)
+    assert len(desc) == 56
+    return desc
 
 
 def _resource_desc_buffer(size):
-    return _pack("<IQIHHHIIII", 1, 0, size, 0, 1, 1, DXGI_FORMAT_UNKNOWN, 1, 0, 0, 0)
+    desc = _pack(_RESOURCE_DESC_FMT, 1, 0, size, 0, 1, 1, DXGI_FORMAT_UNKNOWN, 1, 0, 0, 0)
+    assert len(desc) == 56
+    return desc
 
 
 def _transition_barrier(resource_ptr, before, after):

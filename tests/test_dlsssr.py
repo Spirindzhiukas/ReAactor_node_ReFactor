@@ -156,6 +156,21 @@ def main():
           len(pkg.NODE_CLASS_MAPPINGS) == 20
           and "ANTsDLSSSRUpscaler" in pkg.NODE_CLASS_MAPPINGS)
 
+    # ---- d3d12 struct packs (sizes/fields per d3d12.h, PE32+) ----
+    from ants.dlsssr import d3d12 as d12
+    tex = d12._resource_desc_texture(64, 48, d12.DXGI_FORMAT_R8G8B8A8_UNORM,
+                                     d12.D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+    buf = d12._resource_desc_buffer(4096)
+    check("d3d12: RESOURCE_DESC is 56 bytes, texture2d + zero alignment",
+          len(tex) == 56 and len(buf) == 56
+          and tex[0:4] == (2).to_bytes(4, "little") and tex[4:12] == b"\x00" * 8)
+    check("d3d12: UAV resource flag is 0x8 (0x4 = render target)",
+          d12.D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS == 0x8
+          and tex[-8:] == (0x8).to_bytes(8, "little"))
+    check("d3d12: heap props 20B, barrier 32B",
+          len(d12._heap_properties(0)) == 20
+          and len(d12._transition_barrier(0x1234, 0, 2)) == 32)
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 
