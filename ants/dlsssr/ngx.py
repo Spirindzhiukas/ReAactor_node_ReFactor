@@ -35,6 +35,11 @@ from .parameters import CoreParameterObject, OwnParameterObject
 _CVOID = ctypes.c_void_p
 _CI32 = ctypes.c_int32
 from . import shim as shim_mod
+
+
+def _log():
+    from ..log import dlss_logger
+    return dlss_logger
 from . import win32
 
 NGX_VERSION_API = 0x15
@@ -238,6 +243,8 @@ class NgxSession:
         init4 = self.module.fn("NVSDK_NGX_D3D12_Init",
                                [_CVOID, _CVOID, _CVOID, _CI32])
 
+        _log().status(f"NGX init -> {os.path.basename(module_path)} "
+                      f"({'classic Init' if use_own_parameters else 'Init_Ext-first'})")
         def try_init():
             if use_own_parameters:
                 # Snippet-direct runtimes (ReShade/RenoDX builds) target the
@@ -259,6 +266,7 @@ class NgxSession:
             return hr  # last failure, for the error message
 
         hr = try_init()
+        _log().status(f"NGX init <- hr=0x{hr & 0xFFFFFFFF:08X}")
         if hr != 1:
             raise DlssSrError(
                 f"[ANTs] NGX Init failed (0x{hr & 0xFFFFFFFF:08X}) for "
@@ -288,9 +296,11 @@ class NgxSession:
             self._destroy_parameters = self.module.fn("NVSDK_NGX_D3D12_DestroyParameters", [_CVOID])
 
     def create_feature(self, feature_id):
+        _log().status(f"NGX CreateFeature(feature {feature_id}) ->")
         out = ctypes.c_void_p()
         hr = self._create(self.gpu.list.ptr, ctypes.c_int32(feature_id),
                           self.params.ptr, ctypes.byref(out))
+        _log().status(f"NGX CreateFeature <- hr=0x{hr & 0xFFFFFFFF:08X}")
         if hr != 1:
             code = hr & 0xFFFFFFFF
             known = {0xBAD0000B: "FeatureNotSupported",
@@ -307,8 +317,14 @@ class NgxSession:
         return self.handle
 
     def evaluate(self):
+        first = not getattr(self, "_eval_logged", False)
+        if first:
+            _log().status("NGX EvaluateFeature -> (first frame)")
         hr = self._evaluate(self.gpu.list.ptr, ctypes.c_void_p(self.handle),
                             self.params.ptr, None)
+        if first:
+            self._eval_logged = True
+            _log().status(f"NGX EvaluateFeature <- hr=0x{hr & 0xFFFFFFFF:08X}")
         if hr != 1:
             raise DlssSrError(
                 f"[ANTs] NGX EvaluateFeature failed (0x{hr & 0xFFFFFFFF:08X}).")

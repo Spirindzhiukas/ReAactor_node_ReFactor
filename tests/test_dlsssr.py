@@ -48,6 +48,18 @@ def main():
               names == ["fwd_create", "fwd_evaluate", "fwd_release", "fwd_set_slots"])
         check("shim: entry point + DYNAMIC_BASE|NX_COMPAT",
               pe.OPTIONAL_HEADER.DllCharacteristics & 0x140 == 0x140)
+        # unwind metadata for the 3 non-leaf thunks (rig run 14: an exception
+        # escaping through an unwindable-less frame killed the process)
+        import struct as _st
+        raw = pe.get_memory_mapped_image()
+        exc = pe.OPTIONAL_HEADER.DATA_DIRECTORY[3]
+        ok = exc.Size == 36
+        for i in range(exc.Size // 12):
+            b, e, u = _st.unpack_from("<III", raw, exc.VirtualAddress + i * 12)
+            ver, prolog, count = raw[u], raw[u + 1], raw[u + 2]
+            ok = ok and e - b == 63 and ver == 2 and prolog == 4 and count == 1 \
+                and raw[u + 4:u + 6] == b"\x04\x16"  # UWOP_ALLOC_SMALL 56 @4
+        check("shim: 3 RUNTIME_FUNCTIONs + shared UNWIND_INFO (thunks unwindable)", ok)
     except ImportError:
         check("shim: pefile parses (pefile missing in env)", False)
 

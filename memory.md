@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 283 checks + gates (details below, fixes after)
+- **Suite:** ALL GREEN — 284 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -167,6 +167,20 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - LEGACY engine: helper locates files by LITERAL 'nvngx_dlssnr.dll' name;
   owner's RenoDX-named build -> stage_legacy_runtime() copies the set to
   a writable dir under canonical names; manager gets the stage dir.
+- RIG run 14 (first run with Claude's fix): HARD PROCESS CRASH, no
+  traceback, right after load_bridge logs - the first time the REAL thunk
+  machine code executed (the trampoline bug meant the thunk bytes were
+  never jumped to before). RESPONSES SHIPPED: (a) shim now carries proper
+  .pdata/UNWIND_INFO for the 3 non-leaf thunks (v2, prolog 4, 1x
+  UWOP_ALLOC_SMALL 56, shared info; 3 RUNTIME_FUNCTIONs; exception dir
+  wired; pefile-verified + pinned) so C++ exceptions can unwind through
+  our frames (Claude's flagged risk); (b) in-flight NGX call markers in
+  the log (init/createfeature/first-evaluate with hr codes) so a crash
+  names the call in flight; (c) owner asked to pull the faulting MODULE
+  + exception code from Event Viewer (Application, python.exe error) -
+  that single field decides shim-thunk vs runtime-vs-reshade-host fault.
+  Note: pre-denoise log line missing in run 14 output - either buffering
+  loss on hard crash or another node crashed first; markers will tell.
 - **THE BIG ONE (Claude Sonnet 5's catch, run 13): ngx.NgxModule stored
   the shim thunk as a ctypes CALLABLE; fn() then built
   CFUNCTYPE(restype, *argtypes)(that_callable) = a Python-callback

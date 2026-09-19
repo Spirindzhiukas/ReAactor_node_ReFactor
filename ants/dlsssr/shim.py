@@ -139,10 +139,31 @@ def build_shim_dll(image_base=DEFAULT_IMAGE_BASE, dll_name="nvngx.dll"):
         strings += name.encode() + b"\x00"
 
     export_end_rva = strings_rva + len(strings)
-    text_virtual_size = export_end_rva - text_rva
+    # Unwind metadata: the three call thunks are non-leaf (they CALL the
+    # parked NGX function), so exception unwinding THROUGH them needs
+    # UNWIND_INFO + RUNTIME_FUNCTION entries - without them a C++ exception
+    # that escapes the runtime cannot unwind our frame and the process dies
+    # with no traceback (rig run 14 signature). All three thunks share one
+    # UNWIND_INFO (identical prologs: "sub rsp, 0x38" = UWOP_ALLOC_SMALL).
+    unwind_rva = _align(export_end_rva, 4)
+    pdata_rva = _align(unwind_rva + 6, 4)
+    pdata_end_rva = pdata_rva + 3 * 12
+    text_virtual_size = pdata_end_rva - text_rva
 
     text_bytes = bytearray(text_virtual_size)
     text_bytes[:len(text.bytes)] = text.bytes
+
+    def unwind_bytes(rva):
+        # UNWIND_INFO v2, no flags, prolog 4 (the sub), 1 code,
+        # no frame pointer: [0x04, (UWOP_ALLOC_SMALL<<3)|info(56/8-1=6)]
+        struct.pack_into("<BBBB", text_bytes, rva - text_rva, 0x02, 4, 1, 0)
+        struct.pack_into("<BB", text_bytes, rva - text_rva + 4, 4, 0x16)
+
+    unwind_bytes(unwind_rva)
+    for i, fn_rva in enumerate((create_rva, evaluate_rva, release_rva)):
+        base = pdata_rva + i * 12
+        struct.pack_into("<III", text_bytes, base - text_rva,
+                         fn_rva, fn_rva + 63, unwind_rva)
 
     def w32(rva, value):
         struct.pack_into("<I", text_bytes, rva - text_rva, value & 0xFFFFFFFF)
@@ -219,6 +240,8 @@ def build_shim_dll(image_base=DEFAULT_IMAGE_BASE, dll_name="nvngx.dll"):
     dirs = opt + 112
     u32(dirs + 0, export_dir_rva)              # Export table
     u32(dirs + 4, export_end_rva - export_dir_rva)
+    u32(dirs + 3 * 8, pdata_rva)               # Exception table (unwindable)
+    u32(dirs + 3 * 8 + 4, 3 * 12)
     u32(dirs + 5 * 8, reloc_rva)               # Base relocation table
     u32(dirs + 5 * 8 + 4, len(reloc_bytes))
 
