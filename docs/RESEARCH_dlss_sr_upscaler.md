@@ -101,3 +101,39 @@ neuroframe engine's exports (so we also learn whether its frame path could
 give NR-side upscaling — `process_cuda_video_frame` has separate output dims
 in Merserk's driver, formats NV12/P010, RGBA8 in the descriptor set — as a
 bonus route with zero new host code).
+
+## 7. Recreating the neuroframe pair in pure Python (owner question) — verdict: yes, phased
+
+What the pair actually does: `neuroframe_caller.dll` is an ABI shim;
+`neuroframe_engine.dll` is the real work — a D3D12/NGX host that initializes
+feature 18 (NR) with the `nvngx_dlssnr.dll` from the folder it is pointed
+at, feeds frames (HOST pointers or CUDA-imported buffers), calls
+`NGX_EvaluateFeature`, and returns results. That is *exactly* the job the
+DLSS-Video-Transcoder project already proves doable in pure FFI (it hosts
+THREE NGX features — SR, NR, FG — from TypeScript with hand-rolled D3D12 COM
+bindings). Python has the same primitives (ctypes + COM vtable structs or
+comtypes; torch/CUDA for the buffer path).
+
+Plan (phased, per the owner's control-and-maintainability goal):
+
+1. **Build the pure-Python NGX host for SR first** (`ants/dlsssr/`): it
+   proves the D3D12 device/resource/residency plumbing and NGX
+   parameter/evaluation flow on the owner rig with the simplest feature
+   (still-image SR; the DVT-verified pattern). This is the prerequisite
+   step already in plan.md.
+2. **Port feature 18 onto the same host** (same code path, different
+   feature id + parameters): from then on the neuroframe pair is an
+   OPTIONAL legacy path — discovery keeps supporting it, but our own host
+   gives full control of parameters, ABI, updates, per-feature presets and
+   logging, and removes the 3rd-party-DLL dependency entirely.
+3. Non-goals: FFmpeg/NVENC video pipelines (out of ComfyUI scope).
+
+Owner-rig facts (probe v2 run): NGX core present (DriverStore
+`nvmdsi.inf_amd64_05d1e242e80cf105`, core 32.0.16.1692 + loader
+30.0.14.9516) — SR hosting is GO; `nvngx_dlss.dll` 310.9.1.0 (DLSS 4.5-era:
+J/K/L/M presets all present); neuroframe engine 1.4.0.0 with the FULL
+v1-v6 export family (incl. `process_frame_v6` — separate output dims, i.e.
+NR-side upscaling is available to probe — and `dlss5nr_shutdown`, which we
+should call on bridge teardown); a RenoDX-tuned NR build 310.8.SF.0 is in
+use. Merserk's repo may carry newer engine builds than the Gourieff zip —
+moot once step 2 lands.

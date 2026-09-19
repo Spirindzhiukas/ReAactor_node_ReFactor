@@ -4,6 +4,8 @@ import threading
 
 import numpy as np
 
+from ..log import logger
+
 # --- constants ---
 BRIDGE_ABI_VERSION = 6
 MEMORY_HOST = 0
@@ -192,6 +194,20 @@ class DLSSStandaloneManager:
                 raise NeuralBridgeError(f"Bridge initialization failed: {err_msg}")
             
             return True
+
+    def shutdown(self):
+        """Graceful engine teardown (dlss5nr_shutdown, engine >= 1.4)."""
+        with self._lock:
+            if self._library is None:
+                return
+            try:
+                fn = getattr(self._library, "dlss5nr_shutdown", None)
+                if fn is not None:
+                    fn.argtypes, fn.restype = [], None
+                    fn()
+            except Exception as exc:
+                logger.debug(f"dlss5nr_shutdown raised (ignored): {exc}")
+            self._library = None
 
     def cuda_available(self):
         """(ok, reason): engine-side CUDA interop readiness."""

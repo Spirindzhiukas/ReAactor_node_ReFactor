@@ -37,6 +37,30 @@ DLSS_ROOT = model_paths.DLSS_MODELS_PATH
 # category subfolders (owner layout): name -> human description
 CATEGORY_SUBFOLDERS = {"NR": "Neural Rendering", "SR": "Super Resolution", "FG": "Frame Generation"}
 
+
+def _is_helper_dir(name: str) -> bool:
+    """The 3rd-party helper stash (neuroframe pair masters): models/DLSS/HELPERS/
+    (recommended) or any folder whose name starts with 'merserk' / 'hlp'
+    (apostrophes/hyphens ignored, so the owner's "Merserk's_DLLS" works)."""
+    n = name.lower().replace("'", "").replace("-", "_")
+    return n.startswith(("helpers", "hlp", "merserk"))
+
+
+def _has_nr_runtime(files) -> bool:
+    return any(f.lower().startswith("nvngx_dlssnr") for f in files)
+
+
+def helper_dll_dirs():
+    """Folders that may hold the neuroframe helper pair (search order)."""
+    dirs = []
+    if os.path.isdir(DLSS_ROOT):
+        for entry in sorted(os.listdir(DLSS_ROOT)):
+            candidate = os.path.join(DLSS_ROOT, entry)
+            if os.path.isdir(candidate) and _is_helper_dir(entry):
+                dirs.append(candidate)
+    dirs.append(PACKAGE_DLL_DIR)
+    return dirs
+
 PACKAGE_DLL_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "dll")
 
 
@@ -114,16 +138,20 @@ def discover_dll_sets(category=None):
             if os.path.isdir(candidate) and entry.lower().startswith("dlssnr"):
                 add(entry, candidate, "NR")
 
-        # 3. generic subfolders (uncategorized; e.g. older manual layouts)
-        #    and the flat files in models/DLSS itself
+        # 3. generic subfolders: with an NR runtime -> uncategorized (NR
+        #    selector); helper-only stash -> category HLP; anything else ->
+        #    category OTHER. The flat files in models/DLSS itself stay
+        #    uncategorized (the owner's current live layout).
         for entry in sorted(os.listdir(DLSS_ROOT)):
             candidate = os.path.join(DLSS_ROOT, entry)
             if os.path.isdir(candidate) and entry not in CATEGORY_SUBFOLDERS \
-                    and not entry.lower().startswith("dlssnr"):
+                    and not entry.lower().startswith("dlssnr") \
+                    and not _is_helper_dir(entry):
                 files = dll_files(candidate)
+                cat = None if _has_nr_runtime(files) else "OTHER"
                 label = entry if _nr_runtime_label(files) is None \
                     else f"{entry} - {_nr_runtime_label(files)}"
-                add(label, candidate, None)
+                add(label, candidate, cat)
         flat = dll_files(DLSS_ROOT)
         if flat:
             nr = _nr_runtime_label(flat)

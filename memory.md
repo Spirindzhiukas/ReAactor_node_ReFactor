@@ -10,21 +10,23 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
 - **Suite:** ALL GREEN — 219 checks + gates (details below)
-- **Owner rig facts (probe round):** models/DLSS lives FLAT at
-  `C:\ComfyUI_PORTABLE\ComfyUI\models\DLSS\` with the neuroframe pair +
-  `nvngx_dlss.dll` (56 MB) + `nvngx_dlssd/g.dll` +
-  `nvngx_dlssnr_RenoDX_4000_series_friendly.dll` (158 MB). Probe v1 reported
-  nothing (run without the path arg / pre-hardening) — probe v2 accepts the
-  ComfyUI root, models dir, or the DLSS dir itself and prints [scan]
-  diagnosis lines; owner to re-run (the NGX core NOT FOUND needs the [scan]
-  output to interpret). NOTE: dll_README.md was accidentally clobbered with a
-  plan.md snapshot in commit 11074ed (script mixed Path state) — rebuilt in
-  the layout commit; docs edits now go through write_file/path-based only.
+- **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
+  `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
+  `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
+  4.5-era; J/K/L/M presets present). neuroframe_engine 1.4.0.0 with FULL
+  v1-v6 family: `process_frame_v6` (separate output dims - NR-side upscaling
+  available) + `dlss5nr_shutdown` (now called on bridge teardown) + rebind/
+  scene_score_v1/temporal_status/surface_*. NR build in use:
+  `nvngx_dlssnr_RenoDX_4000_series_friendly.dll` 310.8.SF.0. dlls live FLAT
+  in models/DLSS (works: flat set auto-labeled after the nvngx_dlssnr*
+  inside). NOTE: dll_README.md was clobbered with a plan.md snapshot in
+  11074ed (script mixed Path state) - rebuilt; docs edits now path-based only.
 
 ## Shipped history (short)
 
 | Commit | What |
 |---|---|
+| stash commit | discovery v3: helper stash (models/DLSS/HELPERS or *merserk*/hlp-named, apostrophes ignored) excluded from the NR selector + exposed via helper_dll_dirs(); engine fallback searches set dir then stash (loud error lists everything searched); generic folders without an nvngx_dlssnr runtime = OTHER category (out of NR selector); dlss5nr_shutdown called on bridge replacement; authoritative what-goes-where + naming guide in dll_README; pure-Python neuroframe replacement verdict: YES phased (SR host first in ants/dlsssr, then port feature 18 onto it - pair becomes optional legacy; RESEARCH_dlss_sr_upscaler §7) |
 | layout commit | package renamed rfactor/ -> ants/ (last pre-rebrand artifact, suite-guarded); discovery v2: models/DLSS/<NR|SR|FG>/<version>/ category sets (NR selector excludes SR/FG; SR/FG reserved for future nodes), dlssnr_<version>/ legacy kept, flat models/DLSS labeled after the nvngx_dlssnr* runtime inside (owner's RenoDX-named dll now visible in the selector); probe v2 hardened (any-root arg + NGX [scan] diagnosis); "Nature"->"Natural" display rename (Merserk's runtime.py maps style 1 to Natural; OreX agrees; ABI ints unchanged); dll_README rebuilt (clobbered in 11074ed) |
 | SR research commit | Regular DLSS SR verdict: feasible WITHOUT a compiled bridge — DVT (HicirTech/DLSS-Video-Transcoder, no LICENSE — reference technique only, never copy code) hosts NGX via pure FFI (LoadLibraryExW driver _nvngx.dll + nvngx.dll loader) and runs sr in.png --preset L on stills; presets are HOST-settable on nvngx_dlss.dll via DLSS.Hint.Render.Preset.<Mode> params (enum Default 0, A-F 1-6, J 10, K 11, L 12, M 13, N/O reserved; DLAA variant needs in==out); THE upscaler dll = nvngx_dlss.dll (user-procured, models/DLSS/dlss_<version>/); NGX core is driver-shipped, never bundled; our route = pure-Python ctypes NGX host (ants/dlsssr/) + D3D12 COM plumbing, modes DLAA/1.5/1.724/2/3 + output resized back to input; bonus route: neuroframe frame path (process_cuda_video_frame) has separate output dims (NV12/P010, RGBA8 in descriptors). Probe: tools/probe_dlss_rig.py |
 | NR-schedule commit | NR Schedules: ANTs⚡DLSS NR Scheduler node (19 total) emits NR_SCHEDULE; style-per-pass (Nature/Cinematic cycle default), per-pass settings (bypass main widgets), per-pass denoise w/ 4 model slots (inherit main model); passes chain, bridge global post-final-pass; JS UIs in web/ (dynamic rows + live cross-node greying); schedule.py pure validated core; nr_passes removed. Preset verdict: nvngx_dlssnr has NO model-preset param (OreX string-table verify); presets = dll_version folders, artist names table in dll_README (J Crisp / K Stable / L Quality / M Fast) |
@@ -104,7 +106,7 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | smoke_import.py | — | import + 18-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 219 checks, all green at the layout commit (19 nodes; Python package `ants/`).** Sandbox venv: numpy, opencv-python-headless,
+**Total: 223 checks, all green at the stash commit (19 nodes; package `ants/`).** Sandbox venv: numpy, opencv-python-headless,
 pillow, pyflakes, pefile (NO torch — stub harness only). huggingface.co is TLS-blocked from the
 sandbox (DLL zips can't be downloaded there — verify engine versions on the owner rig).
 

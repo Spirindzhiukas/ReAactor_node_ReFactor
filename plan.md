@@ -29,10 +29,14 @@ stays a lean "what's next". Rules: `CLAUDE.md`. Facts: `memory.md`.
 - [x] DLSS preset mechanism SOLVED: presets are host-settable NGX params on nvngx_dlss.dll
       (DLSS.Hint.Render.Preset.<Mode>) — the flip trigger is OUR OWN NGX host, not a
       neuroframe ABI change (RESEARCH_dlss5_hybrid §8 + RESEARCH_dlss_sr_upscaler §3).
-- [x] Owner rig already HAS nvngx_dlss.dll (+ dlssd/dlssg + a RenoDX-tuned
-      nvngx_dlssnr build) flat in models/DLSS/ — probe v2 re-run pending for
-      NGX-core status + engine exports ([scan] lines now included; it accepts
-      the ComfyUI root, the models dir, or the DLSS dir directly).
+- [x] Probe v2 run on the rig: NGX core PRESENT (DriverStore nvmdsi.inf,
+      core 32.0.16.1692), nvngx_dlss.dll 310.9.1.0 (J/K/L/M ready), engine
+      1.4.0.0 with full v1-v6 family incl. process_frame_v6 (NR-side
+      upscaling) + dlss5nr_shutdown (wired into teardown). All green lights
+      for ants/dlsssr/.
+- [ ] Pure-Python neuroframe replacement (phased): SR host first (ants/dlsssr),
+      then port feature 18 onto it -> pair becomes optional legacy (verdict +
+      facts in RESEARCH_dlss_sr_upscaler §7).
 - [ ] SR node (`ants/dlsssr/`): pure-FFI NGX host; selector over
       models/DLSS/SR/<version>/ sets (owner notes several SR dll variants
       exist); modes DLAA/Q/B/P/UP + output always rescaled back to input;

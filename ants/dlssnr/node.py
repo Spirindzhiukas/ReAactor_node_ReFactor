@@ -155,11 +155,12 @@ class ReFactorDLSS5Enhancer:
         if self.manager is None or self.manager_dll_dir != dll_dir:
             if self.manager is not None:
                 try:
-                    del self.manager
+                    self.manager.shutdown()
                 except Exception:
                     pass
+                del self.manager
                 self.manager = None
-            self.manager = DLSSStandaloneManager(dll_dir)
+            self.manager = DLSSStandaloneManager(dll_dir, discovery.helper_dll_dirs())
             self._ordinal = self.device.index if getattr(self.device, "index", None) is not None else 0
             self.manager.initialize(self._ordinal)
             self.manager_dll_dir = dll_dir

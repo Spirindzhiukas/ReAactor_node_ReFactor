@@ -190,6 +190,32 @@ def main():
             check("discovery: flat files inside a category folder form that category's set",
                   any(x["name"] == "(SR)" and x["category"] == "SR"
                       for x in discovery.discover_dll_sets("SR")))
+
+            # helper stash (owner's "Merserk's_DLLS" spelling included):
+            # excluded from the NR selector, exposed via helper_dll_dirs()
+            stash = os.path.join(root, "Merserk's_DLLS")
+            os.makedirs(stash)
+            open(os.path.join(stash, "neuroframe_engine.dll"), "wb").write(b"x")
+            open(os.path.join(stash, "neuroframe_caller.dll"), "wb").write(b"x")
+            check("discovery: helper stash is NOT an NR selector entry",
+                  not any("Merserk" in x["name"] for x in discovery.discover_dll_sets("NR")))
+            saved_helpers = discovery.PACKAGE_DLL_DIR
+            discovery.PACKAGE_DLL_DIR = os.path.join(td, "no_pkg")
+            try:
+                dirs = discovery.helper_dll_dirs()
+                check("discovery: helper stash discovered by name",
+                      any("Merserk" in d for d in dirs))
+            finally:
+                discovery.PACKAGE_DLL_DIR = saved_helpers
+
+            # a generic subfolder WITHOUT an NR runtime -> OTHER, not in NR selector
+            other_v = os.path.join(root, "misc", )
+            os.makedirs(other_v)
+            open(os.path.join(other_v, "something.dll"), "wb").write(b"x")
+            check("discovery: generic folder without NR runtime -> OTHER",
+                  any(x["name"] == "misc" and x["category"] == "OTHER"
+                      for x in discovery.discover_dll_sets())
+                  and not any(x["name"] == "misc" for x in discovery.discover_dll_sets("NR")))
         finally:
             discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, discovery.PACKAGE_DLL_DIR = saved
 
