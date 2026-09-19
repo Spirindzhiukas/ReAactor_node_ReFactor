@@ -13,34 +13,34 @@ import comfy.model_management as model_management
 import comfy.utils
 import folder_paths
 
-from .rfactor import model_paths
-from .rfactor.engine.face_objects import Face
-from .rfactor.faceboost.archs import ARCH_REGISTRY  # noqa: F401 (package __init__ registers CodeFormer)
-from .rfactor.faceboost.archs import model_loading
-from .rfactor.faceboost import restorer as _faceboost_restorer
-from .rfactor.faceboost.facelib.utils.face_restoration_helper import FaceRestoreHelper
-from .rfactor.log import logger, set_console_level
-from .rfactor.masking import ReFactorMaskBuilder
-from .rfactor.ort_utils import create_session, resolve_providers
-from .rfactor.scripting import state, ProcessingImg2Img
-from .rfactor.swapper import (
+from .ants import model_paths
+from .ants.engine.face_objects import Face
+from .ants.faceboost.archs import ARCH_REGISTRY  # noqa: F401 (package __init__ registers CodeFormer)
+from .ants.faceboost.archs import model_loading
+from .ants.faceboost import restorer as _faceboost_restorer
+from .ants.faceboost.facelib.utils.face_restoration_helper import FaceRestoreHelper
+from .ants.log import logger, set_console_level
+from .ants.masking import ReFactorMaskBuilder
+from .ants.ort_utils import create_session, resolve_providers
+from .ants.scripting import state, ProcessingImg2Img
+from .ants.swapper import (
     unload_all_models,
     analyze_faces,
     half_det_size,
     get_current_faces_model,
 )
-from .rfactor.faceswap_script import FaceSwapScript
-from .rfactor.loaders import (
+from .ants.faceswap_script import FaceSwapScript
+from .ants.loaders import (
     ReFactorFaceSwapModelLoader,
     ReFactorFaceRestoreModelLoader,
     ReFactorFaceDetectionModelLoader,
     ReFactorUpscaleModelLoader,
     detection_model_name,
 )
-from .rfactor.dlssnr import DLSSNRScheduler, ReFactorDLSS5Enhancer
-from .rfactor.torch_utils import normalize_ as normalize, stat_mode
-from .rfactor.upscaler import upscale_bgr_face
-from .rfactor.upres import (
+from .ants.dlssnr import DLSSNRScheduler, ReFactorDLSS5Enhancer
+from .ants.torch_utils import normalize_ as normalize, stat_mode
+from .ants.upscaler import upscale_bgr_face
+from .ants.upres import (
     UPRES_CHOICES,
     UPRES_USE_MODEL,
     decide_restore_size,
@@ -48,7 +48,7 @@ from .rfactor.upres import (
     needs_model_upscale,
     restore_model_native,
 )
-from .rfactor.utils import (
+from .ants.utils import (
     run_facerestore_onnx,
     batch_tensor_to_pil,
     batched_pil_to_tensor,
@@ -63,7 +63,7 @@ from .rfactor.utils import (
     progress_bar,
     progress_bar_reset,
 )
-# Model folders are registered centrally in rfactor.model_paths (called from __init__.py).
+# Model folders are registered centrally in ants.model_paths (called from __init__.py).
 models_dir = folder_paths.models_dir
 REACTOR_MODELS_PATH = model_paths.REACTOR_MODELS_PATH
 FACE_MODELS_PATH = model_paths.FACE_MODELS_PATH

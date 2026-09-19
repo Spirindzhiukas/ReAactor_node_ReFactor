@@ -18,7 +18,7 @@ REPO = Path(__file__).resolve().parent.parent
 IGNORE_SUBSTRINGS = (
     "unable to detect undefined names",              # star-import advisory header
     "may be undefined, or defined from star imports",  # vendored CodeFormer arch
-    # NOTE: never add a module-level __getattr__ to rfactor/*.py — pyflakes
+    # NOTE: never add a module-level __getattr__ to ants/*.py — pyflakes
     # silently skips ALL undefined-name detection for such modules (it assumes
     # any missing name could come from the PEP 562 hook). Two such shims hid a
     # missing import (run_facerestore_onnx) that only surfaced at user runtime.
@@ -32,7 +32,7 @@ def main():
         print("SKIP: pyflakes not installed (pip install pyflakes) — gate not enforced here.")
         return 0
 
-    targets = [str(REPO / "rfactor"), str(REPO / "nodes.py"), str(REPO / "__init__.py"), str(REPO / "install.py")]
+    targets = [str(REPO / "ants"), str(REPO / "nodes.py"), str(REPO / "__init__.py"), str(REPO / "install.py")]
     result = subprocess.run(
         [sys.executable, "-m", "pyflakes"] + targets,
         capture_output=True, text=True,
@@ -54,7 +54,7 @@ def main():
         for l in bad:
             print("  " + l)
         return 1
-    print("OK — no undefined names in rfactor/, nodes.py, __init__.py, install.py")
+    print("OK — no undefined names in ants/, nodes.py, __init__.py, install.py")
     return 0
 
 

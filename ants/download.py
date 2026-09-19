@@ -9,7 +9,7 @@ Improvements over the raw ``urllib.request.urlretrieve`` approach:
 
 Downloads are HTTPS to explicit, versioned URLs only (huggingface.co / github
 release assets). No third-party pip index, no wheels, no executables — binary
-DLL acquisition stays 100% manual (see ``rfactor/dlssnr``).
+DLL acquisition stays 100% manual (see ``ants/dlssnr``).
 """
 
 import os

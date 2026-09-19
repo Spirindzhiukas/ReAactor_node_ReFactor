@@ -33,15 +33,15 @@ def main():
     install_stubs()
     sys.path.insert(0, str(REPO))
 
-    from rfactor.dlssnr.hdr_bridge import (
+    from ants.dlssnr.hdr_bridge import (
         anchored_bridge,
         apply_bridge,
         classic_bridge,
         classic_bridge as cb,
     )
-    from rfactor.dlssnr import discovery
+    from ants.dlssnr import discovery
 
-    from rfactor.dlssnr.hdr_bridge import (
+    from ants.dlssnr.hdr_bridge import (
         DIFFUSE_WHITE_NITS_DEFAULT,
         PAPER_WHITE_SCALE_DEFAULT,
     )
@@ -97,7 +97,7 @@ def main():
           < abs(bl0[..., 0][shadow_mask].mean() - frame[..., 0][shadow_mask].mean()))
 
     # ---- GPU acceleration decision (pure) ----
-    from rfactor.dlssnr.node import GPU_AUTO, GPU_FORCE, GPU_OFF, decide_cuda_acceleration
+    from ants.dlssnr.node import GPU_AUTO, GPU_FORCE, GPU_OFF, decide_cuda_acceleration
     ok, _ = decide_cuda_acceleration(GPU_AUTO, True, True)
     check("cuda decision: auto + torch cuda + engine ok -> CUDA", ok)
     ok, why = decide_cuda_acceleration(GPU_AUTO, True, False)
@@ -110,7 +110,7 @@ def main():
     check("cuda decision: force gpu available -> CUDA", ok)
 
     # ---- pre-SR denoise blend (pure) ----
-    from rfactor.dlssnr.node import blend_frames
+    from ants.dlssnr.node import blend_frames
     orig = frame.copy()
     denoised = np.clip(frame + 0.2, 0.0, 1.0)
     check("blend: amount 1 == processed", np.allclose(blend_frames(orig, denoised, 1.0), denoised))

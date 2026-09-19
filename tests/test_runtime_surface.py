@@ -1,7 +1,7 @@
-"""Behavioral test for rfactor.faceboost.restorer.ensure_facerestore_model.
+"""Behavioral test for ants.faceboost.restorer.ensure_facerestore_model.
 
 Regression for the reported crash:
-    AttributeError: module '...rfactor.faceboost.restorer' has no attribute
+    AttributeError: module '...ants.faceboost.restorer' has no attribute
     'ensure_facerestore_model'
 (the function was referenced by nodes.py but a patch that should have created
 it silently didn't apply; nothing at import time referenced it, so the
@@ -37,7 +37,7 @@ def main():
     install_stubs()
     sys.path.insert(0, str(REPO))
 
-    from rfactor.faceboost import restorer
+    from ants.faceboost import restorer
 
     # --- the attribute exists at all (the reported crash) -------------------
     check("ensure_facerestore_model exists", hasattr(restorer, "ensure_facerestore_model"))
@@ -66,23 +66,23 @@ def main():
         check("present model resolves to its path", resolved == existing)
 
     # --- other runtime-referenced surface (functions nodes.py calls mid-run) --
-    import rfactor.swapper as swapper
+    import ants.swapper as swapper
 
     for fn in ("swap_face", "swap_face_many", "getFaceSwapModel", "getAnalysisModel",
                "analyze_faces", "unload_all_models", "get_current_faces_model"):
         check(f"swapper.{fn} exists", hasattr(swapper, fn))
 
-    from rfactor.faceboost import swapper as fb_swapper
+    from ants.faceboost import swapper as fb_swapper
 
     check("faceboost.swapper.in_swap exists", hasattr(fb_swapper, "in_swap"))
 
-    from rfactor.dlssnr import discovery
+    from ants.dlssnr import discovery
 
     for fn in ("discover_dll_sets", "resolve_dll_dir", "combo_choices", "default_dll_dir"):
         check(f"dlssnr.discovery.{fn} exists", hasattr(discovery, fn))
 
     # --- model loader nodes ---------------------------------------------------
-    from rfactor.loaders import (
+    from ants.loaders import (
         ReFactorFaceSwapModelLoader,
         ReFactorFaceRestoreModelLoader,
         ReFactorFaceDetectionModelLoader,
@@ -129,7 +129,7 @@ def main():
           and "FaceRestorePrePass_model" in ti["optional"])
 
     # CodeFormer must be registered (regression: silent missing import broke restore)
-    from rfactor.faceboost.archs.registry import ARCH_REGISTRY
+    from ants.faceboost.archs.registry import ARCH_REGISTRY
     check("CodeFormer registered in arch registry", "CodeFormer" in ARCH_REGISTRY)
 
     # Face Booster is deprecated: its bundle, socket and node are gone

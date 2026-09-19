@@ -1,4 +1,4 @@
-"""Tests for the Face Restore upRes interpolator logic (rfactor/upres.py)
+"""Tests for the Face Restore upRes interpolator logic (ants/upres.py)
 and the comfy-native upscale-model loader/upscaler plumbing.
 
 Usage: python tests/test_upres.py
@@ -33,7 +33,7 @@ def main():
     sys.path.insert(0, str(REPO))
 
     import cv2
-    from rfactor.upres import (
+    from ants.upres import (
         UPRES_USE_MODEL,
         decide_restore_size,
         interp_flag,
@@ -93,7 +93,7 @@ def main():
           and needs_model_upscale("Lanczos", 512, 200) is False)
 
     # ---- upscaler round trip (model stubbed at the model-call boundary) ----
-    from rfactor import upscaler
+    from ants import upscaler
 
     calls = {}
 
@@ -138,7 +138,7 @@ def main():
 
     # ---- loader node ----
     import folder_paths
-    from rfactor.loaders import ReFactorUpscaleModelLoader, UPSCALE_MODEL
+    from ants.loaders import ReFactorUpscaleModelLoader, UPSCALE_MODEL
 
     check("UPSCALE_MODEL type string", UPSCALE_MODEL == "UPSCALE_MODEL")
     original = folder_paths.get_filename_list

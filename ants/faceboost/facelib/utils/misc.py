@@ -14,7 +14,7 @@ def download_pretrained_models(file_ids, save_path_root):
     """Google-Drive downloads are no longer supported (unauditable 3rd-party host).
 
     All weights used by this nodepack are fetched from pinned HTTPS URLs in
-    ``rfactor.download`` / ``facelib.detection`` instead.
+    ``ants.download`` / ``facelib.detection`` instead.
     """
     raise NotImplementedError(
         "Google-Drive model downloads were removed from this nodepack. "

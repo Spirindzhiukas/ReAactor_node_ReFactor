@@ -168,7 +168,7 @@ def install_stubs():
     sys.modules["yaml"] = yaml
 
     # ---- folder_paths ------------------------------------------------------
-    tmp = tempfile.mkdtemp(prefix="rfactor_models_")
+    tmp = tempfile.mkdtemp(prefix="ants_models_")
     fp = magic_module("folder_paths")
     fp.models_dir = tmp
     fp.folder_names_and_paths = {}

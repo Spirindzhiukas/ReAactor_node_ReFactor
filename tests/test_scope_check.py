@@ -131,7 +131,7 @@ def check_file(path) -> list:
 
 def main():
     problems = []
-    targets = [REPO / "rfactor", REPO / "nodes.py", REPO / "install.py"]
+    targets = [REPO / "ants", REPO / "nodes.py", REPO / "install.py"]
     files = []
     for t in targets:
         if t.is_dir():

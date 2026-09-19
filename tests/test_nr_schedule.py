@@ -29,7 +29,7 @@ def main():
     install_stubs()
     sys.path.insert(0, str(REPO))
 
-    from rfactor.dlssnr import schedule as sc
+    from ants.dlssnr import schedule as sc
 
     # ---- defaults ----
     d = sc.default_schedule(2)
@@ -137,7 +137,7 @@ def main():
           "per-pass settings" in sc.describe(sched2) and "per-pass denoise" in sc.describe(sched3))
 
     # ---- scheduler node end-to-end (stubbed runtime) ----
-    from rfactor.dlssnr.scheduler_node import DLSSNRScheduler
+    from ants.dlssnr.scheduler_node import DLSSNRScheduler
     out = DLSSNRScheduler().build(2, False, False, "", None, None, None, None)
     bundle = out[0]
     check("scheduler node: returns schedule + model slots",

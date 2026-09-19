@@ -35,7 +35,7 @@ import subprocess
 import sys
 
 REPO_DIR = os.path.dirname(os.path.realpath(__file__))
-sys.path.insert(0, REPO_DIR)  # only for the rfactor modules used below (this is a script, not a package import)
+sys.path.insert(0, REPO_DIR)  # only for the ants modules used below (this is a script, not a package import)
 
 
 # --------------------------------------------------------------------- utils
@@ -187,7 +187,7 @@ def main() -> int:
 
     # ---- model files (plain data from pinned HTTPS URLs; opt-out supported)
     if not args.no_models and os.environ.get("REFACTOR_NO_AUTO_DOWNLOAD", "") not in ("1", "true"):
-        from rfactor.download import safe_download
+        from ants.download import safe_download
 
         model_url = "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx"
         try:

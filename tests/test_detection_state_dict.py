@@ -1,7 +1,7 @@
 """Regression test: IntermediateLayerGetter must register wrapped layers as
 real torch submodules.
 
-Bug being pinned: the old rfactor.torch_utils.IntermediateLayerGetter was a
+Bug being pinned: the old ants.torch_utils.IntermediateLayerGetter was a
 plain-Python wrapper (not an nn.Module), so RetinaFace's ``self.body`` never
 appeared in the detector's state_dict. Loading the facexlib detection
 checkpoints (detection_Resnet50_Final.pth etc.), whose keys are
@@ -12,7 +12,7 @@ checkpoints (detection_Resnet50_Final.pth etc.), whose keys are
 The sandbox has no usable torch build, so this test ships a ~60-line harness
 that replicates the nn.Module child-registration + state_dict recursion
 semantics that matter here, installs it as ``torch`` in sys.modules, imports
-the real rfactor.torch_utils.IntermediateLayerGetter against it, and asserts
+the real ants.torch_utils.IntermediateLayerGetter against it, and asserts
 that (a) wrapped children appear in state_dict() and (b) keys propagate with
 the ``body.`` prefix when nested inside a parent module.
 
@@ -123,7 +123,7 @@ def main():
     import importlib.util
 
     sys.modules["torch"] = _FakeTorch()  # before importing the real module
-    spec = importlib.util.spec_from_file_location("rf_torch_utils", REPO / "rfactor" / "torch_utils.py")
+    spec = importlib.util.spec_from_file_location("rf_torch_utils", REPO / "ants" / "torch_utils.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     IntermediateLayerGetter = mod.IntermediateLayerGetter

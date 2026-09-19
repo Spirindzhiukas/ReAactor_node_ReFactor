@@ -266,8 +266,8 @@ def main():
     install_stubs()
     sys.path.insert(0, str(REPO))
 
-    from rfactor.faceboost import restorer
-    from rfactor.utils import run_facerestore_onnx
+    from ants.faceboost import restorer
+    from ants.utils import run_facerestore_onnx
 
     # ---- run_facerestore_onnx behavior -------------------------------------
     FakeOrtSession.input_names = ("input", "weight")
@@ -366,7 +366,7 @@ def main():
             sys.modules["torch"].load = real_torch_load
 
     # ---- restore loader must not offer swap-family files --------------------
-    from rfactor import loaders
+    from ants import loaders
 
     check("swap-family files filtered from restore choices",
           all(not any(h in n.lower() for h in loaders._SWAP_FAMILY_HINTS)
@@ -381,13 +381,13 @@ def main():
 
     # ---- swap models: analysis models (antelopev2 etc.) must be rejected -----
     import tempfile
-    from rfactor.engine.inswap import INSwapper
+    from ants.engine.inswap import INSwapper
 
     with tempfile.TemporaryDirectory() as td:
         fake = os.path.join(td, "genderage.onnx")
         open(fake, "wb").write(b"stub-onnx")
         # stand-in ORT session: single 'input' (analysis-model shape), no 'target'/'source'
-        import rfactor.ort_utils as _ort_utils
+        import ants.ort_utils as _ort_utils
         _ort_mod = _ort_utils.get_onnxruntime()
 
         class _FakeInp:
@@ -423,7 +423,7 @@ def main():
         open(os.path.join(res_dir, "reswapper_256.onnx"), "wb").write(b"x")
         open(os.path.join(hyp_dir, "hyperswap_1a_256.onnx"), "wb").write(b"x")
 
-        from rfactor import loaders
+        from ants import loaders
         saved_paths = {k: getattr(loaders.model_paths, k)
                        for k in ("insightface_path", "reswapper_path", "hyperswap_path")}
         loaders.model_paths.insightface_path = ins_dir

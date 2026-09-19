@@ -11,7 +11,7 @@ A dependency-hygiene-focused rework of the ReActor node, now under the ANTs bran
 
 
 # The nodepack is a proper package: nothing is ever injected into sys.path.
-from .rfactor import __version__, model_paths
+from .ants import __version__, model_paths
 
 model_paths.register_folders()
 

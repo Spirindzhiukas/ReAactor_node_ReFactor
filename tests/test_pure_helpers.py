@@ -25,7 +25,7 @@ def check(name, cond):
 
 
 def stub_comfy():
-    tmp = tempfile.mkdtemp(prefix="rfactor_models_")
+    tmp = tempfile.mkdtemp(prefix="ants_models_")
     fp = types.ModuleType("folder_paths")
     fp.models_dir = tmp
     fp.folder_names_and_paths = {}
@@ -66,7 +66,7 @@ def main():
 
     # ---- stat_mode --------------------------------------------------------
     import numpy as np
-    from rfactor.torch_utils import stat_mode
+    from ants.torch_utils import stat_mode
 
     emb = np.array([[1, 2, 3], [1, 2, 9], [5, 2, 3]], dtype=np.float32)
     mode = stat_mode(emb, axis=0)
@@ -75,8 +75,8 @@ def main():
     check("stat_mode keeps old-scipy shape", mode.shape == (1, 3))
 
     # ---- DLSS dll discovery (models/DLSS, any filenames) --------------------
-    from rfactor import model_paths
-    from rfactor.dlssnr import discovery
+    from ants import model_paths
+    from ants.dlssnr import discovery
 
     check("no dll sets initially", discovery.discover_dll_sets() == [])
     check("combo always has refresh", "refresh" in discovery.combo_choices())
@@ -103,7 +103,7 @@ def main():
     check("auto picks the first set", discovery.resolve_dll_dir("auto") == v1)
 
     # ---- safe_download -----------------------------------------------------
-    from rfactor.download import safe_download
+    from ants.download import safe_download
 
     with tempfile.TemporaryDirectory() as td:
         src = os.path.join(td, "src.bin")
@@ -130,7 +130,7 @@ def main():
             del os.environ["REFACTOR_NO_AUTO_DOWNLOAD"]
 
     # ---- masking ops (pure numpy/cv2) --------------------------------------
-    from rfactor.masking import ops
+    from ants.masking import ops
 
     m = ops.bboxes_to_mask({"x": 10, "y": 10, "width": 20, "height": 20}, 64, 64)
     check("bbox mask covers box", m[10, 10] == 1.0 and m[9, 9] == 0.0 and m[29, 29] == 1.0 and m[31, 31] == 0.0)
@@ -166,7 +166,7 @@ def main():
     check("composite blends by mask", comp[0, 0, 0] == 0 and comp[3, 0, 0] == 255)
 
     # ---- env flags ---------------------------------------------------------
-    from rfactor import env
+    from ants import env
 
     os.environ["REFACTOR_SKIP_INSTALL"] = "1"
     check("skip flag reads true", env._flag("REFACTOR_SKIP_INSTALL"))

@@ -114,7 +114,7 @@ class DLSSStandaloneManager:
             raise NeuralBridgeError(
                 f"No DLL in '{dll_dir}' exports dlss5nr_init - this set does not "
                 "contain the neuroframe bridge/engine helper. Place the helper DLLs "
-                "(see rfactor/dlssnr/dll_README.md) next to nvngx_dlssnr.dll."
+                "(see ants/dlssnr/dll_README.md) next to nvngx_dlssnr.dll."
             )
         raise NeuralBridgeError(f"No .dll files found in '{dll_dir}'")
 

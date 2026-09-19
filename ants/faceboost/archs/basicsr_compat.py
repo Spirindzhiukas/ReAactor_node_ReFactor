@@ -7,7 +7,7 @@ Replaces the ``r_basicsr.utils`` imports those arch files use (only
 import logging
 
 
-def get_root_logger(logger_name="rfactor", log_level=logging.INFO):
+def get_root_logger(logger_name="ants", log_level=logging.INFO):
     log = logging.getLogger(logger_name)
     if not log.handlers:
         handler = logging.StreamHandler()
@@ -17,9 +17,9 @@ def get_root_logger(logger_name="rfactor", log_level=logging.INFO):
     return log
 
 
-def get_logger(logger_name="rfactor"):
+def get_logger(logger_name="ants"):
     return get_root_logger(logger_name)
 
 
-def make_logger(logger_name="rfactor", log_level=logging.INFO):
+def make_logger(logger_name="ants", log_level=logging.INFO):
     return get_root_logger(logger_name, log_level)

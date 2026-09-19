@@ -13,7 +13,7 @@ Owner-decided layout (DLLs are models, so they live with the models):
    practice works too — whatever the folder contains is the set).
 2. ``ComfyUI/models/DLSS/`` (flat .dll files)              — one unnamed set
 3. ``ComfyUI/models/dlssnr/<version>/`` + flat              — legacy fallback
-4. ``.../custom_nodes/<this>/rfactor/dlssnr/dll``           — legacy package dir
+4. ``.../custom_nodes/<this>/ants/dlssnr/dll``           — legacy package dir
 """
 
 import os
@@ -99,7 +99,7 @@ def default_dll_dir():
             "    ANY .dll filenames are accepted (the engine is found by its exports,\n"
             "    not by name). That folder must contain the bridge/helper DLLs and the\n"
             "    NVIDIA nvngx_dlssnr.dll runtime (whose public redistribution is\n"
-            "    prohibited - obtain it yourself). Sources: rfactor/dlssnr/dll_README.md"
+            "    prohibited - obtain it yourself). Sources: ants/dlssnr/dll_README.md"
         )
     return sets[0]["path"]
 

@@ -2,7 +2,7 @@
 
 The crash (reported from a live ComfyUI portable install):
     UnboundLocalError: cannot access local variable 'FS_MODEL' where it is not
-    associated with a value  (rfactor/swapper.py, _getFaceSwapModel_locked)
+    associated with a value  (ants/swapper.py, _getFaceSwapModel_locked)
 
 Usage: python tests/test_swapper_state.py
 """
@@ -34,7 +34,7 @@ def main():
     install_stubs()
     sys.path.insert(0, str(REPO))
 
-    import rfactor.swapper as swapper
+    import ants.swapper as swapper
 
     # --- resolve_swap_model_path: no more UnboundLocalError on odd names -----
     import tempfile
