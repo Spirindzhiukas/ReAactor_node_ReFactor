@@ -25,6 +25,7 @@ driver core faults after a feature exists and releases the D3D12 device
 objects we own.
 """
 
+import tempfile
 import ctypes
 import os
 
@@ -95,6 +96,32 @@ class FeatureCommonInfo:
         return ctypes.cast(self._struct, ctypes.c_void_p)
 
 
+def writable_cache_dir(tag):
+    """A directory we can write artifacts into (shim PE, logs).
+
+    The NGX core usually lives in the DriverStore (admin-only), so anything
+    we must create next to a *call* goes to %LOCALAPPDATA%\\ANTs\\<tag>,
+    falling back to the package dir, then the temp dir.
+    """
+    roots = []
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        roots.append(os.path.join(base, "ANTs", tag))
+    roots.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", tag))
+    roots.append(os.path.join(tempfile.gettempdir(), "ANTs", tag))
+    for root in roots:
+        try:
+            os.makedirs(root, exist_ok=True)
+            probe = os.path.join(root, ".write_probe")
+            with open(probe, "w", encoding="ascii"):
+                pass
+            os.remove(probe)
+            return root
+        except OSError:
+            continue
+    raise DlssSrError("no writable directory found for NGX runtime artifacts")
+
+
 class NgxModule:
     """A loaded NGX provider (driver core or snippet) + shim-routed calls."""
 
@@ -104,8 +131,8 @@ class NgxModule:
         self.forwarder = None
         self._fwd_stub = None
         if use_shim:
-            fwd_path = shim_mod.write_shim(forwarder_dir or os.path.join(
-                os.path.dirname(module_path), "ants_shim"))
+            fwd_path = shim_mod.write_shim(
+                forwarder_dir or writable_cache_dir("shim"))
             self._fwd_handle = win32.load_library(fwd_path)
             set_slots = win32.get_proc(self._fwd_handle, "fwd_set_slots")
             fwd_create = win32.get_proc(self._fwd_handle, "fwd_create")
@@ -154,7 +181,7 @@ class NgxSession:
                  use_own_parameters=False, app_data_path=None, use_shim=True):
         self.gpu = gpu
         self.module = NgxModule(module_path, use_shim=use_shim,
-                                forwarder_dir=os.path.dirname(module_path))
+                                forwarder_dir=writable_cache_dir("shim"))
         self._own_parameters = None
         self.params = None
         self.handle = None
@@ -162,12 +189,8 @@ class NgxSession:
         self._evaluate = None
         self._release = None
 
-        app_data = app_data_path or os.path.join(os.path.dirname(module_path), "ants_ngx_logs")
-        try:
-            os.makedirs(app_data, exist_ok=True)
-        except OSError:
-            app_data = os.path.join(os.path.expanduser("~"), "ants_ngx_logs")
-            os.makedirs(app_data, exist_ok=True)
+        app_data = app_data_path or os.path.join(writable_cache_dir("appdata"), "logs")
+        os.makedirs(app_data, exist_ok=True)
 
         info = FeatureCommonInfo(list(search_paths) or [os.path.dirname(module_path)])
         init_ext = self.module.fn("NVSDK_NGX_D3D12_Init_Ext",
