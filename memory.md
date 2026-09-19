@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 281 checks + gates (details below, fixes after)
+- **Suite:** ALL GREEN — 283 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -167,6 +167,26 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - LEGACY engine: helper locates files by LITERAL 'nvngx_dlssnr.dll' name;
   owner's RenoDX-named build -> stage_legacy_runtime() copies the set to
   a writable dir under canonical names; manager gets the stage dir.
+- **THE BIG ONE (Claude Sonnet 5's catch, run 13): ngx.NgxModule stored
+  the shim thunk as a ctypes CALLABLE; fn() then built
+  CFUNCTYPE(restype, *argtypes)(that_callable) = a Python-callback
+  TRAMPOLINE, not a pointer to the thunk -> every NGX call's args 2..n
+  re-converted through the inner 1-arg proto (mangled), callback
+  exceptions swallowed as 'Exception ignored', garbage returns
+  (0xB4C6385B, 0xe06d7363 C++ exceptions inside the runtime on bogus
+  handles). FIXED: _fwd_stub = int(fwd_create) raw address; fn() binds
+  win32.callable_at(self._fwd_stub, argtypes, restype) + Claude's assert
+  (cast(stub).value == thunk). NEW HARNESS PROBE: production fn() bound
+  against REAL in-process callback addresses (real native jump, all four
+  64-bit args verified intact - the test that would have caught it; the
+  flow harness had patched fn() itself, which is WHY it was blind).
+  Getter hardening per Claude: type-mismatched parameter reads now log
+  name+type and return FeatureNotFound instead of raising inside the
+  callback. Claude's open question (why Init/CreateFeature survived the
+  broken path): unresolved but moot - run 13's 'successes' may also have
+  been garbage returns; expect the REAL Init/CreateFeature answers on
+  run 14. Claude's .pdata/unwind note: shim thunks have no unwind info -
+  relevant only if C++ exceptions escape through them; revisit if seen.
 - RIG run 12 = **LEGACY ENGINE WORKS END-TO-END** (staged set initialized
   on the 4090, full run 13.86s, output produced) AND **SR NATIVE PIPELINE
   WORKED** (SR session create_feature(1) + evaluate + readback through the

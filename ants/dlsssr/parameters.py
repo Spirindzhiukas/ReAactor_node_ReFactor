@@ -92,7 +92,19 @@ class OwnParameterObject:
                     if name not in self.store:
                         return ctypes.c_int32(NGX_RESULT_FEATURE_NOT_FOUND).value
                     value = self.store[name]
-                    ctypes.memmove(out_ptr, ctypes.byref(width(int(value) if isinstance(value, int) else value)), ctypes.sizeof(width))
+                    try:
+                        cell = width(int(value) if isinstance(value, int) else value)
+                    except (TypeError, ValueError):
+                        # type-mismatched read: report absent instead of
+                        # raising inside the callback (ctypes would swallow
+                        # it and hand the runtime a garbage return)
+                        from ..log import dlss_logger
+                        dlss_logger.status(
+                            "NGX parameter %r requested as %s but stored as "
+                            "%r - treating as absent.", name,
+                            width.__name__, value)
+                        return ctypes.c_int32(NGX_RESULT_FEATURE_NOT_FOUND).value
+                    ctypes.memmove(out_ptr, ctypes.byref(cell), ctypes.sizeof(width))
                     return NGX_SUCCESS
                 cb = proto(impl)
                 self._callbacks.append(cb)

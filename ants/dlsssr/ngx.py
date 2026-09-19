@@ -168,7 +168,11 @@ class NgxModule:
             fwd_create = resolve("fwd_create")
             self._set_slots = win32.callable_at(
                 set_slots, [_CVOID, _CVOID, _CVOID], None)
-            self._fwd_stub = win32.callable_at(fwd_create, [_CVOID], _CVOID)
+            # Raw thunk ADDRESS (analysis credit: Claude Sonnet 5) -
+            # storing a ctypes callable here made fn() build a
+            # Python-callback trampoline that mangled every NGX call's
+            # arguments (garbage returns, 'Exception ignored' spam).
+            self._fwd_stub = int(fwd_create)
         else:
             self._fwd_handle = None
         self.handle = win32.load_library(module_path)
@@ -189,7 +193,11 @@ class NgxModule:
         address = self.address(name)
         if self._fwd_stub is None:
             return win32.callable_at(address, argtypes, restype)
-        stub = ctypes.CFUNCTYPE(restype, *argtypes)(self._fwd_stub)
+        # Bind the thunk ADDRESS with the caller's real prototype (a
+        # CFUNCTYPE over a raw int is a native call; over a callable it
+        # would be a lossy Python trampoline - see _fwd_stub above).
+        stub = win32.callable_at(self._fwd_stub, argtypes, restype)
+        assert ctypes.cast(stub, ctypes.c_void_p).value == self._fwd_stub
 
         def routed(*args):
             self._set_slots(ctypes.c_void_p(address), None, None)

@@ -30,6 +30,8 @@ install_stubs()
 from ants.dlsssr import d3d12, ngx, win32
 from ants.dlsssr.d3d12 import D3D12Device, GpuContext
 
+_w_callable_at = win32.callable_at  # real implementation, saved pre-fakes
+
 PASS = 0
 FAIL = 0
 RECORD = []          # every faked D3D12/NGX call, in order
@@ -312,7 +314,7 @@ class FakeNgxModule:
                      "NVSDK_NGX_D3D12_EvaluateFeature",
                      "NVSDK_NGX_D3D12_ReleaseFeature",
                      "NVSDK_NGX_D3D12_DestroyParameters",
-                     "fwd_set_slots", "fwd_create"):
+                     "fwd_set_slots", "fwd_create", "fwd_probe"):
             if self.get_proc(None, name) == address:
                 return self.make_export(name)
         raise AssertionError(f"callable_at: unknown export address {address}")
@@ -354,6 +356,12 @@ class FakeNgxModule:
             return release
         if name == "fwd_set_slots":
             return lambda target, a, b: None
+        if name == "fwd_probe":
+            def probe(a1, a2, a3, a4):
+                got = [_as_int(a) for a in (a1, a2, a3, a4)]
+                RECORD.append(("ProbeArgs", got))
+                return 1
+            return probe
         return lambda *args: 1
 
     @staticmethod
@@ -437,6 +445,54 @@ def main():
         return routed
     ngx.NgxModule.fn = fake_fn
 
+    # ---- production NgxModule.fn() arg forwarding (Claude Sonnet 5's
+    # ---- catch: wrapping the thunk CALLABLE in CFUNCTYPE built a lossy
+    # ---- python trampoline; the fix binds the raw thunk ADDRESS). The
+    # ---- probe uses REAL in-process callback addresses so the routed
+    # ---- call performs an actual native jump.
+    import ctypes as _ct
+    real_callable_at = _w_callable_at
+    probe_proto = _ct.CFUNCTYPE(_ct.c_int32, _ct.c_void_p, _ct.c_void_p,
+                                _ct.c_void_p, _ct.c_void_p)
+
+    def _probe_impl(a1, a2, a3, a4):
+        got = [x if isinstance(x, int) else (x.value or 0)
+               for x in (a1, a2, a3, a4)]
+        RECORD.append(("ProbeArgs", got))
+        return 1
+
+    probe_cb = probe_proto(_probe_impl)
+    probe_addr = _ct.cast(probe_cb, _ct.c_void_p).value
+    slots_proto = _ct.CFUNCTYPE(None, _ct.c_void_p, _ct.c_void_p, _ct.c_void_p)
+    slots_cb = slots_proto(lambda a, b, c: None)
+    slots_addr = _ct.cast(slots_cb, _ct.c_void_p).value
+
+    saved_call = win32.callable_at
+    saved_get = win32.get_proc
+    win32.callable_at = real_callable_at
+    win32.get_proc = lambda handle, name: (
+        {"fwd_set_slots": slots_addr, "fwd_create": probe_addr,
+         "fwd_probe": probe_addr}.get(name) or ngx_fake.get_proc(handle, name))
+    try:
+        mod = ngx.NgxModule("fake/nvngx_dlssnr_probe.dll", use_shim=True)
+        route = mod.fn("fwd_probe",
+                       [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                        ctypes.c_void_p], ctypes.c_int32)
+        a1, a2, a3, a4 = 0x7F0000001000, 0x7F0000002000, 0x7F0000003000, 0x7F0000004000
+        hr = route(_ct.c_void_p(a1), _ct.c_void_p(a2),
+                   _ct.c_void_p(a3), _ct.c_void_p(a4))
+        got = next(e[1] for e in RECORD if e[0] == "ProbeArgs")
+        check("shim fn: all four 64-bit args survive the routed thunk",
+              hr == 1 and got == [a1, a2, a3, a4], f"got {got}")
+        import pathlib as _pl
+        ngx_src = _pl.Path(REPO / "ants" / "dlsssr" / "ngx.py").read_text()
+        check("shim fn: thunk stored as raw ADDRESS, bound with caller proto",
+              "self._fwd_stub = int(fwd_create)" in ngx_src
+              and "win32.callable_at(self._fwd_stub, argtypes, restype)" in ngx_src)
+    finally:
+        win32.callable_at = saved_call
+        win32.get_proc = saved_get
+
     # ---- shim module-identity check: a foreign nvngx under our handle
     # ---- must raise the loud collision error naming both files
     win32.get_module_filename = lambda handle, buf_len=1024: "C:\\Windows\\System32\\nvngx.dll"
@@ -457,7 +513,8 @@ def main():
           and names.count("CreateCommandAllocator") == 1
           and names.count("CreateCommandList") == 1
           and names.count("CreateFence") == 1
-          and RECORD[0] == ("D3D12CreateDevice", d3d12.D3D_FEATURE_LEVEL_11_0))
+          and any(entry == ("D3D12CreateDevice", d3d12.D3D_FEATURE_LEVEL_11_0)
+                  for entry in RECORD))
 
     # ---- NR session (own parameters, feature 18) ----
     from ants.dlsssr.nr import DlssNrSession
