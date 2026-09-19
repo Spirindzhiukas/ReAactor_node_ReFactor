@@ -1,6 +1,6 @@
 import numpy as np
 
-# эталонная 3D-модель "усредненного" человеческого лица (68 точек в 3D-пространстве)
+# reference 3D model of an "average" human face (68 points in 3D space)
 
 matrix = [
     [

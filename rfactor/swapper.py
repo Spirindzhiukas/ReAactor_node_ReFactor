@@ -156,22 +156,22 @@ def get_face_gender(
     operated: str,
     order: str,
 ):
-    # 1. Сортируем ВСЕ найденные лица (без фильтрации!)
+    # 1. Sort ALL detected faces (no filtering!)
     faces_sorted = sort_by_order(face, order)
 
-    # 2. Проверяем, существует ли вообще лицо с таким визуальным индексом
+    # 2. Check whether a face with this visual index exists at all
     if face_index >= len(faces_sorted):
         logger.info("Requested face index (%s) is out of bounds (max available index is %s)", face_index, len(faces_sorted) - 1)
         return None, 0, None
 
-    # 3. Берем конкретное лицо по его позиции на фото (например, второе справа)
+    # 3. Pick the face by its position in the photo (e.g. second from the right)
     face_selected = faces_sorted[face_index]
 
-    # Если фильтр по полу отключен (no) - сразу отдаем лицо в работу
+    # gender filter off ("no") -> hand the face over immediately
     if gender_condition == 0:
         return face_selected, 0, face_index
 
-    # 4. Проверяем пол выбранного лица
+    # 4. Check the selected face's gender
     # face.gender: 0 = female, 1 = male
     # gender_condition: 1 = female, 2 = male
     expected_gender = 0 if gender_condition == 1 else 1
@@ -180,12 +180,12 @@ def get_face_gender(
     sel_gender_str = "Male" if actual_gender == 1 else "Female" if actual_gender == 0 else "Unknown"
     logger.info("%s Face %s: Detected Gender -%s-", operated, face_index, sel_gender_str)
 
-    # Если пол не совпадает с тем, что заказал юзер
+    # gender does not match the requested one
     if actual_gender != expected_gender:
         logger.info(f"{operated} Face {face_index}: WRONG gender ({sel_gender_str})")
-        return face_selected, 1, face_index  # 1 означает флаг wrong_gender = True (цикл его пропустит)
+        return face_selected, 1, face_index  # 1 == wrong_gender flag True (the caller loop skips it)
 
-    # Если всё идеально
+    # everything matches
     return face_selected, 0, face_index
 
 def half_det_size(det_size):
@@ -335,9 +335,9 @@ def swap_face(
                 logger.status("Cannot detect any Target, skipping swapping...")
                 return result_image, bbox, swapped_indexes
 
-            # --- НОВАЯ ИДЕАЛЬНАЯ ЛОГИКА СОРТИРОВКИ ---
+            # --- deterministic source/target face ordering ---
             
-            # 1. Заранее собираем список ТОЛЬКО ВАЛИДНЫХ исходных лиц
+            # 1. Pre-collect the VALID source faces only
             valid_source_faces = []
             if source_img is not None:
                 for idx in source_faces_index:
@@ -357,14 +357,14 @@ def swap_face(
 
                 source_face_idx = 0
 
-                # 2. Идем по целевым лицам
+                # 2. Iterate over the target faces
                 for face_num in faces_index:
                     target_face, wrong_gender, target_face_index = get_face_single(target_img, target_faces, face_index=face_num, gender_target=gender_target, order=faces_order[0])
                     
                     if target_face is not None and wrong_gender == 0:
                         logger.status(f"Swapping...")
                         
-                        # 3. Берем валидное лицо (если их меньше, чем целей — идем по кругу)
+                        # 3. Take a valid source face (wrap around if fewer than targets)
                         source_face_to_use = valid_source_faces[source_face_idx % len(valid_source_faces)]
                         
                         result = face_swapper.get(result, target_face, source_face_to_use)
@@ -372,7 +372,7 @@ def swap_face(
                         bbox.append(tuple(map(float, target_face.bbox)))
                         swapped_indexes.append(target_face_index)
 
-                        # Продвигаем индекс исходного лица ТОЛЬКО после УСПЕШНОГО применения
+                        # advance the source-face index ONLY after a successful swap
                         if len(valid_source_faces) > 1:
                             source_face_idx += 1
 
@@ -498,7 +498,7 @@ def swap_face_many(
                 logger.status("Cannot detect any Target, skipping swapping...")
                 return result_images, bbox, swapped_indexes
 
-            # --- НОВАЯ ИДЕАЛЬНАЯ ЛОГИКА СОРТИРОВКИ ---
+            # --- deterministic source/target face ordering ---
             
             valid_source_faces = []
             if source_img is not None:

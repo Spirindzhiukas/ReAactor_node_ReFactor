@@ -7,8 +7,8 @@ from ..log import logger
 
 class ReActorFaceAnalysis:
     """
-    Главный класс-оркестратор. 
-    Берет картинку, находит лица, определяет пол/возраст и вычисляет эмбеддинги.
+    Main orchestrator: takes an image, finds faces, estimates gender/age
+    and computes embeddings.
     """
     def __init__(self, name="buffalo_l", root="./models/insightface", providers=None):
         self.name = name
@@ -25,7 +25,7 @@ class ReActorFaceAnalysis:
         lmk2d_file = os.path.join(model_dir, "2d106det.onnx")
         lmk3d_file = os.path.join(model_dir, "1k3d68.onnx")
 
-        # Если файлов нет - качаем архив
+        # missing files -> download the archive
         if not (os.path.exists(det_file) and os.path.exists(rec_file) and os.path.exists(attr_file)):
             zip_url = "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/buffalo_l.zip"
             zip_path = os.path.join(model_dir, f"{name}.zip")
@@ -41,11 +41,11 @@ class ReActorFaceAnalysis:
             except zipfile.BadZipFile:
                 logger.error("Downloaded zip file is corrupted. Please try again.")
             finally:
-                # В любом случае пытаемся удалить архив, чтобы не занимать место
+                # remove the archive either way to save space
                 if os.path.exists(zip_path):
                     os.remove(zip_path)
 
-        # Инициализируем только те модели, которые физически есть в папке
+        # initialize only the models actually present in the folder
         if os.path.exists(det_file):
             self.models["detection"] = SCRFD(det_file, providers=self.providers)
         if os.path.exists(rec_file):

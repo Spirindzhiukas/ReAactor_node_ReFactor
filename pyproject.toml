@@ -1,7 +1,7 @@
 [project]
-name = "comfyui-reactor-refactor"
-description = "ReActor ReFactor — dependency-hygiene rework of the ReActor face swap node for ComfyUI (pure-Python ONNX engine, no insightface SDK, clash-free install)"
-version = "1.0.0-alpha1"
+name = "comfyui-ants-face-nodes"
+description = "ANTs Face Nodes (ex ReActor ReFactor) — dependency-hygiene rework of the ReActor face swap node for ComfyUI (pure-Python ONNX engine, no insightface SDK, clash-free install)"
+version = "1.1.0-alpha1"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [

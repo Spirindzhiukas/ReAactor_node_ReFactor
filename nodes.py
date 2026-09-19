@@ -94,7 +94,14 @@ class ReFactorFaceSwap:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "enabled": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON"}),
+                "active": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON", "label": "ACTIVE"}),
+                "face_restore_pre_pass": ("BOOLEAN", {"default": False, "label_off": "OFF", "label_on": "ON",
+                                                      "tooltip": "Face Restoration pre-pass: run an extra face-restoration pass on "
+                                                                 "original_image BEFORE the swap/restore pipeline. Greatly helps with "
+                                                                 "badly generated AI characters and rough 3D renders."}),
+                "face_restore_pre_pass_uses": (["main FR model", "dedicated FR model"], {"default": "main FR model",
+                                                      "tooltip": "Which restore model the pre-pass uses: the main FaceRestore_model "
+                                                                 "or the dedicated pre-pass model input."}),
                 "original_image": ("IMAGE",),
                 "face_restore_visibility": ("FLOAT", {"default": 1, "min": 0.1, "max": 1, "step": 0.05}),
                 "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
@@ -107,6 +114,13 @@ class ReFactorFaceSwap:
                 "upres_interpolation": (UPRES_CHOICES, {"default": "Lanczos",
                                                         "tooltip": "Pixel interpolation for the upRes scaling (and 'Use Upscale model' to "
                                                                    "scale with a connected UpscaleModel instead)."}),
+                "face_selection": (["all", "filter", "largest"], {"default": "all",
+                                                  "tooltip": "Which detected faces the restore pass processes (merged from the "
+                                                             "former Restore Face Advanced node)."}),
+                "sort_by": (["area", "x_position", "y_position", "detection_confidence"], {"default": "area"}),
+                "reverse_order": ("BOOLEAN", {"default": False}),
+                "take_start": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
+                "take_count": ("INT", {"default": 1, "min": 1, "max": 100, "step": 1}),
                 "detect_gender_input": (["no","female","male"], {"default": "no"}),
                 "detect_gender_source": (["no","female","male"], {"default": "no"}),
                 "input_faces_index": ("STRING", {"default": "0"}),
@@ -119,9 +133,11 @@ class ReFactorFaceSwap:
                 "FaceRestore_model": ("FACE_RESTORE_MODEL",),
                 "FaceDetection_model": ("FACE_DETECT_MODEL",),
                 # ---------------------------------------------------------------
+                "FaceRestorePrePass_model": ("FACE_RESTORE_MODEL",),
                 "UpscaleModel": ("UPSCALE_MODEL",),
                 "target_face_image": ("IMAGE",),
                 "target_face_model": ("FACE_MODEL",),
+                "options": ("OPTIONS",),
             },
             "hidden": {"faces_order": "FACES_ORDER"},
         }
@@ -129,7 +145,7 @@ class ReFactorFaceSwap:
     RETURN_TYPES = ("IMAGE","FACE_MODEL","IMAGE")
     RETURN_NAMES = ("SWAPPED_IMAGE","FACE_MODEL","ORIGINAL_IMAGE")
     FUNCTION = "execute"
-    CATEGORY = "ReFactor"
+    CATEGORY = "ANTs"
 
     def __init__(self):
         # self.face_helper = None
@@ -150,6 +166,11 @@ class ReFactorFaceSwap:
         face_restore_upres=True,
         upres_interpolation="Lanczos",
         upscale_model=None,
+        face_selection="all",
+        sort_by="area",
+        reverse_order=False,
+        take_start=0,
+        take_count=1,
     ):
         """face_restore_model: FACE_RESTORE_MODEL dict {"name","path"} or None."""
 
@@ -158,7 +179,7 @@ class ReFactorFaceSwap:
         #     current_datetime = datetime.now()
         #     return current_datetime.strftime("%M:%S")
         
-        # локальная функция IoU
+        # local IoU helper
         def _iou(b1, b2):
             xA = max(b1[0], b2[0])
             yA = max(b1[1], b2[1])
@@ -306,13 +327,59 @@ class ReFactorFaceSwap:
                                              interpolation=cv2.INTER_AREA if _up.shape[0] > _th else cv2.INTER_CUBIC)
                         _enhanced.append(_up)
                     _fh.cropped_faces = _enhanced
-                
+
+                # ---- face selection (merged from the former Restore Face
+                # Advanced node): restrict which detected faces get restored ----
+                if face_selection != "all" and self.face_helper.cropped_faces:
+                    min_x_position = min_y_position = 0.0
+                    max_x_position = max_y_position = 1.0
+                    face_info = []
+                    img_height, img_width = cur_image_np.shape[0:2]
+                    for j, face in enumerate(self.face_helper.cropped_faces):
+                        # use the face CENTER (not the top-left corner) for
+                        # positional filtering
+                        if len(self.face_helper.det_faces) > j:
+                            bbox = self.face_helper.det_faces[j]
+                            x1 = ((bbox[0] + bbox[2]) / 2) / img_width
+                            y1 = ((bbox[1] + bbox[3]) / 2) / img_height
+                            area = face.shape[0] * face.shape[1]
+                            confidence = bbox[4] if len(bbox) > 4 else 1.0
+                        else:
+                            area = face.shape[0] * face.shape[1]
+                            x1, y1 = 0.5, 0.5
+                            confidence = 1.0
+                        face_info.append({"index": j, "area": area, "x_position": x1,
+                                          "y_position": y1, "detection_confidence": confidence})
+                    all_indices = list(range(len(self.face_helper.cropped_faces)))
+                    sorted_indices = sorted(all_indices,
+                                            key=lambda i: face_info[i][sort_by],
+                                            reverse=reverse_order)
+                    if face_selection == "filter":
+                        filtered_indices = [i for i in sorted_indices
+                                            if min_x_position <= face_info[i]["x_position"] <= max_x_position
+                                            and min_y_position <= face_info[i]["y_position"] <= max_y_position]
+                        selected_indices = filtered_indices[take_start:take_start + take_count]
+                    elif face_selection == "largest":
+                        selected_indices = sorted_indices[take_start:take_start + take_count]
+                    else:
+                        selected_indices = sorted_indices[take_start:take_start + take_count]
+                    if selected_indices:
+                        self.face_helper.cropped_faces = [self.face_helper.cropped_faces[j] for j in selected_indices]
+                        if hasattr(self.face_helper, "restored_faces"):
+                            self.face_helper.restored_faces = []
+                        if hasattr(self.face_helper, "affine_matrices"):
+                            self.face_helper.affine_matrices = [self.face_helper.affine_matrices[j] for j in selected_indices]
+                        if hasattr(self.face_helper, "det_faces"):
+                            self.face_helper.det_faces = [self.face_helper.det_faces[j] for j in selected_indices]
+                        logger.status(f"Face selection: restoring {len(selected_indices)}/{len(all_indices)} face(s) "
+                                      f"({face_selection}, sorted by {sort_by})")
+
                 # restored_face = None
                 restored_faces = []
                 detected_faces = len(self.face_helper.cropped_faces)
                 restored_count = 0
                 
-                # берем сохранённые bbox из swap (или None)
+                # take the saved swap bboxes (or None)
                 swapped_bboxes = getattr(self, "last_swapped_bboxes", None)
                 if swapped_bboxes:
                     # Swap bboxes live in the swapped-image frame; det_faces live in the
@@ -324,21 +391,21 @@ class ReFactorFaceSwap:
                     if abs(sx - 1.0) > 1e-3 or abs(sy - 1.0) > 1e-3:
                         swapped_bboxes = [(x1 * sx, y1 * sy, x2 * sx, y2 * sy)
                                           for (x1, y1, x2, y2) in swapped_bboxes]
-                # флаги, чтобы одно сохранённое bbox не совпало с несколькими лицами
+                # flags so one saved bbox is not matched to multiple faces
                 used_swapped = [False] * len(swapped_bboxes) if swapped_bboxes else None
 
                 IOU_THRESHOLD = 0.5
 
                 for idx, cropped_face in enumerate(self.face_helper.cropped_faces):
 
-                    # определяем bbox текущего лица, который дал детектор внутри FaceRestoreHelper
+                    # bbox of the current face as produced by the FaceRestoreHelper detector
                     current_bbox = None
                     if hasattr(self.face_helper, 'det_faces') and len(self.face_helper.det_faces) > idx:
                         det = self.face_helper.det_faces[idx]
-                        # det м.б. [x1,y1,x2,y2,score]
+                        # det may be [x1, y1, x2, y2, score]
                         current_bbox = (float(det[0]), float(det[1]), float(det[2]), float(det[3]))
 
-                    # логика: если у нас есть сохранённые bbox — ресторим только если iou с одним из них > порог
+                    # with saved swap bboxes present, restore only when IoU with one of them exceeds the threshold
                     do_restore = True
                     # if self.last_swapped_indices is not None:
                     #     do_restore = idx in self.last_swapped_indices
@@ -460,7 +527,7 @@ class ReFactorFaceSwap:
         return result
 
 
-    def execute(self, enabled, original_image, face_restore_visibility, codeformer_fidelity, face_restore_upres, upres_interpolation, detect_gender_source, detect_gender_input, source_faces_index, input_faces_index, console_log_level, FaceSwap_model=None, FaceRestore_model=None, FaceDetection_model=None, UpscaleModel=None, target_face_image=None, target_face_model=None, faces_order=None):
+    def execute(self, active, face_restore_pre_pass, face_restore_pre_pass_uses, original_image, face_restore_visibility, codeformer_fidelity, face_restore_upres, upres_interpolation, face_selection, sort_by, reverse_order, take_start, take_count, detect_gender_source, detect_gender_input, source_faces_index, input_faces_index, console_log_level, FaceSwap_model=None, FaceRestore_model=None, FaceDetection_model=None, FaceRestorePrePass_model=None, UpscaleModel=None, target_face_image=None, target_face_model=None, options=None, faces_order=None):
 
         device = model_management.get_torch_device()
 
@@ -471,12 +538,23 @@ class ReFactorFaceSwap:
         restore_visibility, restore_fidelity = face_restore_visibility, codeformer_fidelity
         det_name = detection_model_name(FaceDetection_model)
 
+        if options is not None:
+            # OPTIONS bundle overrides the widget values (merged from the
+            # former Fast Face Swap [OPTIONS] node)
+            faces_order = [options["input_faces_order"], options["source_faces_order"]]
+            console_log_level = options["console_log_level"]
+            detect_gender_input = options["detect_gender_input"]
+            detect_gender_source = options["detect_gender_source"]
+            input_faces_index = options["input_faces_index"]
+            source_faces_index = options["source_faces_index"]
+            self.restore_swapped_only = options["restore_swapped_only"]
+
         if faces_order is None:
             faces_order = self.faces_order
 
         set_console_level(console_log_level)
 
-        if not enabled:
+        if not active:
             return (original_image, target_face_model)
         elif FaceSwap_model is None and target_face_image is None and target_face_model is None:
             # Restore-only mode: no swap model connected -> swapping is skipped,
@@ -485,6 +563,33 @@ class ReFactorFaceSwap:
         elif target_face_image is None and target_face_model is None:
             logger.error("Please provide 'target_face_image' or 'target_face_model'")
             return (original_image, target_face_model)
+
+        # ---- Face Restoration pre-pass (on original_image, before swap) ----
+        if face_restore_pre_pass:
+            if face_restore_pre_pass_uses == "dedicated FR model":
+                pre_pass_model = FaceRestorePrePass_model
+                if pre_pass_model is None:
+                    logger.error("Face Restoration pre-pass is set to 'dedicated FR model' "
+                                 "but no dedicated model is connected - stopping the node.")
+                    raise RuntimeError(
+                        "Face Restoration pre-pass uses 'dedicated FR model' but the "
+                        "'FaceRestorePrePass_model' input is not connected. Connect a "
+                        "FaceRestore Model Loader there, or switch the pre-pass selector "
+                        "to 'main FR model', or turn the pre-pass off."
+                    )
+            else:
+                pre_pass_model = FaceRestore_model
+                if pre_pass_model is None:
+                    logger.status("Face Restoration pre-pass: no main FR model connected - pre-pass skipped")
+                    pre_pass_model = None
+            if pre_pass_model is not None:
+                logger.status(f"Face Restoration pre-pass on original_image (uses {face_restore_pre_pass_uses})")
+                original_image = ReFactorFaceSwap.restore_face(
+                    self, original_image, pre_pass_model, face_restore_visibility, codeformer_fidelity, det_name,
+                    face_restore_upres=face_restore_upres, upres_interpolation=upres_interpolation,
+                    upscale_model=UpscaleModel,
+                    face_selection=face_selection, sort_by=sort_by,
+                    reverse_order=reverse_order, take_start=take_start, take_count=take_count)
 
         script = FaceSwapScript()
         pil_images = batch_tensor_to_pil(original_image)
@@ -525,7 +630,9 @@ class ReFactorFaceSwap:
                 result = ReFactorFaceSwap.restore_face(self, result, restore_info, restore_visibility, restore_fidelity, det_name,
                                                        face_restore_upres=face_restore_upres,
                                                        upres_interpolation=upres_interpolation,
-                                                       upscale_model=UpscaleModel)
+                                                       upscale_model=UpscaleModel,
+                                                       face_selection=face_selection, sort_by=sort_by,
+                                                       reverse_order=reverse_order, take_start=take_start, take_count=take_count)
 
         else:
             image_black = Image.new("RGB", (512, 512))
@@ -534,78 +641,6 @@ class ReFactorFaceSwap:
             original_image = result
 
         return (result, face_model_to_provide, original_image)
-
-
-class ReFactorFaceSwapOpt:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "enabled": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON"}),
-                "original_image": ("IMAGE",),
-                "face_restore_visibility": ("FLOAT", {"default": 1, "min": 0.1, "max": 1, "step": 0.05}),
-                "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
-                                                  "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
-                "face_restore_upres": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON",
-                                                   "tooltip": "Face Restore upRes interpolator. ON: if the restore model can run at "
-                                                              "the face's own resolution it does (no pixel scaling); otherwise the face is "
-                                                              "brought to the model's native resolution, restored, and scaled back to the "
-                                                              "image resolution. OFF: classic behavior (always restore at the model's native size)."}),
-                "upres_interpolation": (UPRES_CHOICES, {"default": "Lanczos",
-                                                        "tooltip": "Pixel interpolation for the upRes scaling (and 'Use Upscale model' to "
-                                                                   "scale with a connected UpscaleModel instead)."}),
-            },
-            "optional": {
-                # --- the three model sockets grouped together, in load order ---
-                "FaceSwap_model": ("FACE_SWAP_MODEL",),
-                "FaceRestore_model": ("FACE_RESTORE_MODEL",),
-                "FaceDetection_model": ("FACE_DETECT_MODEL",),
-                # ---------------------------------------------------------------
-                "UpscaleModel": ("UPSCALE_MODEL",),
-                "target_face_image": ("IMAGE",),
-                "target_face_model": ("FACE_MODEL",),
-                "options": ("OPTIONS",),
-            }
-        }
-
-    RETURN_TYPES = ("IMAGE","FACE_MODEL","IMAGE")
-    RETURN_NAMES = ("SWAPPED_IMAGE","FACE_MODEL","ORIGINAL_IMAGE")
-    FUNCTION = "execute"
-    CATEGORY = "ReFactor"
-
-    def __init__(self):
-        # self.face_helper = None
-        self.faces_order = ["large-small", "large-small"]
-        self.detect_gender_input = "no"
-        self.detect_gender_source = "no"
-        self.input_faces_index = "0"
-        self.source_faces_index = "0"
-        self.console_log_level = 1
-        self.restore_swapped_only = True
-        # self.face_size = 512
-        self.restore = True
-
-    def execute(self, enabled, original_image, face_restore_visibility, codeformer_fidelity, face_restore_upres, upres_interpolation, FaceSwap_model=None, FaceRestore_model=None, FaceDetection_model=None, UpscaleModel=None, target_face_image=None, target_face_model=None, options=None):
-
-        if options is not None:
-            self.faces_order = [options["input_faces_order"], options["source_faces_order"]]
-            self.console_log_level = options["console_log_level"]
-            self.detect_gender_input = options["detect_gender_input"]
-            self.detect_gender_source = options["detect_gender_source"]
-            self.input_faces_index = options["input_faces_index"]
-            self.source_faces_index = options["source_faces_index"]
-            self.restore_swapped_only = options["restore_swapped_only"]
-
-        result = ReFactorFaceSwap.execute(
-            self, enabled, original_image, face_restore_visibility, codeformer_fidelity,
-            face_restore_upres, upres_interpolation,
-            self.detect_gender_source, self.detect_gender_input,
-            self.source_faces_index, self.input_faces_index, self.console_log_level,
-            FaceSwap_model, FaceRestore_model, FaceDetection_model, UpscaleModel,
-            target_face_image, target_face_model, faces_order=self.faces_order
-        )
-
-        return result
 
 
 class ReFactorLoadFaceModel:
@@ -620,7 +655,7 @@ class ReFactorLoadFaceModel:
     RETURN_TYPES = ("FACE_MODEL","STRING")
     RETURN_NAMES = ("FACE_MODEL","FACE_MODEL_NAME")
     FUNCTION = "load_model"
-    CATEGORY = "ReFactor"
+    CATEGORY = "ANTs"
 
     def load_model(self, face_model):
         self.face_model = face_model
@@ -660,7 +695,7 @@ class ReFactorSetWeight:
 
     OUTPUT_NODE = True
 
-    CATEGORY = "ReFactor"
+    CATEGORY = "ANTs"
 
     def set_weight(self, input_image, faceswap_weight, face_model=None, source_image=None):
 
@@ -764,7 +799,7 @@ class ReFactorBuildFaceModel:
 
     OUTPUT_NODE = True
 
-    CATEGORY = "ReFactor"
+    CATEGORY = "ANTs"
 
     def build_face_model(self, image: Image.Image, det_size=(640, 640)):
         logging.StreamHandler.terminator = "\n"
@@ -894,7 +929,7 @@ class ReFactorSaveFaceModel:
 
     OUTPUT_NODE = True
 
-    CATEGORY = "ReFactor"
+    CATEGORY = "ANTs"
 
     def save_model(self, save_mode, face_model_name, select_face_index, image=None, face_model=None, det_size=(640, 640)):
         if save_mode and image is not None:
@@ -947,7 +982,7 @@ class ReFactorRestoreFace:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "execute"
-    CATEGORY = "ReFactor"
+    CATEGORY = "ANTs"
 
     def execute(self, image, FaceRestore_model, visibility, codeformer_fidelity, face_restore_upres, upres_interpolation, FaceDetection_model=None, UpscaleModel=None):
         result = ReFactorFaceSwap.restore_face(
@@ -955,348 +990,8 @@ class ReFactorRestoreFace:
             detection_model_name(FaceDetection_model),
             face_restore_upres=face_restore_upres,
             upres_interpolation=upres_interpolation,
-            upscale_model=UpscaleModel
+            upscale_model=UpscaleModel,
         )
-        return (result,)
-
-
-class ReFactorRestoreFaceAdvanced:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "FaceRestore_model": ("FACE_RESTORE_MODEL",),
-                "visibility": ("FLOAT", {"default": 1, "min": 0.0, "max": 1, "step": 0.05}),
-                "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
-                                                  "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
-                "face_restore_upres": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON",
-                                                   "tooltip": "Face Restore upRes interpolator. ON: if the restore model can run at "
-                                                              "the face's own resolution it does (no pixel scaling); otherwise the face is "
-                                                              "brought to the model's native resolution, restored, and scaled back to the "
-                                                              "image resolution. OFF: classic behavior (always restore at the model's native size)."}),
-                "upres_interpolation": (UPRES_CHOICES, {"default": "Lanczos",
-                                                        "tooltip": "Pixel interpolation for the upRes scaling (and 'Use Upscale model' to "
-                                                                   "scale with a connected UpscaleModel instead)."}),
-                "face_selection": (["all", "filter", "largest"],{"default": "all"}),
-            },
-            "optional": {
-                "FaceDetection_model": ("FACE_DETECT_MODEL",),
-                "UpscaleModel": ("UPSCALE_MODEL",),
-                "sort_by": (["area", "x_position", "y_position", "detection_confidence"],{"default": "area"}),
-                "reverse_order": ("BOOLEAN", {"default": False}),
-                "take_start": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
-                "take_count": ("INT", {"default": 1, "min": 1, "max": 100, "step": 1}),
-            }
-        }
-
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "execute"
-    CATEGORY = "ReFactor"
-
-    def execute(
-            self, image, FaceRestore_model, visibility, codeformer_fidelity, face_restore_upres, upres_interpolation, face_selection, sort_by="area", reverse_order=False, take_start=0, take_count=1, FaceDetection_model=None, UpscaleModel=None
-        ):
-
-        min_x_position=0.0
-        max_x_position=1.0
-        min_y_position=0.0
-        max_y_position=1.0
-
-        result = image
-
-        face_restore_model = FaceRestore_model
-        upscale_model = UpscaleModel
-
-        if face_restore_model is not None and not model_management.processing_interrupted():
-
-            global FACE_SIZE, FACE_HELPER
-
-            self.face_helper = FACE_HELPER
-
-            restore_model_name = face_restore_model.get("name") if isinstance(face_restore_model, dict) else face_restore_model
-            if restore_model_name in (None, "", "none"):
-                return image
-
-            faceSize = 512
-            if "1024" in restore_model_name.lower():
-                faceSize = 1024
-            elif "2048" in restore_model_name.lower():
-                faceSize = 2048
-
-            logger.status(f"Restoring with {restore_model_name} | Face Size is set to {faceSize}")
-
-            model_path = face_restore_model.get("path") if isinstance(face_restore_model, dict) else None
-            if not model_path or not os.path.exists(model_path):
-                model_path = _faceboost_restorer.ensure_facerestore_model(restore_model_name)
-            if model_path is None:
-                logger.error(f"Face restoration model '{restore_model_name}' could not be found or downloaded.")
-                return image
-
-            device = model_management.get_torch_device()
-
-            if ".onnx" in restore_model_name: # ONNX first ("codeformer.onnx" also contains "codeformer"!)
-
-                ort_session = create_session(model_path, providers=resolve_providers())
-                facerestore_model = ort_session
-
-            elif "codeformer" in restore_model_name.lower():
-
-                codeformer_net = ARCH_REGISTRY.get("CodeFormer")(
-                    dim_embd=512,
-                    codebook_size=1024,
-                    n_head=8,
-                    n_layers=9,
-                    connect_list=["32", "64", "128", "256"],
-                ).to(device)
-                checkpoint = torch.load(model_path, weights_only=True, map_location="cpu")["params_ema"]
-                codeformer_net.load_state_dict(checkpoint)
-                facerestore_model = codeformer_net.eval()
-
-            else:
-
-                sd = comfy.utils.load_torch_file(model_path, safe_load=True)
-                facerestore_model = model_loading.load_state_dict(sd).eval()
-                facerestore_model.to(device)
-
-            if faceSize != FACE_SIZE or self.face_helper is None:
-                self.face_helper = FaceRestoreHelper(1, face_size=faceSize, crop_ratio=(1, 1), det_model=detection_model_name(FaceDetection_model), save_ext='png', use_parse=True, device=device)
-                FACE_SIZE = faceSize
-                FACE_HELPER = self.face_helper
-
-            # ---- upRes configuration (mirrors the main node) ----------------
-            native_restore_size, dynamic_restore = restore_model_native(
-                restore_model_name,
-                ort_session if ".onnx" in restore_model_name else None)
-            use_model_scale_back = (upres_interpolation == UPRES_USE_MODEL and upscale_model is not None)
-            if upres_interpolation == UPRES_USE_MODEL and upscale_model is None:
-                logger.status("upRes 'Use Upscale model' selected but no UpscaleModel is connected - using Lanczos")
-            warp_interp = interp_flag(upres_interpolation) if upres_interpolation != UPRES_USE_MODEL else cv2.INTER_LANCZOS4
-            self.face_helper.interpolation = warp_interp
-
-            image_np = 255. * result.cpu().numpy()
-
-            total_images = image_np.shape[0]
-
-            out_images = []
-            
-            pbar = progress_bar(total_images)
-
-            for i in range(total_images):
-
-                cur_image_np = image_np[i,:, :, ::-1]
-
-                original_resolution = cur_image_np.shape[0:2]
-
-                if facerestore_model is None or self.face_helper is None:
-                    return result
-
-                self.face_helper.clean_all()
-                self.face_helper.read_image(cur_image_np)
-                self.face_helper.get_face_landmarks_5(only_center_face=False, resize=640, eye_dist_threshold=5)
-
-                # ---- upRes decision (mirrors the main node) ----------------
-                face_px_helper = None
-                face_px = None
-                if self.face_helper.det_faces:
-                    f_scale = self.face_helper.input_img.shape[1] / float(cur_image_np.shape[1])
-                    face_px_helper = max(max(b[2] - b[0], b[3] - b[1]) for b in self.face_helper.det_faces)
-                    face_px = face_px_helper / f_scale
-                effective = decide_restore_size(native_restore_size, dynamic_restore, face_px, face_restore_upres)
-                if face_px is not None and effective != self.face_helper.face_size[0]:
-                    logger.status(f"Face restore upRes: face ~{int(face_px)}px, model is "
-                                  f"{'dynamic' if dynamic_restore else 'fixed'} at {native_restore_size}px -> restoring at {effective}px")
-                    self.face_helper = FaceRestoreHelper(1, face_size=effective, crop_ratio=(1, 1), det_model=detection_model_name(FaceDetection_model), save_ext='png', use_parse=True, device=device)
-                    FACE_SIZE = effective
-                    FACE_HELPER = self.face_helper
-                    self.face_helper.interpolation = warp_interp
-                    self.face_helper.clean_all()
-                    self.face_helper.read_image(cur_image_np)
-                    self.face_helper.get_face_landmarks_5(only_center_face=False, resize=640, eye_dist_threshold=5)
-
-                self.face_helper.align_warp_face()
-
-                # upRes S1 (mirrors the main node): SR the aligned crops before
-                # the restore model when "Use Upscale model" is selected.
-                if (upres_interpolation == UPRES_USE_MODEL and upscale_model is not None
-                        and needs_model_upscale(upres_interpolation, native_restore_size, face_px)):
-                    logger.status(f"upRes: enhancing aligned face crop(s) (~{int(face_px) if face_px else '?'}px "
-                                  f"-> {self.face_helper.face_size[0]}px) with the upscale model before restore")
-                    _fh = self.face_helper
-                    _enhanced = []
-                    for _c in _fh.cropped_faces:
-                        _up = upscale_bgr_face(upscale_model, _c)
-                        _th, _tw = _fh.face_size[1], _fh.face_size[0]
-                        if _up.shape[0] != _th or _up.shape[1] != _tw:
-                            _up = cv2.resize(_up, (_tw, _th),
-                                             interpolation=cv2.INTER_AREA if _up.shape[0] > _th else cv2.INTER_CUBIC)
-                        _enhanced.append(_up)
-                    _fh.cropped_faces = _enhanced
-
-                # Face-Filter Mode
-
-                # Фильтрация лиц
-                if face_selection != "all" and self.face_helper.cropped_faces:
-                    # Собираем информацию о лицах для фильтрации
-                    face_info = []
-                    img_height, img_width = cur_image_np.shape[0:2]
-                    
-                    for j, face in enumerate(self.face_helper.cropped_faces):
-                        # Используем центр лица вместо левого верхнего угла
-                        if hasattr(self.face_helper, 'det_faces') and len(self.face_helper.det_faces) > j:
-                            bbox = self.face_helper.det_faces[j]
-                            # Вычисляем центр лица для более точного позиционирования
-                            x1 = ((bbox[0] + bbox[2]) / 2) / img_width  # центр x
-                            y1 = ((bbox[1] + bbox[3]) / 2) / img_height  # центр y
-                            area = face.shape[0] * face.shape[1]
-                            confidence = bbox[4] if len(bbox) > 4 else 1.0
-                        else:
-                            # Если информация о bbox недоступна, используем приблизительные данные
-                            area = face.shape[0] * face.shape[1]
-                            x1, y1 = 0.5, 0.5  # центр изображения
-                            confidence = 1.0
-                            
-                        face_info.append({
-                            'index': j,
-                            'area': area,
-                            'x_position': x1,
-                            'y_position': y1,
-                            'detection_confidence': confidence
-                        })
-                    
-                    # Сначала сортируем все лица по выбранному критерию
-                    all_indices = list(range(len(self.face_helper.cropped_faces)))
-                    
-                    # Вывод для x_position и y_position
-                    if sort_by == "y_position":
-                        all_positions = [(idx, face_info[idx]['y_position']) for idx in all_indices]
-                    elif sort_by == "x_position":
-                        all_positions = [(idx, face_info[idx]['x_position']) for idx in all_indices]
-                    
-                    # Сортировка по выбранному критерию
-                    sorted_indices = sorted(
-                        all_indices,
-                        key=lambda idx: face_info[idx][sort_by],
-                        reverse=reverse_order
-                    )
-                    
-                    # Отладочный вывод после сортировки
-                    if sort_by == "y_position":
-                        sorted_positions = [(idx, face_info[idx]['y_position']) for idx in sorted_indices]
-                    elif sort_by == "x_position":
-                        sorted_positions = [(idx, face_info[idx]['x_position']) for idx in sorted_indices]
-                    
-                    # Применяем фильтрацию в зависимости от режима
-                    if face_selection == "filter":
-                        # Фильтрация по координатам
-                        filtered_indices = [
-                            idx for idx in sorted_indices
-                            if min_x_position <= face_info[idx]['x_position'] <= max_x_position and
-                               min_y_position <= face_info[idx]['y_position'] <= max_y_position
-                        ]
-                        
-                        # Выборка по take_start и take_count
-                        selected_indices = filtered_indices[take_start:take_start + take_count]
-                    
-                    elif face_selection == "largest":
-                        # При выборе "largest" просто берем take_count лиц с наибольшей площадью, начиная с take_start
-                        selected_indices = sorted_indices[take_start:take_start + take_count]
-                    
-                    elif face_selection == "index":
-                        # В режиме "index" просто берем лица, начиная с take_start
-                        selected_indices = sorted_indices[take_start:take_start + take_count]
-
-                    if selected_indices:
-                        self.face_helper.cropped_faces = [self.face_helper.cropped_faces[j] for j in selected_indices]
-                        if hasattr(self.face_helper, 'restored_faces'):
-                            self.face_helper.restored_faces = []
-                        if hasattr(self.face_helper, 'affine_matrices'):
-                            self.face_helper.affine_matrices = [self.face_helper.affine_matrices[j] for j in selected_indices]
-                        if hasattr(self.face_helper, 'det_faces'):
-                            self.face_helper.det_faces = [self.face_helper.det_faces[j] for j in selected_indices]
-
-                # Face-Filter Mode END
-                
-                restored_face = None
-                detected_faces = len(self.face_helper.cropped_faces)
-                restored_count = 0
-
-                for idx, cropped_face in enumerate(self.face_helper.cropped_faces):
-
-                    cropped_face_t = img2tensor(cropped_face / 255., bgr2rgb=True, float32=True)
-                    normalize(cropped_face_t, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
-                    cropped_face_t = cropped_face_t.unsqueeze(0).to(device)
-
-                    try:
-
-                        with torch.no_grad():
-
-                            if ".onnx" in restore_model_name: # ONNX models
-
-                                restored_face = run_facerestore_onnx(ort_session, cropped_face)
-
-                            else: # PTH models
-
-                                output = facerestore_model(cropped_face_t, w=codeformer_fidelity)[0] if "codeformer" in restore_model_name.lower() else facerestore_model(cropped_face_t)[0]
-                                restored_face = tensor2img(output, rgb2bgr=True, min_max=(-1, 1))
-
-                        torch.cuda.empty_cache()
-                        restored_count += 1
-
-                    except Exception as error:
-
-                        logger.error(f"Face restore inference failed for face #{idx} ({restore_model_name}): {error}")
-                        restored_face = cropped_face.copy()
-
-                    if visibility < 1:
-                        restored_face = cropped_face * (1 - visibility) + restored_face * visibility
-
-                    restored_face = restored_face.astype("uint8")
-
-                    # upRes: upscale-model scale-back (mirrors the main node)
-                    if use_model_scale_back and face_px_helper is not None and face_px_helper > self.face_helper.face_size[0] * 1.05:
-                        try:
-                            target = int(round(face_px_helper))
-                            logger.status(f"upRes: scale-back of restored face "
-                                          f"{self.face_helper.face_size[0]}px -> {target}px via the upscale model")
-                            upscaled = upscale_bgr_face(upscale_model, restored_face)
-                            restored_face = cv2.resize(
-                                upscaled, (target, target),
-                                interpolation=cv2.INTER_AREA if upscaled.shape[0] >= target else cv2.INTER_CUBIC)
-                        except Exception as error:
-                            logger.error(f"Upscale-model scale-back failed ({error}); using interpolation")
-
-                    self.face_helper.add_restored_face(restored_face)
-
-                self.face_helper.get_inverse_affine(None)
-
-                restored_img = self.face_helper.paste_faces_to_input_image()
-                restored_img = restored_img[:, :, ::-1]
-
-                if original_resolution != restored_img.shape[0:2]:
-                    restored_img = cv2.resize(restored_img, (0, 0), fx=original_resolution[1]/restored_img.shape[1], fy=original_resolution[0]/restored_img.shape[0], interpolation=cv2.INTER_AREA)
-
-                logger.status(f"Face restoration applied to {restored_count}/{detected_faces} detected face(s)")
-                if restored_count == 0:
-                    logger.status("No faces were restored (none matched the swapped regions or none detected)")
-
-                self.face_helper.clean_all()
-
-                out_images.append(restored_img)
-
-                if state.interrupted or model_management.processing_interrupted():
-                    logger.status("Interrupted by User")
-                    return image
-                
-                pbar.update(1)
-
-            restored_img_np = np.array(out_images).astype(np.float32) / 255.0
-            restored_img_tensor = torch.from_numpy(restored_img_np)
-
-            result = restored_img_tensor
-
-            progress_bar_reset(pbar)
-
         return (result,)
 
 
@@ -1314,7 +1009,7 @@ class ReFactorImageDuplicator:
     RETURN_NAMES = ("IMAGES",)
     OUTPUT_IS_LIST = (True,)
     FUNCTION = "execute"
-    CATEGORY = "ReFactor"
+    CATEGORY = "ANTs"
 
     def execute(self, image, count):
         images = [image for i in range(count)]
@@ -1332,7 +1027,7 @@ class ReFactorImageRGBA2RGB:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "execute"
-    CATEGORY = "ReFactor"
+    CATEGORY = "ANTs"
 
     def execute(self, image):
         out = rgba2rgb_tensor(image)
@@ -1363,7 +1058,7 @@ class ReFactorMakeFaceModelBatch:
     RETURN_NAMES = ("FACE_MODELS",)
     FUNCTION = "execute"
 
-    CATEGORY = "ReFactor"
+    CATEGORY = "ANTs"
 
     def execute(self, **kwargs):
         if len(kwargs) > 0:
@@ -1396,7 +1091,7 @@ class ReFactorOptions:
 
     RETURN_TYPES = ("OPTIONS",)
     FUNCTION = "execute"
-    CATEGORY = "ReFactor"
+    CATEGORY = "ANTs"
 
     def execute(self,input_faces_order, input_faces_index, detect_gender_input, source_faces_order, source_faces_index, detect_gender_source, console_log_level, restore_swapped_only):
         options: dict = {
@@ -1423,7 +1118,7 @@ class ReFactorUnload:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "execute"
-    CATEGORY = "ReFactor"
+    CATEGORY = "ANTs"
 
     def execute(self, trigger):
         unload_all_models()
@@ -1443,39 +1138,39 @@ class ReFactorFaceSimilarity:
     RETURN_TYPES = ("FLOAT", "STRING")
     RETURN_NAMES = ("similarity_float", "similarity_text")
     FUNCTION = "compare_faces"
-    CATEGORY = "ReFactor"
+    CATEGORY = "ANTs"
 
     def compare_faces(self, image1, image2):
         
         set_console_level(0)
 
-        # 1. Конвертируем тензоры ComfyUI в формат OpenCV (BGR)
+        # 1. Convert ComfyUI tensors to OpenCV BGR format
         img1_cv = 255. * image1[0].cpu().numpy()
         img1_cv = cv2.cvtColor(img1_cv.astype(np.uint8), cv2.COLOR_RGB2BGR)
 
         img2_cv = 255. * image2[0].cpu().numpy()
         img2_cv = cv2.cvtColor(img2_cv.astype(np.uint8), cv2.COLOR_RGB2BGR)
 
-        # 2. Ищем лица через
+        # 2. Detect faces
         faces1 = analyze_faces(img1_cv, det_size=(640, 640))
         faces2 = analyze_faces(img2_cv, det_size=(640, 640))
 
-        # 3. Защита от отсутствия лиц
+        # 3. Guard against no faces detected
         if not faces1 or not faces2:
             return (0.0, "Face not found in one or both images")
 
-        # Берем первые найденные лица
+        # take the first detected faces
         face1 = faces1[0]
         face2 = faces2[0]
 
-        # 4. Вычисляем косинусное сходство (Cosine Similarity)
+        # 4. Compute cosine similarity
         emb1 = face1.normed_embedding
         emb2 = face2.normed_embedding
         
-        # Скалярное произведение нормализованных векторов
+        # dot product of the normalized embeddings
         similarity = np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
 
-        # 5. Форматируем результат
+        # 5. Format the result
         sim_float = float(similarity)
         sim_float = max(0.0, min(1.0, sim_float)) 
         sim_text = f"{sim_float * 100:.2f}%"
@@ -1485,54 +1180,50 @@ class ReFactorFaceSimilarity:
 
 NODE_CLASS_MAPPINGS = {
     # --- MAIN NODES ---
-    "ReFactorFaceSwap": ReFactorFaceSwap,
-    "ReFactorFaceSwapOpt": ReFactorFaceSwapOpt,
-    "ReFactorOptions": ReFactorOptions,
-    "ReFactorMaskBuilder": ReFactorMaskBuilder,
-    "ReFactorSetWeight": ReFactorSetWeight,
+    "ANTsFaceDancer": ReFactorFaceSwap,
+    "ANTsOptions": ReFactorOptions,
+    "ANTsMaskBuilder": ReFactorMaskBuilder,
+    "ANTsSetWeight": ReFactorSetWeight,
     # --- Operations with Face Models ---
-    "ReFactorSaveFaceModel": ReFactorSaveFaceModel,
-    "ReFactorLoadFaceModel": ReFactorLoadFaceModel,
-    "ReFactorBuildFaceModel": ReFactorBuildFaceModel,
-    "ReFactorMakeFaceModelBatch": ReFactorMakeFaceModelBatch,
+    "ANTsSaveFaceModel": ReFactorSaveFaceModel,
+    "ANTsLoadFaceModel": ReFactorLoadFaceModel,
+    "ANTsBuildFaceModel": ReFactorBuildFaceModel,
+    "ANTsMakeFaceModelBatch": ReFactorMakeFaceModelBatch,
     # --- Additional Nodes ---
-    "ReFactorRestoreFace": ReFactorRestoreFace,
-    "ReFactorRestoreFaceAdvanced": ReFactorRestoreFaceAdvanced,
-    "ReFactorFaceSimilarity": ReFactorFaceSimilarity,
-    "ReFactorImageDuplicator": ReFactorImageDuplicator,
-    "ReFactorImageRGBA2RGB": ReFactorImageRGBA2RGB,
-    "ReFactorUnload": ReFactorUnload,
-    "ReFactorDLSS5Enhancer": ReFactorDLSS5Enhancer,
+    "ANTsFaceRestore": ReFactorRestoreFace,
+    "ANTsFaceSimilarity": ReFactorFaceSimilarity,
+    "ANTsImageDuplicator": ReFactorImageDuplicator,
+    "ANTsImageRGBA2RGB": ReFactorImageRGBA2RGB,
+    "ANTsUnload": ReFactorUnload,
+    "ANTsDLSS5Enhancer": ReFactorDLSS5Enhancer,
     # --- Model Loaders ---
-    "ReFactorFaceSwapModelLoader": ReFactorFaceSwapModelLoader,
-    "ReFactorFaceRestoreModelLoader": ReFactorFaceRestoreModelLoader,
-    "ReFactorFaceDetectionModelLoader": ReFactorFaceDetectionModelLoader,
-    "ReFactorUpscaleModelLoader": ReFactorUpscaleModelLoader,
+    "ANTsFaceSwapModelLoader": ReFactorFaceSwapModelLoader,
+    "ANTsFaceRestoreModelLoader": ReFactorFaceRestoreModelLoader,
+    "ANTsFaceDetectionModelLoader": ReFactorFaceDetectionModelLoader,
+    "ANTsUpscaleModelLoader": ReFactorUpscaleModelLoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     # --- MAIN NODES ---
-    "ReFactorFaceSwap": "ReFactor ⚡ Fast Face Swap",
-    "ReFactorFaceSwapOpt": "ReFactor ⚡ Fast Face Swap [OPTIONS]",
-    "ReFactorOptions": "ReFactor ⚡ Options",
-    "ReFactorMaskBuilder": "ReFactor ⚡ Mask Builder",
-    "ReFactorSetWeight": "ReFactor ⚡ Set Face Swap Weight",
+    "ANTsFaceDancer": "ANTs⚡Face Dancer",
+    "ANTsOptions": "ANTs⚡Options",
+    "ANTsMaskBuilder": "ANTs⚡Mask Builder",
+    "ANTsSetWeight": "ANTs⚡Set Face Swap Weight",
     # --- Operations with Face Models ---
-    "ReFactorSaveFaceModel": "Save Face Model ⚡ ReFactor",
-    "ReFactorLoadFaceModel": "Load Face Model ⚡ ReFactor",
-    "ReFactorBuildFaceModel": "Build Blended Face Model ⚡ ReFactor",
-    "ReFactorMakeFaceModelBatch": "Make Face Model Batch ⚡ ReFactor",
+    "ANTsSaveFaceModel": "ANTs⚡Save Face Model",
+    "ANTsLoadFaceModel": "ANTs⚡Load Face Model",
+    "ANTsBuildFaceModel": "ANTs⚡Build Blended Face Model",
+    "ANTsMakeFaceModelBatch": "ANTs⚡Make Face Model Batch",
     # --- Additional Nodes ---
-    "ReFactorRestoreFace": "Restore Face ⚡ ReFactor",
-    "ReFactorRestoreFaceAdvanced": "Restore Face Advanced ⚡ ReFactor",
-    "ReFactorFaceSimilarity": "Face Similarity ⚡ ReFactor",
-    "ReFactorImageDuplicator": "Image Duplicator (List) ⚡ ReFactor",
-    "ReFactorImageRGBA2RGB": "Convert RGBA to RGB ⚡ ReFactor",
-    "ReFactorUnload": "Unload ReFactor Models ⚡ ReFactor",
-    "ReFactorDLSS5Enhancer": "DLSS5 Frame Enhancer ⚡ ReFactor",
+    "ANTsFaceRestore": "ANTs⚡Face Restore",
+    "ANTsFaceSimilarity": "ANTs⚡Face Similarity",
+    "ANTsImageDuplicator": "ANTs⚡Image Duplicator (List)",
+    "ANTsImageRGBA2RGB": "ANTs⚡Convert RGBA to RGB",
+    "ANTsUnload": "ANTs⚡Unload Models",
+    "ANTsDLSS5Enhancer": "ANTs⚡DLSS5 Frame Enhancer",
     # --- Model Loaders ---
-    "ReFactorFaceSwapModelLoader": "FaceSwap Model Loader ⚡ ReFactor",
-    "ReFactorFaceRestoreModelLoader": "FaceRestore Model Loader ⚡ ReFactor",
-    "ReFactorFaceDetectionModelLoader": "FaceDetection Model Loader ⚡ ReFactor",
-    "ReFactorUpscaleModelLoader": "Upscale Model Loader ⚡ ReFactor",
+    "ANTsFaceSwapModelLoader": "ANTs⚡FaceSwap Model Loader",
+    "ANTsFaceRestoreModelLoader": "ANTs⚡FaceRestore Model Loader",
+    "ANTsFaceDetectionModelLoader": "ANTs⚡FaceDetection Model Loader",
+    "ANTsUpscaleModelLoader": "ANTs⚡Upscale Model Loader",
 }

@@ -1,6 +1,6 @@
 <div align="center">
 
-# ReActor ReFactor ⚡
+# ANTs Face Nodes (ex ReActor ReFactor) ⚡
 
 **A dependency-hygiene rework of the ReActor face-swap nodepack for ComfyUI.**
 
@@ -21,7 +21,7 @@ without asking.
 
 ### What changed vs. upstream (v0.7.1-b1 baseline)
 
-| Area | Upstream | ReFactor |
+| Area | Upstream | ANTs |
 |---|---|---|
 | `insightface` SDK | removed upstream already | stays removed — pure-Python ONNX engine (SCRFD / ArcFace / INSwapper / HyperSwap) |
 | `albumentations` | declared, never imported | **removed** |
@@ -36,7 +36,7 @@ without asking.
 | Downloads | raw urllib, no timeout/resume | timeout + resume + atomic `.part` + size checks + `REFACTOR_NO_AUTO_DOWNLOAD=1` opt-out |
 | basicsr vendored copy | full training framework (~100 files) | trimmed to the tiny registry/logger subset actually used |
 
-Node class names are **new and distinct** (`ReFactorFaceSwap`, `ReFactorMaskBuilder`, …), so this nodepack can
+Node class names are **new and distinct** (`ANTsFaceSwap`, `ANTsMaskBuilder`, …), so this nodepack can
 safely coexist with the original ReActor in one ComfyUI installation — no mapping or module collisions.
 
 ## Installation
@@ -47,7 +47,7 @@ safely coexist with the original ReActor in one ComfyUI installation — no mapp
    ```
 2. Run the bootstrap (Windows) or the python script:
    - `install.bat` — or — `python install.py` (use `--dry-run` to just report)
-3. Restart ComfyUI. Nodes appear under the **ReFactor** category.
+3. Restart ComfyUI. Nodes appear under the **ANTs** category.
 
 ### What install.py will and won't do
 
@@ -96,14 +96,14 @@ Connect any ComfyUI-native segmentation into the **Mask Builder**:
 ## Nodes
 
 **Model loaders** (the facerestore_cf pattern — models via dedicated nodes, typed sockets):
-`ReFactorFaceSwapModelLoader` → `FACE_SWAP_MODEL`, `ReFactorFaceRestoreModelLoader` → `FACE_RESTORE_MODEL`,
-`ReFactorFaceDetectionModelLoader` → `FACE_DETECT_MODEL`, `ReFactorUpscaleModelLoader` → `UPSCALE_MODEL`
+`ANTsFaceSwapModelLoader` → `FACE_SWAP_MODEL`, `ANTsFaceRestoreModelLoader` → `FACE_RESTORE_MODEL`,
+`ANTsFaceDetectionModelLoader` → `FACE_DETECT_MODEL`, `ANTsUpscaleModelLoader` → `UPSCALE_MODEL`
 (comfy-native listing + spandrel loading; the output even plugs into the stock
 "Upscale Image (using Model)" node). Swap models get their own loader (not shared
 with restore) because they are persistent cached ONNX sessions with family routing
 (inswapper / reswapper / hyperswap), unlike per-run restoration models.
 
-**Main:** `ReFactorFaceSwap` / `ReFactorFaceSwapOpt` with sockets
+**Main:** `ANTsFaceDancer` (ANTs⚡Face Dancer) with sockets
 `original_image`, `target_face_image` (the face donor image), `target_face_model` (prebuilt FACE_MODEL),
 `FaceSwap_model`, `FaceRestore_model`, `FaceDetection_model`, `UpscaleModel`.
 The old monolithic `facedetection` / `face_restore_model` / `swap_model` dropdowns are gone —
@@ -123,18 +123,18 @@ crops are super-resolved with it **before** inference; when a restored face must
 the model does that too — and the result is always normalized back to the face's exact resolution,
 whatever the model's 1x/2x/4x/8x output is. Every upRes decision and fallback is logged
 (`upRes: ...` STATUS lines); the loader must be connected or the node falls back to interpolation
-and says so. `ReFactorFaceBoost` is **removed** — the main node now
+and says so. `ANTsFaceBoost` is **removed** — the main node now
 restores better than the booster did (proper affine paste-back with soft masks at any resolution,
 no crop-space aliasing).
 
 **Restore-only mode:** leave `FaceSwap_model` unconnected and the node skips swapping entirely while
 still applying face restoration to `original_image` — useful as a standalone restorer pipeline stage.
 
-**Also:** `ReFactorOptions`, `ReFactorMaskBuilder`, `ReFactorSetWeight`,
-`ReFactorSaveFaceModel` / `ReFactorLoadFaceModel` / `ReFactorBuildFaceModel` / `ReFactorMakeFaceModelBatch`,
-`ReFactorRestoreFace` / `ReFactorRestoreFaceAdvanced` (both now take `FACE_RESTORE_MODEL` /
-`FACE_DETECT_MODEL` inputs), `ReFactorFaceSimilarity`, `ReFactorImageDuplicator`,
-`ReFactorImageRGBA2RGB`, `ReFactorUnload`, `ReFactorDLSS5Enhancer`.
+**Also:** `ANTsOptions`, `ANTsMaskBuilder`, `ANTsSetWeight`,
+`ANTsSaveFaceModel` / `ANTsLoadFaceModel` / `ANTsBuildFaceModel` / `ANTsMakeFaceModelBatch`,
+`ANTsRestoreFace` / `ANTsRestoreFaceAdvanced` (both now take `FACE_RESTORE_MODEL` /
+`FACE_DETECT_MODEL` inputs), `ANTsFaceSimilarity`, `ANTsImageDuplicator`,
+`ANTsImageRGBA2RGB`, `ANTsUnload`, `ANTsDLSS5Enhancer`.
 
 Typical graph:
 
@@ -144,7 +144,7 @@ Typical graph:
 [FaceDetection Model Loader]──FaceDetection_model┤
 [target face image]──target_face_image──────────┤
                                                 ▼
-[original image]────────────────────> ReFactor ⚡ Fast Face Swap ──> SWAPPED_IMAGE
+[original image]────────────────────> ANTs⚡Face Dancer ──> SWAPPED_IMAGE
 ```
 
 ## Development

@@ -104,7 +104,7 @@ def main():
     # --- main node socket contract (owner spec) --------------------------------
     sys.path.insert(0, str(REPO.parent))
     pkg = __import__("ReAactor_node_ReFactor", fromlist=["NODE_CLASS_MAPPINGS"])
-    swap_node = pkg.NODE_CLASS_MAPPINGS["ReFactorFaceSwap"]
+    swap_node = pkg.NODE_CLASS_MAPPINGS["ANTsFaceDancer"]
     ti = swap_node.INPUT_TYPES()
     for socket in ("original_image",):
         check(f"required socket '{socket}'", socket in ti["required"])
@@ -121,9 +121,12 @@ def main():
     trio = ["FaceSwap_model", "FaceRestore_model", "FaceDetection_model"]
     check("model sockets grouped (contiguous, first)", optional_order[:3] == trio)
 
-    opt = pkg.NODE_CLASS_MAPPINGS["ReFactorFaceSwapOpt"].INPUT_TYPES()
-    check("OPT has grouped loader sockets", list(opt["optional"].keys())[:3] == trio
-          and "FaceSwap_model" not in opt["required"])
+    # former Fast Face Swap [OPTIONS] + Restore Face Advanced are merged in
+    check("OPTIONS + Advanced nodes scrapped",
+          "ReFactorFaceSwapOpt" not in pkg.NODE_CLASS_MAPPINGS
+          and "ReFactorRestoreFaceAdvanced" not in pkg.NODE_CLASS_MAPPINGS)
+    check("OPTIONS socket on the main node", "options" in ti["optional"]
+          and "FaceRestorePrePass_model" in ti["optional"])
 
     # CodeFormer must be registered (regression: silent missing import broke restore)
     from rfactor.faceboost.archs.registry import ARCH_REGISTRY
@@ -134,7 +137,7 @@ def main():
           and "ReFactorFaceBoost" not in pkg.NODE_CLASS_MAPPINGS)
 
     # upRes contract on the four restore-capable nodes
-    for name in ("ReFactorFaceSwap", "ReFactorFaceSwapOpt", "ReFactorRestoreFace", "ReFactorRestoreFaceAdvanced"):
+    for name in ("ANTsFaceDancer", "ANTsFaceRestore"):
         t = pkg.NODE_CLASS_MAPPINGS[name].INPUT_TYPES()
         check(f"{name}: upRes widgets",
               "face_restore_upres" in t["required"] and "upres_interpolation" in t["required"])
@@ -142,13 +145,21 @@ def main():
         check(f"{name}: interpolation choices end with 'Use Upscale model'",
               choices[-1] == "Use Upscale model" and choices[0] == "Lanczos")
 
-    adv = pkg.NODE_CLASS_MAPPINGS["ReFactorRestoreFaceAdvanced"].INPUT_TYPES()
-    check("RestoreFaceAdvanced loader sockets", "FaceRestore_model" in adv["required"]
-          and "FaceDetection_model" in adv["optional"])
+    # pre-pass contract
+    check("pre-pass toggle + selector", "face_restore_pre_pass" in ti["required"]
+          and "face_restore_pre_pass_uses" in ti["required"]
+          and list(ti["required"]["face_restore_pre_pass_uses"][0]) == ["main FR model", "dedicated FR model"])
+    check("ACTIVE toggle", "active" in ti["required"] and "enabled" not in ti["required"])
+    # merged face-selection controls
+    for w in ("face_selection", "sort_by", "reverse_order", "take_start", "take_count"):
+        check(f"merged filter widget '{w}'", w in ti["required"])
 
     check("loaders registered", all(n in pkg.NODE_CLASS_MAPPINGS for n in (
-        "ReFactorFaceSwapModelLoader", "ReFactorFaceRestoreModelLoader",
-        "ReFactorFaceDetectionModelLoader", "ReFactorUpscaleModelLoader")))
+        "ANTsFaceSwapModelLoader", "ANTsFaceRestoreModelLoader",
+        "ANTsFaceDetectionModelLoader", "ANTsUpscaleModelLoader")))
+    check("brand: no ReFactor keys left", not [k for k in pkg.NODE_CLASS_MAPPINGS if k.startswith("ReFactor")])
+    check("display names carry the ANTs brand",
+          all(v.startswith("ANTs") for v in pkg.NODE_DISPLAY_NAME_MAPPINGS.values()))
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

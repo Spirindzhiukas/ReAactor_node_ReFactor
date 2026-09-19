@@ -1,6 +1,6 @@
-"""ReActor ReFactor — face-swap nodepack for ComfyUI.
+"""ANTs Face Nodes — face-swap nodepack for ComfyUI (ex ReActor ReFactor).
 
-A dependency-hygiene-focused rework of the ReActor node:
+A dependency-hygiene-focused rework of the ReActor node, now under the ANTs brand:
 - zero sys.path pollution (proper package-relative imports),
 - minimal, clash-free dependencies (no ultralytics / segment_anything /
   albumentations / forced onnxruntime flavors),

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 import numpy as np
 
-# --- КОНСТАНТЫ ---
+# --- constants ---
 BRIDGE_ABI_VERSION = 6
 MEMORY_HOST = 0
 MEMORY_CUDA = 1
@@ -13,7 +13,7 @@ MEMORY_NONE = 2
 class NeuralBridgeError(Exception):
     pass
 
-# --- C-СТРУКТУРЫ ДЛЯ ВЗАИМОДЕЙСТВИЯ С DLL ---
+# --- C structs for the DLL bridge ---
 
 class RenderParameters(ctypes.Structure):
     _fields_ = [
@@ -32,7 +32,7 @@ class RenderParameters(ctypes.Structure):
         ("mask_width", ctypes.c_uint32),
         ("mask_height", ctypes.c_uint32),
         ("mask_stride", ctypes.c_uint32),
-        ("mask_plane", ctypes.c_uint64),          # Из-за uint64 здесь будет 4 байта системного отступа
+        ("mask_plane", ctypes.c_uint64),          # uint64 here -> 4 bytes of system padding
         ("face_skin_protection", ctypes.c_float),
         ("grain_preservation", ctypes.c_float),
         ("nr_passes", ctypes.c_int32),
@@ -67,13 +67,13 @@ class DLSSStandaloneManager:
             except OSError as exc:
                 raise NeuralBridgeError(f"DLL load failed: {exc}")
                 
-            # Сигнатура инициализации
+            # init signature
             self._library.dlss5nr_init.argtypes = [
                 ctypes.c_int, ctypes.c_wchar_p, ctypes.c_char_p, ctypes.c_int
             ]
             self._library.dlss5nr_init.restype = ctypes.c_int
             
-            # Сигнатура HOST-рендера (process_v6 вместо process_cuda_v6)
+            # HOST-render signature (process_v6 instead of process_cuda_v6)
             c_float_p = ctypes.POINTER(ctypes.c_float)
             self._library.dlss5nr_process_v6.argtypes = [
                 c_float_p, c_float_p, ctypes.c_int, ctypes.c_int,
@@ -120,18 +120,18 @@ class DLSSStandaloneManager:
             params.shimmer_suppression = float(settings.get("shimmer_suppression", 0.0))
             params.prefer_nvof = int(bool(settings.get("prefer_nvof", False)))
             
-            # Обработка маски через HOST память
+            # mask handling via HOST memory
             params.mask_memory_type = MEMORY_NONE
             if mask is not None:
                 params.mask_memory_type = MEMORY_HOST
                 params.mask_width = int(mask.shape[1])
                 params.mask_height = int(mask.shape[0])
                 params.mask_stride = int(mask.strides[0])
-                params.mask_plane = int(mask.ctypes.data) # Передаем указатель RAM
+                params.mask_plane = int(mask.ctypes.data) # pass the RAM pointer
             
             c_float_p = ctypes.POINTER(ctypes.c_float)
             
-            # Вызываем HOST функцию (DLL сама разберется с видеокартой)
+            # call the HOST function (the DLL talks to the GPU itself)
             ok = self._library.dlss5nr_process_v6(
                 source.ctypes.data_as(c_float_p),
                 destination.ctypes.data_as(c_float_p),

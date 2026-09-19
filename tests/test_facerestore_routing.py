@@ -167,7 +167,7 @@ def test_main_path_onnx(pkg, check):
             model = os.path.join(td, "GPEN-BFR-512.onnx")
             open(model, "wb").write(b"stub")
             inp = _ImgWrap(np.zeros((1, 512, 512, 3), dtype=np.float32))
-            main_cls = pkg.NODE_CLASS_MAPPINGS["ReFactorFaceSwap"]
+            main_cls = pkg.NODE_CLASS_MAPPINGS["ANTsFaceDancer"]
             main_cls.restore_face(
                 ns, inp, {"name": "GPEN-BFR-512.onnx", "path": model}, 1.0, 0.5, "retinaface_resnet50")
             check("main path: ONNX session actually fed", white.fed)
@@ -177,7 +177,7 @@ def test_main_path_onnx(pkg, check):
             white.fed = False
             model2 = os.path.join(td, "codeformer.onnx")
             open(model2, "wb").write(b"stub")
-            main_cls = pkg.NODE_CLASS_MAPPINGS["ReFactorFaceSwap"]
+            main_cls = pkg.NODE_CLASS_MAPPINGS["ANTsFaceDancer"]
             main_cls.restore_face(
                 ns, inp, {"name": "codeformer.onnx", "path": model2}, 1.0, 0.5, "retinaface_resnet50")
             check("main path: codeformer.onnx routed to ONNX session (never torch.load)", white.fed)
@@ -440,6 +440,24 @@ def main():
         finally:
             for k, v in saved_paths.items():
                 setattr(loaders.model_paths, k, v)
+
+    # ---- pre-pass: dedicated mode with no model must FAIL loudly ------------
+    import importlib
+    sys.path.insert(0, str(REPO.parent))
+    pkg = importlib.import_module("ReAactor_node_ReFactor")
+    main_node = pkg.NODE_CLASS_MAPPINGS["ANTsFaceDancer"]
+    ns2 = types.SimpleNamespace(faces_order=["large-small", "large-small"], restore_swapped_only=True)
+    raised = False
+    try:
+        main_node.execute(
+            ns2, True, True, "dedicated FR model", _ImgWrap(np.zeros((1, 64, 64, 3), dtype=np.float32)),
+            1.0, 0.5, True, "Lanczos", "all", "area", False, 0, 1,
+            "no", "no", "0", "0", 1,
+            FaceSwap_model=None, FaceRestore_model=None, FaceDetection_model=None,
+            FaceRestorePrePass_model=None)
+    except RuntimeError as e:
+        raised = "FaceRestorePrePass_model" in str(e)
+    check("pre-pass dedicated + no model -> loud failure", raised)
 
     # ---- main restore path end-to-end (stubbed helper + ORT) ----------------
     import importlib

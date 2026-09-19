@@ -6,16 +6,16 @@ from ..log import logger
 from .face_objects import BaseONNXModel
 from .meanshape_68 import MEANSHAPE_68
 
-# --- Математика для 3D позы ---
+# --- 3D pose math ---
 
 def estimate_affine_matrix_3d23d(X, Y):
-    ''' Вычисляет аффинную матрицу трансформации 3D -> 3D '''
+    '''Compute a 3D -> 3D affine transform matrix'''
     X_homo = np.hstack((X, np.ones([X.shape[0], 1])))
     P = np.linalg.lstsq(X_homo, Y, rcond=None)[0].T
     return P
 
 def P2sRt(P):
-    ''' Разбивает матрицу проекции '''
+    '''Decompose a projection matrix'''
     t1 = np.linalg.norm(P[:,0])
     t2 = np.linalg.norm(P[:,1])
     t3 = np.linalg.norm(P[:,2])
@@ -26,7 +26,7 @@ def P2sRt(P):
     return s, R, t
 
 def matrix2angle(R):
-    ''' Превращает матрицу поворота в углы Эйлера (pitch, yaw, roll) '''
+    '''Convert a rotation matrix to Euler angles (pitch, yaw, roll)'''
     if R[2,0] != 1 and R[2,0] != -1:
         pitch = -np.arcsin(R[2,0])
         yaw = np.arctan2(R[2,1]/np.cos(pitch), R[2,2]/np.cos(pitch))
@@ -41,7 +41,7 @@ def matrix2angle(R):
             roll = -yaw + np.arctan2(-R[0,1], -R[0,2])
     return pitch, yaw, roll
 
-# --- Вспомогательные функции ---
+# --- Helpers ---
 
 def distance2bbox(points, distance, max_shape=None):
     x1 = points[:, 0] - distance[:, 0]
@@ -67,7 +67,7 @@ def distance2kps(points, distance, max_shape=None):
         preds.append(py)
     return np.stack(preds, axis=-1)
 
-# Стандартные точки FFHQ/ArcFace для матрицы трансформации 112x112
+# Standard FFHQ/ArcFace points for the 112x112 transform matrix
 ARCFACE_STD_POINTS = np.array([
     [38.2946, 51.6963],
     [73.5318, 51.5014],
@@ -77,15 +77,15 @@ ARCFACE_STD_POINTS = np.array([
 ], dtype=np.float32)
 
 def norm_crop(img, landmark, image_size=112):
-    """Выравнивает и обрезает лицо (для ArcFace)"""
+    """Align and crop a face (for ArcFace)"""
     M, _ = cv2.estimateAffinePartial2D(landmark, ARCFACE_STD_POINTS)
     warped = cv2.warpAffine(img, M, (image_size, image_size), borderValue=0.0)
     return warped
 
-# --- Модели ---
+# --- Models ---
 
 class SCRFD(BaseONNXModel):
-    """Детектор лиц (находит bbox и 5 ключевых точек)"""
+    """Face detector (returns bboxes and 5 keypoints)"""
     def __init__(self, model_file, providers=None):
         super().__init__(model_file, providers)
         self.batched = len(self.outputs[0].shape) == 3
@@ -214,7 +214,7 @@ class SCRFD(BaseONNXModel):
 
 
 class ArcFaceONNX(BaseONNXModel):
-    """Распознаватель лиц (выдает вектор/эмбеддинг)"""
+    """Face recognition (produces the embedding vector)"""
     def __init__(self, model_file, providers=None):
         super().__init__(model_file, providers)
         self.input_mean = 127.5
@@ -231,7 +231,7 @@ class ArcFaceONNX(BaseONNXModel):
 
 
 class Attribute(BaseONNXModel):
-    """Анализатор атрибутов (выдает пол и возраст)"""
+    """Attribute analyzer (gender and age)"""
     def __init__(self, model_file, providers=None):
         super().__init__(model_file, providers)
         self.input_mean = 0.0
@@ -244,7 +244,7 @@ class Attribute(BaseONNXModel):
         center = ((bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2)
         _scale = self.input_size[0] / (max(w, h) * 1.5)
         
-        # Простая трансформация для Attribute (не требует 5 точек, только центр и масштаб)
+        # simple transform for Attribute (no 5 keypoints needed, just center and scale)
         M = np.array([
             [_scale, 0, self.input_size[0] * 0.5 - center[0] * _scale],
             [0, _scale, self.input_size[1] * 0.5 - center[1] * _scale]
@@ -256,7 +256,7 @@ class Attribute(BaseONNXModel):
         
         pred = self.session.run(self.output_names, {self.input_names[0]: blob})[0][0]
         
-        # Получаем гендер и возраст
+        # read gender and age
         gender = int(np.argmax(pred[:2]))
         age = int(np.round(pred[2] * 100))
         face.gender = gender
@@ -264,7 +264,7 @@ class Attribute(BaseONNXModel):
         return gender, age
 
 class INSwapper(BaseONNXModel):
-    """Свопер лиц (модели inswapper_128, reswapper)"""
+    """Face swapper (inswapper_128 / reswapper models)"""
     def __init__(self, model_file, providers=None):
         super().__init__(model_file, providers)
         self.input_mean = 0.0
@@ -290,8 +290,8 @@ class INSwapper(BaseONNXModel):
                 "execution providers."
             )
 
-        # Хак для экономии памяти: импортируем onnx только здесь,
-        # читаем нужную матрицу emap и сразу выгружаем тяжелую модель из RAM.
+        # memory trick: import onnx here only,
+        # read the emap matrix and immediately drop the heavy proto from RAM.
         try:
             import onnx
             from onnx import numpy_helper
@@ -311,29 +311,29 @@ class INSwapper(BaseONNXModel):
             )
 
     def get(self, img, target_face, source_face, paste_back=True):
-        # 1. Идеальное позиционирование (1 в 1 как в оригинальном C++ Insightface)
-        # ВАЖНО: Insightface центрирует лицо для INSwapper ТОЛЬКО по оси X! 
-        # По оси Y оно остается прижатым выше, сохраняя оригинальные пропорции.
+        # 1. Exact positioning (1:1 with the original C++ insightface)
+        # IMPORTANT: insightface centers the face for INSwapper along the X axis only! 
+        # On Y it stays shifted up, preserving the original proportions.
         ratio = float(self.input_size[0]) / 128.0
         diff_x = 8.0 * ratio
         
         src_pts = ARCFACE_STD_POINTS.copy() * ratio
-        src_pts[:, 0] += diff_x  # Смещаем ТОЛЬКО координаты X!
+        src_pts[:, 0] += diff_x  # shift the X coordinates ONLY!
 
-        # 2. Вычисляем аффинную матрицу родным методом OpenCV
+        # 2. Compute the affine matrix with OpenCV
         M, _ = cv2.estimateAffinePartial2D(target_face.kps, src_pts)
         
-        # 3. Кропаем и выравниваем лицо
+        # 3. Crop and align the face
         aimg = cv2.warpAffine(img, M, self.input_size, borderValue=0.0)
         blob = cv2.dnn.blobFromImage(aimg, 1.0 / self.input_std, self.input_size,
                                       (self.input_mean, self.input_mean, self.input_mean), swapRB=True)
 
-        # 4. Подготавливаем эмбеддинг донора
+        # 4. Prepare the donor embedding
         latent = source_face.normed_embedding.reshape((1, -1))
         latent = np.dot(latent, self.emap)
         latent /= np.linalg.norm(latent)
 
-        # 5. Инференс
+        # 5. Inference
         pred = self.session.run(self.output_names, {
             self.input_names[0]: blob, 
             self.input_names[1]: latent.astype(np.float32)
@@ -345,12 +345,12 @@ class INSwapper(BaseONNXModel):
         if not paste_back:
             return bgr_fake, M
 
-        # 6. Обратная вклейка (Paste Back)
+        # 6. Paste back
         target_img = img
         fake_diff = bgr_fake.astype(np.float32) - aimg.astype(np.float32)
         fake_diff = np.abs(fake_diff).mean(axis=2)
         
-        # Обрезаем края
+        # zero out the borders
         fake_diff[:2, :] = 0
         fake_diff[-2:, :] = 0
         fake_diff[:, :2] = 0
@@ -359,7 +359,7 @@ class INSwapper(BaseONNXModel):
         IM = cv2.invertAffineTransform(M)
         img_white = np.full((aimg.shape[0], aimg.shape[1]), 255, dtype=np.float32)
 
-        # Возвращаем в исходную перспективу
+        # warp back into the original perspective
         bgr_fake_warped = cv2.warpAffine(bgr_fake, IM, (target_img.shape[1], target_img.shape[0]), borderValue=0.0)
         img_white_warped = cv2.warpAffine(img_white, IM, (target_img.shape[1], target_img.shape[0]), borderValue=0.0)
         fake_diff_warped = cv2.warpAffine(fake_diff, IM, (target_img.shape[1], target_img.shape[0]), borderValue=0.0)
@@ -372,7 +372,7 @@ class INSwapper(BaseONNXModel):
         img_mask = img_white_warped
         mask_h_inds, mask_w_inds = np.where(img_mask == 255)
 
-        # Защита от пустой маски
+        # guard against an empty mask
         if len(mask_h_inds) > 0 and len(mask_w_inds) > 0:
             mask_h = np.max(mask_h_inds) - np.min(mask_h_inds)
             mask_w = np.max(mask_w_inds) - np.min(mask_w_inds)
@@ -400,7 +400,7 @@ class INSwapper(BaseONNXModel):
         return fake_merged.astype(np.uint8)
 
 class Landmark(BaseONNXModel):
-    """Извлекает 106 (2D) или 68 (3D) точек лица"""
+    """Extracts 106 (2D) or 68 (3D) face landmarks"""
     def __init__(self, model_file, providers=None):
         super().__init__(model_file, providers)
         self.input_mean = 127.5
@@ -408,7 +408,7 @@ class Landmark(BaseONNXModel):
         self.input_size = tuple(self.input_shape[2:4][::-1])
         
         output_shape = self.outputs[0].shape
-        # Определяем, какая это модель (3D или 2D) по размеру выхода
+        # tell the 3D vs 2D variant apart by the output size
         if output_shape[1] == 3309:
             self.lmk_dim = 3
             self.lmk_num = 68
@@ -424,7 +424,7 @@ class Landmark(BaseONNXModel):
         center = ((bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2)
         _scale = self.input_size[0] / (max(w, h) * 1.5)
         
-        # Матрица трансформации (выравнивание по центру bbox)
+        # transform matrix (align by the bbox center)
         M = np.array([
             [_scale, 0, self.input_size[0] * 0.5 - center[0] * _scale],
             [0, _scale, self.input_size[1] * 0.5 - center[1] * _scale]
@@ -444,27 +444,27 @@ class Landmark(BaseONNXModel):
         if self.lmk_num < pred.shape[0]:
             pred = pred[-self.lmk_num:, :]
             
-        # Денормализация точек в размер модели
+        # denormalize the points to the model size
         pred[:, 0:2] += 1
         pred[:, 0:2] *= (self.input_size[0] // 2)
         if pred.shape[1] == 3:
             pred[:, 2] *= (self.input_size[0] // 2)
 
-        # Обратная трансформация точек на оригинальное изображение
+        # transform the points back onto the original image
         IM = cv2.invertAffineTransform(M)
         pred_xy = pred[:, 0:2]
-        pred_xy = np.hstack((pred_xy, np.ones((pred_xy.shape[0], 1)))) # Добавляем гомогенную координату
+        pred_xy = np.hstack((pred_xy, np.ones((pred_xy.shape[0], 1)))) # append the homogeneous coordinate
         pred_xy = np.dot(IM, pred_xy.T).T
         
         if pred.shape[1] == 3:
-            pred = np.hstack((pred_xy, pred[:, 2:3])) # Возвращаем Z
+            pred = np.hstack((pred_xy, pred[:, 2:3])) # restore Z
         else:
             pred = pred_xy
 
-        # Сохраняем в объект Face под правильным именем
+        # store on the Face object under the proper name
         setattr(face, self.taskname, pred)
         
-        # Честный расчет 3D позы
+        # proper 3D pose estimation
         if self.taskname == 'landmark_3d_68':
             P = estimate_affine_matrix_3d23d(MEANSHAPE_68, pred)
             _, R, _ = P2sRt(P)
