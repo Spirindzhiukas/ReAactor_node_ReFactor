@@ -187,6 +187,70 @@ def test_main_path_onnx(pkg, check):
             out = main_cls.restore_face(
                 ns, inp2, {"name": None, "path": None}, 1.0, 0.5, "retinaface_resnet50")
             check("main path: empty model name skips restore gracefully", out is inp2)
+
+            # ---- upRes S1: "Use Upscale model" must SR the aligned crops ----
+            # (regression: needs_model_upscale() was dead code - the model never
+            #  fired in any mode; now S1 must trigger for a 200px face vs a
+            #  512px native model in UseModel mode, and must NOT in Lanczos mode)
+            class _DummyUpmodel:
+                pass
+
+            sr_calls = []
+            real_sr = nodes_mod.upscale_bgr_face
+
+            def _recording_sr(model, img):
+                sr_calls.append(tuple(img.shape[:2]))
+                return img  # 1x "model": identity
+
+            nodes_mod.upscale_bgr_face = _recording_sr
+            model3 = os.path.join(td, "codeformer_v2.onnx")
+            open(model3, "wb").write(b"stub")
+            try:
+                # helper with a 200px face (det box 10..210), fixed 512 model
+                helper_small = _FakeHelper([crop])
+                nodes_mod.FACE_HELPER = helper_small
+                nodes_mod.FACE_SIZE = 512
+                white.fed = False
+                main_cls.restore_face(
+                    ns, inp, {"name": "codeformer_v2.onnx", "path": model3}, 1.0, 0.5, "retinaface_resnet50",
+                    face_restore_upres=True, upres_interpolation="Use Upscale model",
+                    upscale_model=_DummyUpmodel())
+                check("upRes S1: upscale model SRs the crop before restore (UseModel mode)",
+                      len(sr_calls) == 1 and white.fed)
+
+                sr_calls.clear()
+                white.fed = False
+                helper_small2 = _FakeHelper([crop])
+                nodes_mod.FACE_HELPER = helper_small2
+                main_cls.restore_face(
+                    ns, inp, {"name": "codeformer_v2.onnx", "path": model3}, 1.0, 0.5, "retinaface_resnet50",
+                    face_restore_upres=True, upres_interpolation="Lanczos",
+                    upscale_model=_DummyUpmodel())
+                check("upRes S1: plain interpolation mode never touches the upscale model",
+                      len(sr_calls) == 0 and white.fed)
+
+                # ---- upRes S2: restored 512px face must be scaled back up to a
+                # 600px face via the upscale model (dynamic model, big face) ----
+                class _BigHelper(_FakeHelper):
+                    def __init__(self, crops):
+                        super().__init__(crops)
+                        self.det_faces = [(10.0, 10.0, 610.0, 610.0, 0.99)]
+
+                helper_big = _BigHelper([crop])
+                nodes_mod.FACE_HELPER = helper_big
+                nodes_mod.FACE_SIZE = 512
+                sr_calls.clear()
+                white.fed = False
+                model4 = os.path.join(td, "gfpgan_dyn.onnx")
+                open(model4, "wb").write(b"stub")
+                main_cls.restore_face(
+                    ns, inp, {"name": "gfpgan_dyn.onnx", "path": model4}, 1.0, 0.5, "retinaface_resnet50",
+                    face_restore_upres=True, upres_interpolation="Use Upscale model",
+                    upscale_model=_DummyUpmodel())
+                check("upRes S2: scale-back runs the upscale model for big faces",
+                      len(sr_calls) >= 1 and white.fed)
+            finally:
+                nodes_mod.upscale_bgr_face = real_sr
     finally:
         for k, v in saved.items():
             setattr(nodes_mod, k, v)

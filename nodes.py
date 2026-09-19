@@ -45,6 +45,7 @@ from .rfactor.upres import (
     UPRES_USE_MODEL,
     decide_restore_size,
     interp_flag,
+    needs_model_upscale,
     restore_model_native,
 )
 from .rfactor.utils import (
@@ -287,6 +288,24 @@ class ReFactorFaceSwap:
                     self.face_helper.get_face_landmarks_5(only_center_face=False, resize=640, eye_dist_threshold=5)
 
                 self.face_helper.align_warp_face()
+
+                # upRes S1: with "Use Upscale model", super-resolve the aligned
+                # crops BEFORE the restore model sees them (instead of plain
+                # interpolation doing the scale-up).
+                if (upres_interpolation == UPRES_USE_MODEL and upscale_model is not None
+                        and needs_model_upscale(upres_interpolation, native_restore_size, face_px)):
+                    logger.status(f"upRes: enhancing aligned face crop(s) (~{int(face_px) if face_px else '?'}px "
+                                  f"-> {self.face_helper.face_size[0]}px) with the upscale model before restore")
+                    _fh = self.face_helper
+                    _enhanced = []
+                    for _c in _fh.cropped_faces:
+                        _up = upscale_bgr_face(upscale_model, _c)
+                        _th, _tw = _fh.face_size[1], _fh.face_size[0]
+                        if _up.shape[0] != _th or _up.shape[1] != _tw:
+                            _up = cv2.resize(_up, (_tw, _th),
+                                             interpolation=cv2.INTER_AREA if _up.shape[0] > _th else cv2.INTER_CUBIC)
+                        _enhanced.append(_up)
+                    _fh.cropped_faces = _enhanced
                 
                 # restored_face = None
                 restored_faces = []
@@ -392,8 +411,12 @@ class ReFactorFaceSwap:
                     if use_model_scale_back and face_px_helper is not None and face_px_helper > self.face_helper.face_size[0] * 1.05:
                         try:
                             target = int(round(face_px_helper))
+                            logger.status(f"upRes: scale-back of restored face "
+                                          f"{self.face_helper.face_size[0]}px -> {target}px via the upscale model")
                             upscaled = upscale_bgr_face(upscale_model, restored_face)
-                            restored_face = cv2.resize(upscaled, (target, target), interpolation=cv2.INTER_AREA)
+                            restored_face = cv2.resize(
+                                upscaled, (target, target),
+                                interpolation=cv2.INTER_AREA if upscaled.shape[0] >= target else cv2.INTER_CUBIC)
                         except Exception as error:
                             logger.error(f"Upscale-model scale-back failed ({error}); using interpolation")
 
@@ -1093,6 +1116,23 @@ class ReFactorRestoreFaceAdvanced:
 
                 self.face_helper.align_warp_face()
 
+                # upRes S1 (mirrors the main node): SR the aligned crops before
+                # the restore model when "Use Upscale model" is selected.
+                if (upres_interpolation == UPRES_USE_MODEL and upscale_model is not None
+                        and needs_model_upscale(upres_interpolation, native_restore_size, face_px)):
+                    logger.status(f"upRes: enhancing aligned face crop(s) (~{int(face_px) if face_px else '?'}px "
+                                  f"-> {self.face_helper.face_size[0]}px) with the upscale model before restore")
+                    _fh = self.face_helper
+                    _enhanced = []
+                    for _c in _fh.cropped_faces:
+                        _up = upscale_bgr_face(upscale_model, _c)
+                        _th, _tw = _fh.face_size[1], _fh.face_size[0]
+                        if _up.shape[0] != _th or _up.shape[1] != _tw:
+                            _up = cv2.resize(_up, (_tw, _th),
+                                             interpolation=cv2.INTER_AREA if _up.shape[0] > _th else cv2.INTER_CUBIC)
+                        _enhanced.append(_up)
+                    _fh.cropped_faces = _enhanced
+
                 # Face-Filter Mode
 
                 # Фильтрация лиц
@@ -1217,8 +1257,12 @@ class ReFactorRestoreFaceAdvanced:
                     if use_model_scale_back and face_px_helper is not None and face_px_helper > self.face_helper.face_size[0] * 1.05:
                         try:
                             target = int(round(face_px_helper))
+                            logger.status(f"upRes: scale-back of restored face "
+                                          f"{self.face_helper.face_size[0]}px -> {target}px via the upscale model")
                             upscaled = upscale_bgr_face(upscale_model, restored_face)
-                            restored_face = cv2.resize(upscaled, (target, target), interpolation=cv2.INTER_AREA)
+                            restored_face = cv2.resize(
+                                upscaled, (target, target),
+                                interpolation=cv2.INTER_AREA if upscaled.shape[0] >= target else cv2.INTER_CUBIC)
                         except Exception as error:
                             logger.error(f"Upscale-model scale-back failed ({error}); using interpolation")
 

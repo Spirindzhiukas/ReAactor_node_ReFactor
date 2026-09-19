@@ -117,9 +117,13 @@ optional inputs (in load order). CodeFormer's `codeformer_weight` is now named c
 model runs at the face's own resolution whenever the model supports it (dynamic-input models like
 GFPGAN restore small faces with **no** pixel scaling at all); otherwise the face is brought to the
 model's native resolution, restored, and scaled back to the image resolution. "Use Upscale model"
-delegates the scale-back to a connected `UPSCALE_MODEL` (tiled, OOM-aware — same code path as
-ComfyUI's stock upscale node) and always normalizes the result back to the face's exact resolution,
-whatever the model's 1x/2x/4x/8x output is. `ReFactorFaceBoost` is **removed** — the main node now
+hands the pixel scaling to a connected `UPSCALE_MODEL` (tiled, OOM-aware — same code path as
+ComfyUI's stock upscale node): when the face must be *enlarged* for the restore model, the aligned
+crops are super-resolved with it **before** inference; when a restored face must be scaled back up,
+the model does that too — and the result is always normalized back to the face's exact resolution,
+whatever the model's 1x/2x/4x/8x output is. Every upRes decision and fallback is logged
+(`upRes: ...` STATUS lines); the loader must be connected or the node falls back to interpolation
+and says so. `ReFactorFaceBoost` is **removed** — the main node now
 restores better than the booster did (proper affine paste-back with soft masks at any resolution,
 no crop-space aliasing).
 
