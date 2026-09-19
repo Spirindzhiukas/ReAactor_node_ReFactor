@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 273 checks + gates (details below, fixes after)
+- **Suite:** ALL GREEN — 276 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -151,6 +151,17 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   CreateCommandAllocator, CreateCommandList (slots + IIDs + call plumbing).
   Sandbox CANNOT verify: shim machine-thunk on Windows, real NGX runtime
   responses, remaining slot behavior under real drivers.
+- RIG run 7: IDENTITY CHECK PASSED (no collision error) -> Windows maps
+  our hand-built shim PE cleanly (loader acceptance proven). New error:
+  callable_at crashed = CFUNCTYPE ctor rejects c_void_p INSTANCES (needs
+  raw int) AND GetProcAddress had NO restype -> ctypes truncated 64-bit
+  addresses to c_int (silent time bomb for every kernel32 pointer return).
+  FIXED: LoadLibraryExW/GetProcAddress/CreateEventW restype=c_void_p;
+  callable_at normalizes int|c_void_p|_Pointer -> raw int; export_address
+  never int()s a c_void_p. NOTE: with restype fixed we can't tell yet
+  whether run 7's GetProcAddress failure was real parser refusal or would
+  have succeeded - RVA fallback covers both. Run 8 should pass the shim
+  and reach Init_Ext.
 - RIG run 6 (shim-first live): fwd_set_slots STILL missing on BOTH
   attempts, including a first-run-in-fresh-process -> collision by another
   module UNLIKELY; suspect #1 = Windows GetProcAddress refusing OUR

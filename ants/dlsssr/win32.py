@@ -15,6 +15,14 @@ _k32 = ctypes.WinDLL("kernel32", use_last_error=True) if _is_windows else None
 _d3d12 = ctypes.WinDLL("d3d12", use_last_error=True) if _is_windows else None
 _dxgi = ctypes.WinDLL("dxgi", use_last_error=True) if _is_windows else None
 
+if _is_windows:
+    # Without an explicit restype ctypes truncates returns to 32-bit c_int -
+    # fatal for HMODULE/HPROC/FARPROC (64-bit addresses). Simple ctypes
+    # restypes hand back plain Python ints.
+    _k32.LoadLibraryExW.restype = ctypes.c_void_p
+    _k32.GetProcAddress.restype = ctypes.c_void_p
+    _k32.CreateEventW.restype = ctypes.c_void_p
+
 _LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008
 _GENERIC_ALL = 0x10000000
 _INFINITE = 0xFFFFFFFF
@@ -64,6 +72,8 @@ def export_address(module_handle, rva):
     """Export address by KNOWN RVA: HMODULE is the loaded image base, so
     base + RVA is the function even if GetProcAddress refuses to parse our
     export directory (the loader maps the image without walking it)."""
+    if isinstance(module_handle, ctypes.c_void_p):
+        module_handle = module_handle.value or 0
     return int(module_handle) + int(rva)
 
 
@@ -74,8 +84,11 @@ def free_library(module_handle):
 
 def callable_at(address, argtypes, restype):
     """Turn a raw export address into a ctypes callable (the COM/FFI seam)."""
+    # c_void_p is a simple type (NOT _Pointer) but carries .value too
+    if isinstance(address, (ctypes.c_void_p, ctypes._Pointer)):
+        address = address.value or 0
     proto = ctypes.CFUNCTYPE(restype, *argtypes)
-    return proto(ctypes.c_void_p(address))
+    return proto(int(address))  # CFUNCTYPE wants the raw int, not a pointer object
 
 
 def create_event():

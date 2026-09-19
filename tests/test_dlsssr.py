@@ -178,6 +178,24 @@ def main():
           == bytes([0x78, 0xae, 0x0a, 0x77, 0x6f, 0xf2, 0xba, 0x4d,
                     0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87]))
 
+    # ---- win32 calling conventions (rig run 7: CFUNCTYPE rejected the
+    # ---- c_void_p wrap; GetProcAddress had no restype = 64-bit truncation)
+    from ants.dlsssr import win32 as _w
+    proto0 = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int)
+    tgt = proto0(lambda v: v * 2)
+    addr = ctypes.cast(tgt, ctypes.c_void_p).value
+    check("win32: callable_at accepts int and c_void_p addresses",
+          _w.callable_at(addr, [ctypes.c_int], ctypes.c_int)(21) == 42
+          and _w.callable_at(ctypes.c_void_p(addr), [ctypes.c_int], ctypes.c_int)(21) == 42)
+    check("win32: export_address handles int and c_void_p handles (no int() parse trap)",
+          _w.export_address(0x1000, 0x40) == 0x1040
+          and _w.export_address(ctypes.c_void_p(0x1000), 0x40) == 0x1040)
+    import pathlib as _pl
+    src = _pl.Path(REPO / "ants" / "dlsssr" / "win32.py").read_text()
+    check("win32: pointer-returning kernel32 fns have c_void_p restypes",
+          "_k32.GetProcAddress.restype = ctypes.c_void_p" in src
+          and "_k32.LoadLibraryExW.restype = ctypes.c_void_p" in src)
+
     # ---- d3d12 struct packs (sizes/fields per d3d12.h, PE32+) ----
     from ants.dlsssr import d3d12 as d12
     tex = d12._resource_desc_texture(64, 48, d12.DXGI_FORMAT_R8G8B8A8_UNORM,
