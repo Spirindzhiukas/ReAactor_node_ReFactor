@@ -39,7 +39,7 @@ _NR_PRESET_TO_INT = {"Default": 0, "J - Transformer I Crisp": 10,
                      "K - Transformer I Stable": 11,
                      "L - Transformer II Quality": 12, "M - Transformer II Fast": 13}
 PRE_DENOISE_SR = "SR (DLSS denoise)"
-PRE_DENOISE_MODEL = "Upscale Model"
+PRE_DENOISE_MODEL = "Denoise Model"
 ENGINE_LEGACY = "Legacy neuroframe DLLs"
 from .hdr_bridge import (
     DIFFUSE_WHITE_NITS_DEFAULT,
@@ -370,7 +370,7 @@ class ReFactorDLSS5Enhancer:
                           "is reserved for a future release; no effect yet.")
         if pre_denoise_mode == PRE_DENOISE_SR and not native:
             logger.warning("[ANTs] SR pre-denoise needs the native NGX engine - "
-                           "using the upscale-model pipeline for this run.")
+                           "using the denoise_model input for this run.")
 
         settings = {
             "style": nr_schedule_lib.STYLES[style], "intensity": intensity,
@@ -440,7 +440,7 @@ class ReFactorDLSS5Enhancer:
                              if spec["denoise_model"] is not None)
                 scale = getattr(first, "scale", 1)
                 logger.status(f"DLSS5 pre-SR denoise on pass(es) {denoise_passes}: "
-                              f"{scale}x model from the Upscale-Model pipeline")
+                              f"{scale}x model from the denoise_model input")
                 if scale != 1:
                     logger.status("DLSS5 pre-SR denoise note: non-1x model connected - its output is "
                                   "resized back to the input resolution before the engine.")

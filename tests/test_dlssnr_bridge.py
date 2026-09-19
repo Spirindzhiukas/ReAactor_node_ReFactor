@@ -251,9 +251,10 @@ def main():
     check("dlss5: NR preset widget present, defaults to driver Default",
           req["nr_model_preset"][0][0] == "Default"
           and req["nr_model_preset"][1]["default"] == "Default")
-    check("dlss5: pre_denoise_mode present, defaults to SR",
+    check("dlss5: pre_denoise_mode present, defaults to SR, model choice named like the input",
           req["pre_denoise_mode"][1]["default"] == "SR (DLSS denoise)"
-          and "SR (DLSS denoise)" in req["pre_denoise_mode"][0])
+          and "SR (DLSS denoise)" in req["pre_denoise_mode"][0]
+          and "Denoise Model" in req["pre_denoise_mode"][0])
     node_src = _pl.Path(REPO / "ants" / "dlssnr" / "node.py").read_text()
     check("dlss5: NR + SR session factories share _ensure_native_gpu (run-8 ordering fix)",
           node_src.count("self._ensure_native_gpu()") >= 2

@@ -227,20 +227,33 @@ class NgxSession:
         info = FeatureCommonInfo(list(search_paths) or [os.path.dirname(module_path)])
         init_ext = self.module.fn("NVSDK_NGX_D3D12_Init_Ext",
                                   [_CVOID, _CVOID, _CVOID, _CI32, _CVOID])
-        hr = init_ext(ctypes.c_void_p(app_id), win32.wide(app_data),
-                      gpu.device.ptr, ctypes.c_int32(NGX_VERSION_API), info.ptr)
-        if hr != 1:
-            # Try the 4-argument legacy init before giving up.
-            try:
-                init4 = self.module.fn("NVSDK_NGX_D3D12_Init",
-                                       [_CVOID, _CVOID, _CVOID, _CI32])
-                hr = init4(ctypes.c_void_p(app_id), win32.wide(app_data),
-                           gpu.device.ptr, ctypes.c_int32(NGX_VERSION_API))
-            except DlssSrError:
-                pass
+        init4 = self.module.fn("NVSDK_NGX_D3D12_Init",
+                               [_CVOID, _CVOID, _CVOID, _CI32])
+
+        def try_init():
+            if use_own_parameters:
+                # Snippet-direct runtimes (ReShade/RenoDX builds) target the
+                # classic 4-arg Init - DVT's rig-proven NR flow. Init_Ext is
+                # only the fallback (its extra arg may be ignored or worse).
+                hr4 = init4(ctypes.c_void_p(app_id), win32.wide(app_data),
+                            gpu.device.ptr, ctypes.c_int32(NGX_VERSION_API))
+                if hr4 == 1:
+                    return 1
+            hr = init_ext(ctypes.c_void_p(app_id), win32.wide(app_data),
+                          gpu.device.ptr, ctypes.c_int32(NGX_VERSION_API), info.ptr)
+            if hr == 1:
+                return 1
+            if not use_own_parameters:
+                hr4 = init4(ctypes.c_void_p(app_id), win32.wide(app_data),
+                            gpu.device.ptr, ctypes.c_int32(NGX_VERSION_API))
+                if hr4 == 1:
+                    return 1
+            return hr  # last failure, for the error message
+
+        hr = try_init()
         if hr != 1:
             raise DlssSrError(
-                f"[ANTs] NGX Init_Ext failed (0x{hr & 0xFFFFFFFF:08X}) for "
+                f"[ANTs] NGX Init failed (0x{hr & 0xFFFFFFFF:08X}) for "
                 f"{module_path} - the runtime rejected the session. Check the "
                 "driver version and the DLL set folder.")
 

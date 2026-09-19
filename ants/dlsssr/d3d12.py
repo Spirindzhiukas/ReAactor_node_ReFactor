@@ -408,7 +408,24 @@ class GpuContext:
         return bytes(out)
 
     def submit_and_wait(self, timeout_ms=30000):
-        self.list.call_hr(_LIST_CLOSE, [], what="Close")
+        try:
+            self.list.call_hr(_LIST_CLOSE, [], what="Close")
+        except DlssSrError as exc:
+            if "0x80004005" not in str(exc):
+                raise
+            # The runtime mangled or closed the shared list (observed with
+            # the ReShade-oriented RenoDX NR build after CreateFeature).
+            # Recover: drop the recording, restore the list, and continue -
+            # loudly, because NGX-side GPU work may have been lost.
+            from ..log import dlss_logger
+            dlss_logger.warning(
+                "[ANTs] NGX runtime disturbed the command list (Close: %s) - "
+                "resetting it and continuing. If output looks wrong, the "
+                "runtime build needs a different submission style.", exc)
+            self.list.call_hr(_LIST_RESET, [_CVOID_P(), _CVOID_P()],
+                              self.allocator.ptr, None, what="Reset")
+            self.allocator.call_hr(_ALLOCATOR_RESET, [], what="Reset")
+            return
         cell = (_CVOID_P() * 1)(self.list.ptr)
         self.queue.call(_QUEUE_EXECUTE_COMMAND_LISTS, [_CVOID_U32(), _CVOID_P()], None,
                         ctypes.c_uint32(1), cell)

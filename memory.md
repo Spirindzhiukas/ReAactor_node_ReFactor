@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 280 checks + gates (details below, fixes after)
+- **Suite:** ALL GREEN — 281 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -167,6 +167,23 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - LEGACY engine: helper locates files by LITERAL 'nvngx_dlssnr.dll' name;
   owner's RenoDX-named build -> stage_legacy_runtime() copies the set to
   a writable dir under canonical names; manager gets the stage dir.
+- RIG run 12 = **LEGACY ENGINE WORKS END-TO-END** (staged set initialized
+  on the 4090, full run 13.86s, output produced) AND **SR NATIVE PIPELINE
+  WORKED** (SR session create_feature(1) + evaluate + readback through the
+  shim - the 9-tile/bw output question is separate). NR-on-RenoDX failed at
+  list Close E_FAIL AFTER its CreateFeature returned success -> the
+  ReShade-oriented build likely targets the CLASSIC 4-arg Init (DVT's
+  rig-proven NR flow) - snippet-direct sessions now Init4-FIRST (Init_Ext
+  fallback); submit_and_wait recovered from Close E_FAIL (loud warn, reset
+  list+allocator, continue). Legacy staging moved OUT of AppData per owner:
+  canonical-named sets load IN PLACE (Merserk_DLLS masters); others stage
+  under models/DLSS/staged/<dll>-<size>/ content-addressed (never rewrites
+  -> no more locked-dll PermissionError). Widget rename: pre_denoise_mode
+  choice "Upscale Model" -> "Denoise Model" (matches denoise_model input).
+  9-tile output hypothesis: repeated-frames batch + Continuous temporal
+  history on legacy + SCUNet gray-push accumulates per frame (preview grid
+  shows progressive drift) - NOT yet confirmed; asked owner for input
+  batch/schedule state.
 - RIG run 10: E_INVALIDARG PERSISTED on the first texture even with
   TEXTURE2D=3 (line numbers confirm the fix was live; desc/heap bytes now
   byte-identical to DVT's rig-proven layout; UAV+COMMON creation is legal

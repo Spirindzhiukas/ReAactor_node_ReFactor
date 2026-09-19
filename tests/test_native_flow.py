@@ -325,7 +325,7 @@ class FakeNgxModule:
             return init_ext
         if name == "NVSDK_NGX_D3D12_Init":
             def init4(app_id, app_data, dev, sdk):
-                RECORD.append(("Init4", sdk))
+                RECORD.append(("Init4", _as_int(sdk)))
                 return 1
             return init4
         if name == "NVSDK_NGX_D3D12_AllocateParameters":
@@ -466,8 +466,8 @@ def main():
     sess = DlssNrSession(gpu, W, H, "fake/nvngx_dlssnr.dll", style="Natural", intensity=0.8)
     FakeNgxModule.own_store = sess.ngx.params.store
     creates = [entry for entry in RECORD if entry[0] == "CreateFeature"]
-    check("nr: Init_Ext (sdk 0x15) precedes CreateFeature(feature 18)",
-          any(entry[0] == "Init_Ext" and entry[1] == 0x15 for entry in RECORD)
+    check("nr: classic Init first for snippet-direct (sdk 0x15) precedes CreateFeature(18)",
+          any(entry[0] == "Init4" and entry[1] == 0x15 for entry in RECORD)
           and creates and creates[0][1] == FEATURE_NR)
 
     rng = random.Random(7)

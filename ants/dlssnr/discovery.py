@@ -265,19 +265,34 @@ def resolve_legacy_dir(choice: str):
 def stage_legacy_runtime(dll_path):
     """A dir the legacy helper engine can consume.
 
-    The helper locates files by LITERAL name ('nvngx_dlssnr.dll'), so a
-    build under any other name (nvngx_dlssnr_RenoDX_4000_series_friendly,
-    ...) is staged under the canonical name next to copies of the whole
-    set. Returns the stage directory."""
-    import shutil
-    from ..dlsssr.ngx import writable_cache_dir
+    The helper locates files by LITERAL name ('nvngx_dlssnr.dll'):
+    - a set that already carries the canonical name (e.g. the owner's
+      models/DLSS/Merserk_DLLS/ masters) is used IN PLACE - nothing is
+      copied, nothing leaves models/DLSS;
+    - a build under any other name (nvngx_dlssnr_RenoDX_..., ...) is
+      staged under models/DLSS/staged/<dll_name>-<size>/nvngx_dlssnr.dll
+      (content-addressed: an existing stage is reused as-is, so loaded
+      DLL files are never rewritten and never get locked).
+    """
     dll_path = os.path.abspath(dll_path)
     src_dir = os.path.dirname(dll_path)
-    stage = os.path.join(writable_cache_dir("nr_legacy_staged"),
-                         os.path.basename(src_dir) or "set")
+    if dll_files(src_dir) and any(
+            f.lower() == "nvngx_dlssnr.dll" for f in dll_files(src_dir)):
+        return src_dir  # canonical set - use exactly where it lives
+    stage = os.path.join(DLSS_ROOT, "staged",
+                         f"{os.path.splitext(os.path.basename(dll_path))[0]}"
+                         f"-{os.path.getsize(dll_path)}")
     os.makedirs(stage, exist_ok=True)
+    canonical = os.path.join(stage, "nvngx_dlssnr.dll")
+    if not os.path.exists(canonical):
+        import shutil
+        shutil.copyfile(dll_path, canonical)
     for f in dll_files(src_dir):
-        shutil.copyfile(os.path.join(src_dir, f), os.path.join(stage, f))
-    if os.path.basename(dll_path).lower() != "nvngx_dlssnr.dll":
-        shutil.copyfile(dll_path, os.path.join(stage, "nvngx_dlssnr.dll"))
+        target = os.path.join(stage, f)
+        if not os.path.exists(target):
+            try:
+                import shutil
+                shutil.copyfile(os.path.join(src_dir, f), target)
+            except PermissionError:
+                pass  # a locked leftover from a previous run; not needed
     return stage
