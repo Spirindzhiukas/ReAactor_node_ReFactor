@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 278 checks + gates (details below, fixes after)
+- **Suite:** ALL GREEN — 278 checks + gates (details below, fixes after; adaptive-texture commit)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -151,6 +151,17 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   CreateCommandAllocator, CreateCommandList (slots + IIDs + call plumbing).
   Sandbox CANNOT verify: shim machine-thunk on Windows, real NGX runtime
   responses, remaining slot behavior under real drivers.
+- RIG run 10: E_INVALIDARG PERSISTED on the first texture even with
+  TEXTURE2D=3 (line numbers confirm the fix was live; desc/heap bytes now
+  byte-identical to DVT's rig-proven layout; UAV+COMMON creation is legal
+  per DVT engine.ts) -> remaining suspects are driver-specific desc rules
+  we cannot see. RESPONSE: create_texture2d is now ADAPTIVE - probe ladder
+  (UAV flag+UAV state like NVIDIA's NGX hosts / UAV+COMMON like DVT /
+  no flags+COMMON), first accepted combo cached on the device, loud log
+  per attempt; transition() skips redundant barriers (DVT parity). Legacy
+  engine fallback also fixed: DLSSStandaloneManager takes (dll_dir) only -
+  the engine-switch patch passed a phantom 2nd arg. Run 11: if the ladder
+  exhausts, the error will carry WHICH combos failed -> paste it.
 - RIG run 9 = CreateCommittedResource E_INVALIDARG on the FIRST texture:
   our RESOURCE_DESC passed Dimension=2 (TEXTURE1D!) - DVT constant table
   says TEXTURE2D=3; and buffer descs had Layout=UNKNOWN(0) instead of

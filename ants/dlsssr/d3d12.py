@@ -201,6 +201,7 @@ def _CVOID_P():
 class D3D12Device(ComObject):
     def __init__(self, ptr):
         super().__init__(ptr, "ID3D12Device")
+        self._texture_recipe = None  # winning (flags, state) combo
 
     @staticmethod
     def create(adapter_ptr=None, feature_level=D3D_FEATURE_LEVEL_11_0):
@@ -262,13 +263,35 @@ class D3D12Device(ComObject):
                             heap, ctypes.c_uint32(heap_flags), desc,
                             ctypes.c_uint32(initial_state), None, IID_ID3D12Resource)
 
+    # (resource_flags, initial_state) combos for UAV-capable textures, most
+    # permissive first. NVIDIA's own NGX hosts create them in the UAV state;
+    # DVT's rig-validated host uses COMMON. The first combo the driver
+    # accepts is cached on the device and reused for every later texture.
+    _UAV_RECIPES = ((D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+                    (D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                     D3D12_RESOURCE_STATE_COMMON),
+                    (D3D12_RESOURCE_FLAG_NONE,
+                     D3D12_RESOURCE_STATE_COMMON))
+
     def create_texture2d(self, width, height, fmt, allow_uav=True, label="texture"):
-        flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS if allow_uav else 0
-        desc = _resource_desc_texture(width, height, fmt, flags)
-        ptr = self._committed(D3D12_HEAP_TYPE_DEFAULT, desc,
-                              D3D12_RESOURCE_STATE_COMMON, label)
-        return D3D12Resource(ptr, label, width, height, fmt, width * height * BPP[fmt],
-                             D3D12_RESOURCE_STATE_COMMON)
+        if allow_uav:
+            recipes = (self._texture_recipe,) if self._texture_recipe else self._UAV_RECIPES
+        else:
+            recipes = ((D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON),)
+        last = None
+        for flags, state in recipes:
+            desc = _resource_desc_texture(width, height, fmt, flags)
+            try:
+                ptr = self._committed(D3D12_HEAP_TYPE_DEFAULT, desc, state, label)
+            except DlssSrError as exc:
+                last = exc
+                continue
+            if self._texture_recipe is None and allow_uav:
+                self._texture_recipe = (flags, state)
+            return D3D12Resource(ptr, label, width, height, fmt,
+                                 width * height * BPP[fmt], state)
+        raise last
 
     def create_buffer(self, size, heap_type, label="buffer"):
         state = {"upload": D3D12_RESOURCE_STATE_GENERIC_READ,
@@ -321,6 +344,8 @@ class GpuContext:
         self._closed = False
 
     def transition(self, resource, to):
+        if resource.state == to:
+            return  # already there - a redundant barrier only warns the debug layer
         barrier = _transition_barrier(resource.ptr, resource.state, to)
         self.list.call(_LIST_RESOURCE_BARRIER, [_CVOID_U32(), _CVOID_P()], None,
                        ctypes.c_uint32(1), barrier)
