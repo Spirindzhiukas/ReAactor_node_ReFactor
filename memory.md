@@ -135,11 +135,11 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - DONE (owner-confirmed): GPU acceleration ("speed on par with OreX"), pre-SR denoise via
   upscale models ("helps a lot"; scunet_color_real_gan/psnr favorites).
 - DLSS5 bridge/temporal/discovery: owner has the speed result; bridge defaults 220/1.0 in place.
-- SR node + DLSS5 native engine: RIG TESTING STARTED (owner ran DLSS5 with
-  engine=native + RenoDX NR dll; session-creation NOT yet reached - first run
-  crashed pre-session on scene-aware auto: frame_np UnboundLocalError on the
-  native path, FIXED + pushed). Awaiting next rig run to hit the actual
-  D3D12/NGX layer (22 sandbox checks cover shim PE, param-object vtable,
-  discovery, constants, converter math).
+- SR node + DLSS5 native engine: RIG TESTING, layer 1 cleared. Run 1:
+  frame_np UnboundLocalError on scene-aware auto (fixed). Run 2: denoise ran
+  (SCUNet), then D3D12CreateDevice -> E_NOINTERFACE = guid() reversed the
+  GUID field order, ALL IIDs wrong (fixed vs hand-written canonical bytes,
+  non-circular tests; lesson: never verify a helper against itself). Awaiting
+  run 3 to reach Init/shim/feature-create (24 dlsssr checks).
 - NR Schedules (new): scheduler JS dynamics + enhancer greying in a real browser, schedule
   off/on parity, per-pass settings bypass, per-pass denoise slots, 4K multi-pass speed.
