@@ -23,6 +23,9 @@ Run it with ComfyUI's python (no extra packages needed):
 
     python tools\\probe_neuroframe_host.py "D:\\AI_STUFF\\DLSS 5 Files LEAKED\\Visual.Enhancer.v10.0"
 
+or just drop this script INTO the Visual.Enhancer.v10.0 folder and run it
+with no argument at all (it then probes the folder it sits in).
+
 It prints a paste-sized report to the console AND writes the full version
 (next to the current working directory) as probe_neuroframe_host_report.txt
 - paste the console output, or upload the txt.
@@ -237,10 +240,16 @@ def probe_file(label, path, big=False, full_strings_hook=None):
 
 
 def main(argv):
-    if len(argv) < 2:
-        print(__doc__)
-        return 2
-    root = argv[1]
+    root = argv[1] if len(argv) > 1 else None
+    if root is None:
+        # No argument: probe the folder this script sits in, if it looks
+        # like a Visual Enhancer root (runtime/dlssnr/... present).
+        here = os.path.dirname(os.path.abspath(__file__))
+        if os.path.isfile(os.path.join(here, BIG_FILE[1])):
+            root = here
+        else:
+            print(__doc__)
+            return 2
     if os.path.isfile(root):  # convenience: probe one dll directly
         targets = [(os.path.basename(root), root)]
         small = targets
