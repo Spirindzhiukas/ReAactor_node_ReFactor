@@ -12,7 +12,7 @@ import torch
 
 import comfy.model_management as model_management
 
-from ..log import logger
+from ..log import dlss_logger as logger
 from ..scripting import state
 from ..utils import (
     progress_bar,
@@ -433,9 +433,9 @@ class ReFactorDLSS5Enhancer:
                 scale = getattr(first, "scale", 1)
                 logger.status(f"DLSS5 pre-SR denoise on pass(es) {denoise_passes}: "
                               f"{scale}x model from the Upscale-Model pipeline")
-            if scale != 1:
-                logger.status("DLSS5 pre-SR denoise note: non-1x model connected - its output is "
-                              "resized back to the input resolution before the engine.")
+                if scale != 1:
+                    logger.status("DLSS5 pre-SR denoise note: non-1x model connected - its output is "
+                                  "resized back to the input resolution before the engine.")
 
         bridge_kwargs = dict(
             diffuse_white_nits=float(diffuse_white_nits),

@@ -14,7 +14,7 @@ import torch
 import comfy.model_management
 import comfy.utils
 
-from ..log import logger
+from ..log import dlss_logger as logger
 from ..scripting import state
 from ..utils import progress_bar, progress_bar_reset
 from . import discovery

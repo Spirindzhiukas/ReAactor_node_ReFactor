@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 272 checks + gates (details below)
+- **Suite:** ALL GREEN — 272 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -151,6 +151,16 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   CreateCommandAllocator, CreateCommandList (slots + IIDs + call plumbing).
   Sandbox CANNOT verify: shim machine-thunk on Windows, real NGX runtime
   responses, remaining slot behavior under real drivers.
+- RIG run 5 (post-restructure): (a) scale UnboundLocalError in the
+  pre-denoise log block (my refactor left `if scale != 1` outside the else)
+  - fixed; (b) fwd_set_slots GetProcAddress failure = WINDOWS LOADER BASE-
+  NAME COLLISION: NgxModule loaded the ENGINE first, whose load pulled the
+  owner's real nvngx.dll; our shim is file-named nvngx.dll -> LoadLibraryExW
+  returned the real one -> no fwd_* exports. FIX: load the shim BEFORE the
+  runtime (also the design: the runtime's nvngx.dll imports then bind to
+  the shim); collision now gets a loud restart-hint error. LESSON: shim
+  before engine, always. (c) DLSS family logs now tagged
+  "[ANTs⚡DLSS5 Frame Enhancer]" (ants/log.py dlss_logger) per owner.
 - DLSS5 UI RESTRUCTURED (owner request, shipped): dll_version REMOVED;
   nr_dll_version / sr_dll_version / fg_dll_version (each flat .dll in
   models/DLSS/<CAT>/ listed individually + version subfolders, 'auto'

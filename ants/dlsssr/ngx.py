@@ -126,21 +126,38 @@ class NgxModule:
     """A loaded NGX provider (driver core or snippet) + shim-routed calls."""
 
     def __init__(self, module_path, use_shim=True, forwarder_dir=None):
-        self.path = module_path
-        self.handle = win32.load_library(module_path)
+        self.path = None
+        self.handle = None
         self.forwarder = None
         self._fwd_stub = None
+        # The shim MUST be loaded BEFORE the runtime: the Windows loader
+        # matches modules by base name, and our shim is FILE-named
+        # "nvngx.dll". Loaded first, every later nvngx.dll reference (the
+        # runtime's own imports, other loaders) binds to the shim; loaded
+        # after a real nvngx.dll exists in the process, LoadLibraryExW
+        # returns THAT module and our exports are "missing".
         if use_shim:
             fwd_path = shim_mod.write_shim(
                 forwarder_dir or writable_cache_dir("shim"))
             self._fwd_handle = win32.load_library(fwd_path)
-            set_slots = win32.get_proc(self._fwd_handle, "fwd_set_slots")
-            fwd_create = win32.get_proc(self._fwd_handle, "fwd_create")
+            try:
+                set_slots = win32.get_proc(self._fwd_handle, "fwd_set_slots")
+                fwd_create = win32.get_proc(self._fwd_handle, "fwd_create")
+            except DlssSrError as exc:
+                win32.free_library(self._fwd_handle)
+                self._fwd_handle = None
+                raise DlssSrError(
+                    f"{exc}\n    The shim (nvngx.dll) was loaded but its exports are missing -"
+                    "\n    a DIFFERENT nvngx.dll is already loaded in this process."
+                    "\n    Restart ComfyUI so our host loads first, and make sure no"
+                    "\n    other custom node preloads nvngx.dll.") from None
             self._set_slots = win32.callable_at(
                 set_slots, [_CVOID, _CVOID, _CVOID], None)
             self._fwd_stub = win32.callable_at(fwd_create, [_CVOID], _CVOID)
         else:
             self._fwd_handle = None
+        self.handle = win32.load_library(module_path)
+        self.path = module_path
 
     def address(self, name):
         return win32.get_proc(self.handle, name)

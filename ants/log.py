@@ -62,6 +62,8 @@ def _make_logger(name: str) -> logging.Logger:
 
 
 logger = _make_logger("ReFactor")
+# The DLSS node family logs under its own product name (owner request):
+dlss_logger = _make_logger("ANTs\u26a1DLSS5 Frame Enhancer")
 
 _LEVEL_MAP = {0: logging.WARNING, 1: STATUS_LEVEL, 2: logging.DEBUG}
 
