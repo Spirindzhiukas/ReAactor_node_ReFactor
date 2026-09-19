@@ -40,6 +40,18 @@ from . import shim as shim_mod
 def _log():
     from ..log import dlss_logger
     return dlss_logger
+
+
+# On a hard native crash (access violation inside the NGX runtime), Windows
+# fatal-exception handling prints every thread's Python stack to the console
+# - that trace names the exact frame the crash happened in. Cheap insurance;
+# enabled once when this package is first imported.
+try:
+    import faulthandler
+    import sys as _sys
+    faulthandler.enable(file=_sys.__stderr__, all_threads=True)
+except Exception:
+    pass
 from . import win32
 
 NGX_VERSION_API = 0x15
@@ -334,13 +346,37 @@ class NgxSession:
         self.gpu.submit_and_wait()
         return self.handle
 
+    def _first_evaluate_watchdog(self):
+        """A daemon that reports a stuck first evaluate every 15s (the hang
+        signature: server stops answering while this call never returns)."""
+        import threading
+        import time
+
+        def watch():
+            start = time.monotonic()
+            while not self._eval_done.is_set():
+                time.sleep(15)
+                if self._eval_done.is_set():
+                    return
+                _log().status(
+                    f"NGX EvaluateFeature STILL RUNNING for {time.monotonic() - start:.0f}s "
+                    "- the runtime is not returning (hang, not a Python error).")
+
+        thread = threading.Thread(target=watch, daemon=True)
+        thread.start()
+        return thread
+
     def evaluate(self):
         first = not getattr(self, "_eval_logged", False)
         if first:
-            _log().status("NGX EvaluateFeature -> (first frame)")
+            self._eval_done = __import__("threading").Event()
+            self._first_evaluate_watchdog()
+            _log().status("NGX EvaluateFeature -> (first frame; params: "
+                          + ", ".join(sorted(getattr(self.params, "store", {}))) + ")")
         hr = self._evaluate(self.gpu.list.ptr, ctypes.c_void_p(self.handle),
                             self.params.ptr, None)
         if first:
+            self._eval_done.set()
             self._eval_logged = True
             _log().status(f"NGX EvaluateFeature <- hr=0x{hr & 0xFFFFFFFF:08X}")
         if hr != 1:

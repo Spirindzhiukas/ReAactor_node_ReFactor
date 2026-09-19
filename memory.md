@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 289 checks + gates (details below, fixes after)
+- **Suite:** ALL GREEN — 290 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -180,6 +180,20 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   models/DLSS/staged/ANTs/<tag> per owner directive (AppData only as
   read-only fallback) - after next run: shim, staging AND the NGX log
   all live under models/DLSS/staged/ANTs/.
+- RIG run 17: SAME crash at first EvaluateFeature even with padding +
+  init keep-alive + unwind info + classic-Init-first (signatures now
+  line-for-line identical to DVT: evaluate (list,handle,params,null),
+  create (list,i32,params,out)). Remaining variable = this ReShade-oriented
+  build x our CPython host. SHIPPED: faulthandler.enable(all_threads) at
+  package import (AV -> 'Windows fatal exception' + full Python stacks on
+  the console) + a 15s watchdog thread logging 'EvaluateFeature STILL
+  RUNNING for Xs' + the first-evaluate log now dumps the param keys.
+  Run 18 is a DIAGNOSTIC run: paste the console tail (a crash now prints
+  where; a hang now reports itself), plus ideally Task Manager alive/gone
+  + Event Viewer python.exe faulting module. If the build simply requires
+  a ReShade swapchain host, native NR on THIS dll is a dead end -> the
+  decision becomes: stock NR dll needs 50-series; legacy neuroframe engine
+  WORKS TODAY (run 12); or a different unlocked NR build.
 - RIG run 16: same exact crash at first EvaluateFeature (padding fix
   insufficient). ROOT-CAUSE CANDIDATE #1 FOUND: DVT's initExt does
   `this.keep.push(path, featureInfo)` - the runtime RETAINS the
