@@ -136,6 +136,7 @@ def main():
             nr_disc.DLSS_ROOT = saved
 
         # ---- masquerader guard: a small "nvngx_dlss.dll" is a stub ----
+        nr_disc.DLSS_ROOT = td
         os.makedirs(os.path.join(td, "SR"), exist_ok=True)
         open(os.path.join(td, "SR", "nvngx_dlss.dll"), "wb").write(b"stub")
         try:
