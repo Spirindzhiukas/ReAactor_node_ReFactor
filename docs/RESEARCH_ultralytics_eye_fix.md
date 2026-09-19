@@ -135,3 +135,93 @@ scope, not part of eye-fix v1.
    socket?
 4. Is the ONNX-conversion cache (path B) wanted at all, given ultralytics
    is already installed in this env?
+
+---
+
+## 8. Follow-up investigation (owner Q): can restore/swap models run on
+eye-area crops at all? (the attached eyes-only close-up case)
+
+### 8.1 Why the crop comes back unchanged - in OUR node AND facerestore_cf
+
+Both nodes are facexlib-helper pipelines: whole-image mode first runs a face
+detector (ours: retinaface_resnet50 / yolov5face; facerestore_cf: same
+family), and only detected faces are cropped/aligned/restored. An eyes-only
+crop contains no full face - RetinaFace/YOLOv5face (WIDER-FACE-trained)
+essentially never fire on one - so `cropped_faces` is empty and the loop is
+skipped: output == input. CodeFormer's own README documents exactly this
+behavior for whole-image mode ("if no faces are detected, the input image is
+returned unmodified"). Nothing crashed; the detector is the gate. This also
+answers why FaceRestoreCFWithModel "fails the same": same architecture, same
+gate.
+
+### 8.2 If we bypass detection and feed the crop to the model anyway
+
+- **Face RESTORE models (GFPGAN / CodeFormer / GPEN / RestoreFormer):**
+  trained on *cropped and aligned 512x512 FULL faces* (CodeFormer docs
+  explicitly require `--has_aligned` 512x512 for the direct mode). An
+  eyes-region crop is far out-of-distribution: eyes at the wrong scale and
+  position, no nose/mouth/chin context. The networks run (GFPGAN is fully
+  convolutional; CodeFormer just resizes the crop to 512) but output quality
+  is unreliable - often worse than input (hallucinated structure around the
+  region). So: *not a hard no, but not dependable.* Worth one experimental
+  mode, nothing more - with one mitigating factor: our crop would come FROM
+  an already-restored full image (consistent lighting/color), and the owner's
+  "safe margin" crop gives the CNN extra context.
+- **Face SWAP models (inswapper/reswapper/hyperswap): structurally
+  impossible on eye crops.** Both engines build the alignment affine from
+  5 face keypoints (`estimateAffinePartial2D(target_kps, arcface_template)`
+  - inswap.py:324, hyperswap.py:25): no detectable face -> no keypoints ->
+  no alignment. And even bypassing that, the models synthesize a FULL
+  aligned face from the identity embedding - there is no "swap only the
+  eyes" mode. The owner's step-1 idea (restore the eye area with swap +
+  restore models) therefore cannot use the swap engine on the crop. The
+  swap's contribution to the eyes already happened in the main face pass;
+  the eye pass can only be a QUALITY pass (sharpen/detail), not an identity
+  pass. (A landmark-driven geometric eye transplant from target_face_image
+  - pure cv2 warp+feather, no swap model - remains possible later as an
+  experimental "eye donor" feature; not v1.)
+
+### 8.3 Are there specialized eye-fixing models? (searched)
+
+- **No production "eye restoration" model exists in the facerestore_models
+  ecosystem** - nothing GAN/checkpoint-format that takes an eye crop and
+  restores it the way GFPGAN does faces. All the popular "eye detailer"
+  downloads (Eyes.pt, Eyeful v1/v2-Paired, PitEyeDetailer-seg, Anzhc eyes
+  seg) are DETECTORS/SEGMENTERS; the actual fixing in every real workflow is
+  done by Stable-Diffusion img2img on the crop (FaceDetailer-style, needs
+  crop context: "bbox_crop_factor big enough that the sampler sees both
+  eyes").
+- Research-grade eye models exist but are not usable here: ECC-Net (gaze
+  redirection, not detail), closed-eye->open-eye replacement via diffusion
+  inpainting, old-photo eye-region enhancement (Microsoft latent-space
+  translation) - all out-of-format and out-of-scope.
+- **What CAN genuinely enhance an eye crop today: generic super-resolution /
+  denoise networks** (RealESRGAN, 4x-UltraSharp, SCUNet, ...) - no face-prior
+  assumption, safe on any crop, already wired into our node via the
+  UPSCALE_MODEL socket (spandrel). This is the dependable enhancer class for
+  the eye pass.
+
+### 8.4 Design consequences for the eye-fix stage (owner decisions 1-4)
+
+1. Pipeline: main face pass (as today) -> run FACE_DETECT_MODEL +
+   2d106det landmark pass on the RESTORED image (owner-specified) -> eye
+   contours from the 106-lm scheme (indices 66-73 / 75-82) -> per-eye crop
+   with margin (fraction of inter-eye distance, default ~0.5-0.6, plus
+   brow-side bias) -> enhance crop -> feathered blend back.
+2. Enhancer selector on the node (not a new daughter node):
+   - "Off" (default) - current behavior, zero cost;
+   - "Upscale model" - uses the existing UPSCALE_MODEL socket (safe,
+     recommended);
+   - "Face restore model" - experimental same-model mode (see 8.2), behind
+     the switch; logs an honesty note about off-distribution risk.
+   Swap models are NOT offered for the eye crop (8.2). Restore-only
+   semantics automatic (no swap-model involvement at all in this stage).
+3. Skips: closed eyes (contour-height threshold), too-small eyes
+   (<~48px after margin - below useful SR input), sunglasses (Eyeful-style
+   logic is not available, but the 106-lm contour height/visibility
+   heuristics catch most cases; ambiguous cases are logged).
+4. Later (explicitly out of v1): landmark-based geometric eye transplant
+   from target_face_image; ultralytics provider (owner declined for now);
+   ONNX conversion cache (only if it ever benefits output quality - it
+   cannot, it is runtime plumbing only).
+
