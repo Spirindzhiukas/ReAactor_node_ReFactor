@@ -1,8 +1,7 @@
 import ctypes
 import os
 import threading
-from dataclasses import dataclass
-from typing import Any
+
 import numpy as np
 
 # --- constants ---
@@ -42,11 +41,50 @@ class RenderParameters(ctypes.Structure):
     ]
 
 
+def _render_parameters(settings: dict, reset: bool, mask, abi_version: int) -> RenderParameters:
+    """Pack the v6 control struct (shared by the host and CUDA paths).
+
+    Masks always travel as HOST memory inside the struct (mask_memory_type,
+    mask_plane = RAM pointer) - this matches Merserk's reference driver, which
+    passes device-pointer 0 in the dedicated CUDA mask slot and keeps host
+    masks valid in CUDA mode too.
+    """
+    params = RenderParameters()
+    params.struct_size = ctypes.sizeof(RenderParameters)
+    params.abi_version = abi_version
+    params.style = int(settings.get("style"))
+    params.intensity = float(settings.get("intensity"))
+    params.tone = float(settings.get("local_tone"))
+    params.structure = float(settings.get("local_structure"))
+    params.skin = float(settings.get("skin_structure"))
+    params.automask = int(bool(settings.get("auto_mask")))
+    params.reset = int(bool(reset))
+    params.color_strength = float(settings.get("color_strength"))
+    params.tone_preservation = float(settings.get("tone_preservation"))
+    params.face_skin_protection = float(settings.get("face_skin_protection"))
+    params.grain_preservation = float(settings.get("grain_preservation"))
+    params.nr_passes = int(settings.get("nr_passes"))
+    params.shimmer_suppression = float(settings.get("shimmer_suppression", 0.0))
+    params.prefer_nvof = int(bool(settings.get("prefer_nvof", False)))
+    params.mask_memory_type = MEMORY_NONE
+    if mask is not None:
+        params.mask_memory_type = MEMORY_HOST
+        params.mask_width = int(mask.shape[1])
+        params.mask_height = int(mask.shape[0])
+        params.mask_stride = int(mask.strides[0])
+        params.mask_plane = int(mask.ctypes.data)
+    return params
+
+
 class DLSSStandaloneManager:
     def __init__(self, dll_dir: str):
         self._lock = threading.RLock()
         self._library = None
         self.dll_dir = dll_dir
+        self._process_cuda = None
+        self._cuda_supported_fn = None
+        self._cuda_status_fn = None
+        self._gpu_name_fn = None
 
     @staticmethod
     def find_engine_dll(dll_dir: str):
@@ -110,6 +148,35 @@ class DLSSStandaloneManager:
             ]
             self._library.dlss5nr_process_v6.restype = ctypes.c_int
 
+            # CUDA device-pointer variant (GPU-resident processing). Both the
+            # engine and PyTorch use the CUDA PRIMARY context, so torch CUDA
+            # tensor pointers are directly valid inputs - no driver-API
+            # plumbing, no extra copies. Optional: older engine builds may
+            # lack these exports; capability is probed via cuda_available().
+            c_u64 = ctypes.c_uint64
+            if hasattr(self._library, "dlss5nr_process_cuda_v6"):
+                self._library.dlss5nr_process_cuda_v6.argtypes = [
+                    c_u64, c_u64, ctypes.c_int, ctypes.c_int,
+                    c_u64, ctypes.POINTER(RenderParameters),
+                    ctypes.c_char_p, ctypes.c_int,
+                ]
+                self._library.dlss5nr_process_cuda_v6.restype = ctypes.c_int
+                self._process_cuda = self._library.dlss5nr_process_cuda_v6
+            for name, attr in (
+                ("dlss5nr_cuda_supported", "_cuda_supported_fn"),
+                ("dlss5nr_cuda_status", "_cuda_status_fn"),
+                ("dlss5nr_gpu_name", "_gpu_name_fn"),
+            ):
+                fn = getattr(self._library, name, None)
+                if fn is not None:
+                    if name == "dlss5nr_cuda_supported":
+                        fn.argtypes, fn.restype = [], ctypes.c_int
+                    elif name == "dlss5nr_cuda_status":
+                        fn.argtypes, fn.restype = [ctypes.c_char_p, ctypes.c_int], ctypes.c_int
+                    else:
+                        fn.argtypes, fn.restype = [], ctypes.c_char_p
+                    setattr(self, attr, fn)
+
             try:
                 self._library.dlss5nr_frame_abi_version.argtypes = []
                 self._library.dlss5nr_frame_abi_version.restype = ctypes.c_uint32
@@ -126,38 +193,72 @@ class DLSSStandaloneManager:
             
             return True
 
+    def cuda_available(self):
+        """(ok, reason): engine-side CUDA interop readiness."""
+        if self._process_cuda is None:
+            return False, ("engine DLL has no dlss5nr_process_cuda_v6 export "
+                           "(older neuroframe build - grab a fresh neuroframe_dlls.zip)")
+        if self._cuda_supported_fn is not None and not self._cuda_supported_fn():
+            status = ""
+            if self._cuda_status_fn is not None:
+                buf = ctypes.create_string_buffer(4096)
+                try:
+                    self._cuda_status_fn(buf, len(buf))
+                    status = buf.value.decode("utf-8", errors="ignore")
+                except Exception:
+                    pass
+            return False, (f"engine reports CUDA interoperability unavailable"
+                           f"{': ' + status if status else ''}")
+        return True, "engine CUDA interop ready"
+
+    def gpu_name(self):
+        try:
+            if self._gpu_name_fn is not None:
+                return (self._gpu_name_fn() or b"").decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+        return ""
+
+    def process_cuda(self, source_device_ptr: int, destination_device_ptr: int,
+                     width: int, height: int, settings: dict, reset: bool,
+                     mask: np.ndarray = None):
+        """GPU-resident render: source/destination are CUDA device pointers
+        (e.g. ``torch CUDA tensor.data_ptr()``).
+
+        Masks stay host-side (see ``_render_parameters``). The engine enqueues
+        its D3D12/NGX work on the shared primary context - the caller
+        synchronizes afterwards (``torch.cuda.synchronize()`` covers it).
+        """
+        with self._lock:
+            if self._process_cuda is None:
+                raise NeuralBridgeError(
+                    "[ANTs] This engine DLL has no CUDA entry point "
+                    "(dlss5nr_process_cuda_v6). Update neuroframe_dlls.zip or "
+                    "switch GPU acceleration to 'CPU (host staging)'.")
+            error = ctypes.create_string_buffer(4096)
+            params = _render_parameters(settings, reset, mask,
+                                        getattr(self, "actual_abi", BRIDGE_ABI_VERSION))
+            ok = self._process_cuda(
+                ctypes.c_uint64(int(source_device_ptr)),
+                ctypes.c_uint64(int(destination_device_ptr)),
+                int(width), int(height),
+                ctypes.c_uint64(0),
+                ctypes.byref(params),
+                error, len(error),
+            )
+            if not ok:
+                err_msg = error.value.decode('utf-8', errors='ignore')
+                raise NeuralBridgeError(
+                    f"DLSS-5 CUDA process failed: {err_msg} "
+                    "- you can switch GPU acceleration to 'CPU (host staging)'.")
+
     def process_host(self, source: np.ndarray, destination: np.ndarray, settings: dict, reset: bool, mask: np.ndarray = None):
         with self._lock:
             error = ctypes.create_string_buffer(4096)
-            
-            params = RenderParameters()
-            params.struct_size = ctypes.sizeof(RenderParameters)
-            params.abi_version = getattr(self, "actual_abi", BRIDGE_ABI_VERSION)
-            
-            params.style = int(settings.get("style"))
-            params.intensity = float(settings.get("intensity"))
-            params.tone = float(settings.get("local_tone"))
-            params.structure = float(settings.get("local_structure"))
-            params.skin = float(settings.get("skin_structure"))
-            params.automask = int(bool(settings.get("auto_mask")))
-            params.reset = int(bool(reset))
-            params.color_strength = float(settings.get("color_strength"))
-            params.tone_preservation = float(settings.get("tone_preservation"))
-            params.face_skin_protection = float(settings.get("face_skin_protection"))
-            params.grain_preservation = float(settings.get("grain_preservation"))
-            params.nr_passes = int(settings.get("nr_passes"))
-            params.shimmer_suppression = float(settings.get("shimmer_suppression", 0.0))
-            params.prefer_nvof = int(bool(settings.get("prefer_nvof", False)))
-            
-            # mask handling via HOST memory
-            params.mask_memory_type = MEMORY_NONE
-            if mask is not None:
-                params.mask_memory_type = MEMORY_HOST
-                params.mask_width = int(mask.shape[1])
-                params.mask_height = int(mask.shape[0])
-                params.mask_stride = int(mask.strides[0])
-                params.mask_plane = int(mask.ctypes.data) # pass the RAM pointer
-            
+
+            params = _render_parameters(settings, reset, mask,
+                                        getattr(self, "actual_abi", BRIDGE_ABI_VERSION))
+
             c_float_p = ctypes.POINTER(ctypes.c_float)
             
             # call the HOST function (the DLL talks to the GPU itself)

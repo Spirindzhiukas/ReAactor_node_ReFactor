@@ -66,10 +66,12 @@ OptiScaler_DLSSNR's credited port for the modern form). Implemented in
 `rfactor/dlssnr/hdr_bridge.py` (pure numpy, post-bridge, unit-tested):
 
 - **Classic (Paper-White Gain)** — default: sRGB→linear → gain by
-  `scene_paper_white_scale` (default 2.537) → extended-Reinhard shoulder
-  kneeing at `diffuse_white_nits` (default 237) → chroma preserved around
+  `scene_paper_white_scale` (default 1.0) → extended-Reinhard shoulder
+  kneeing at `diffuse_white_nits` (default 220) → chroma preserved around
   luma by `color_strength` (default 1.0) → transfer blend by
-  `hdr_transfer_strength` (default 1.0).
+  `hdr_transfer_strength` (default 1.0). Owner note: the original defaults
+  (2.537 / 237 nits) were game-engine reference values and overbrighten
+  regular 8/16-bit images — at 1.0 / 220 the bridge is neutral until pushed.
 - **Anchored (Auto White Point)** — secondary mode: the shoulder's white
   point anchors to the frame's measured highlight exposure (95th-percentile
   luma + bias) — the single-image analogue of RenoDX's exposure-scan
@@ -98,3 +100,39 @@ inherently limited (no motion vectors); the honest levers are the helper's
   Paper-White Scale, HDR Transfer Strength, Color Strength). MIT.
 - **Merserk** — neuroframe helper DLLs (our engine), via Gourieff's
   distribution. NVIDIA `nvngx_dlssnr.dll` remains user-supplied (license).
+
+## 6. GPU acceleration (owner measurement → implementation)
+
+Owner measurement on RTX 4090 / 5950X: host-staging was ~20× slower than OreX GPU-ON at
+default settings and ~100× at 4K with `nr_passes = 4`. Root cause: we called only the
+engine's HOST entry (`dlss5nr_process_v6`, numpy RAM pointers) and force-uploaded every
+frame from the CPU (per-frame `.cpu().numpy()` → process → back to torch).
+
+Facts from Merserk's own driver (`dlss5-visual-enhancer`, `src/core/neural_bridge.py`,
+the engine's reference client):
+
+- The engine exports a CUDA device-pointer variant `dlss5nr_process_cuda_v6(src_dev,
+  dst_dev, w, h, mask_dev=0, params*, err, n)` plus `dlss5nr_cuda_supported()` /
+  `dlss5nr_cuda_status()` / `dlss5nr_gpu_name()` / `dlss5nr_rebind()`.
+- Masks travel as HOST memory inside the params struct even in CUDA mode (the dedicated
+  mask device-pointer argument is passed as 0).
+- The engine runs on the CUDA **primary context** — the same context PyTorch uses — so
+  torch CUDA tensor pointers can be passed **directly** (no driver-API plumbing, no
+  staging buffers needed at all; one step better than Merserk's own numpy pipeline).
+
+Implementation (v1.2): `gpu_acceleration` widget — `Auto (GPU when available)` (default) /
+`Force GPU (CUDA)` / `CPU (host staging)`. GPU path: whole batch staged to
+`cuda:<ordinal>` once (no copy if already VRAM-resident), per-frame device pointers into
+`process_cuda`, `torch.cuda.synchronize()` to publish results, HDR bridge executed
+**on-GPU** via the bridge's new torch backend (one math path behind op shims, unit-tested
+on numpy). Host path kept as fallback, now with one-time batch conversion and a reused
+destination buffer. Engine capability is probed at load (`cuda_available()`); missing
+exports or a failed probe produce a loud `[ANTs]` message naming the fix (update
+`neuroframe_dlls.zip` or switch to CPU mode).
+
+Sandbox limitation: huggingface.co is TLS-blocked from the dev sandbox, so the exact
+export table of Gourieff's distributed zip could not be inspected here — the code probes
+at runtime instead, which also covers older engine builds gracefully.
+
+Future option: the engine also exports `dlss5nr_scene_score_v1` — a native scene-change
+score that could replace our numpy thumbnail heuristic for temporal Auto mode.

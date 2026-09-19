@@ -6,9 +6,12 @@ stays a lean "what's next". Rules: `CLAUDE.md`. Facts: `memory.md`.
 
 ## 🧪 Awaiting owner test (gate for v1.1.0 stable)
 
-- [ ] Owner tests `588f790` DLSS5 hybrid: Classic/Anchored/Off HDR bridge (defaults 237 /
-      2.537 / 1.0 / 1.0), temporal history Auto/Continuous/Per-frame reset, DLLs placed in
-      `models/DLSS/dlssnr_<version>/` under any filenames.
+- [ ] Owner tests DLSS5 hybrid + GPU acceleration: **GPU Acceleration Auto** (expect ~OreX-class
+      speed at 4K with nr_passes 4 — the old host path measured ~100× slower), HDR bridge
+      Classic/Anchored/Off with owner-tuned neutral defaults (220 nits / 1.0 scale), temporal
+      history Auto/Continuous/Per-frame reset, DLLs in `models/DLSS/dlssnr_<version>/` under any
+      filenames. If the engine zip is old (no CUDA export) the node says so loudly — update
+      neuroframe_dlls.zip from Gourieff's HF dataset.
 - [ ] Owner tests the OPTIONS-socket part of `88305cb` (ANTsOptions → ANTsFaceDancer merge).
 - [ ] If both pass → tag **v1.1.0** and open/merge the PR to `main`.
 
@@ -18,6 +21,8 @@ stays a lean "what's next". Rules: `CLAUDE.md`. Facts: `memory.md`.
 - [ ] After first real-world Anchored-mode use: evaluate whether `black_lever`/`highlight
       anchor` defaults feel right; consider an `Anchored+Classic blend` only if the owner asks.
 - [ ] Optional cleanup when convenient: `model_paths._migrate_legacy_dirs` off-by-one.
+- [ ] Consider replacing the numpy thumbnail scene heuristic with the engine's native
+      `dlss5nr_scene_score_v1` export for temporal Auto mode.
 - [ ] README screenshots/usage examples for the DLSS5 section (owner-provided, when he has them).
 
 ## 🌱 Long-term ideas (discussed, not committed)

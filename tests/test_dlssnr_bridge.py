@@ -41,8 +41,17 @@ def main():
     )
     from rfactor.dlssnr import discovery
 
+    from rfactor.dlssnr.hdr_bridge import (
+        DIFFUSE_WHITE_NITS_DEFAULT,
+        PAPER_WHITE_SCALE_DEFAULT,
+    )
+    check("defaults: owner-tuned 220 nits / 1.0 scale",
+          DIFFUSE_WHITE_NITS_DEFAULT == 220.0 and PAPER_WHITE_SCALE_DEFAULT == 1.0)
+
     rng = np.random.RandomState(7)
     frame = rng.rand(64, 64, 3).astype(np.float32) * 0.8
+    check("classic: neutral at owner defaults (gain 1, knee 1 => identity)",
+          np.allclose(classic_bridge(frame), frame, atol=1e-5))
 
     # ---- Classic bridge ----
     out = classic_bridge(frame)
@@ -71,18 +80,34 @@ def main():
     dark = (frame * 0.05).astype(np.float32)
     check("anchored: dark frame with lever 0 == classic (same knee, nothing measured above it)",
           np.allclose(anchored_bridge(dark, black_lever=0.0), cb(dark), atol=2e-3))
-    # bright frame: 5% pure-white patches -> measured highlight raises the knee,
-    # so highlights keep headroom instead of hard-clipping at classic's shoulder
+    # bright frame + paper-white gain 2: classic's fixed knee saturates every
+    # gain-lifted highlight at the sRGB ceiling; the anchored knee rides up
+    # with the measured highlight, so far fewer pixels clip
     bright = frame.copy()
     bright[:3, :] = 1.0
-    check("anchored: highlight-anchored knee keeps bright pixels below classic's clip",
-          anchored_bridge(bright, black_lever=0.0).max() < cb(bright).max())
-    bl0 = anchored_bridge(frame, black_lever=0.0)
-    bl1 = anchored_bridge(frame, black_lever=1.0)
+    clipped = lambda img: int((img >= 1.0 - 1e-6).sum())
+    check("anchored: highlight-anchored knee clips fewer highlight pixels than classic",
+          clipped(anchored_bridge(bright, paper_white_scale=2.0, black_lever=0.0))
+          < clipped(cb(bright, paper_white_scale=2.0)))
+    bl0 = anchored_bridge(frame, paper_white_scale=2.0, black_lever=0.0)
+    bl1 = anchored_bridge(frame, paper_white_scale=2.0, black_lever=1.0)
     shadow_mask = frame.mean(axis=2) < 0.1
     check("anchored: black lever restores shadows (dark pixels closer to input)",
           abs(bl1[..., 0][shadow_mask].mean() - frame[..., 0][shadow_mask].mean())
           < abs(bl0[..., 0][shadow_mask].mean() - frame[..., 0][shadow_mask].mean()))
+
+    # ---- GPU acceleration decision (pure) ----
+    from rfactor.dlssnr.node import GPU_AUTO, GPU_FORCE, GPU_OFF, decide_cuda_acceleration
+    ok, _ = decide_cuda_acceleration(GPU_AUTO, True, True)
+    check("cuda decision: auto + torch cuda + engine ok -> CUDA", ok)
+    ok, why = decide_cuda_acceleration(GPU_AUTO, True, False)
+    check("cuda decision: engine lacking CUDA -> CPU with reason", not ok and "CUDA interop" in why)
+    ok, why = decide_cuda_acceleration(GPU_FORCE, False, True)
+    check("cuda decision: force gpu without torch cuda -> CPU", not ok and "no CUDA device" in why)
+    ok, why = decide_cuda_acceleration(GPU_OFF, True, True)
+    check("cuda decision: explicit CPU mode -> CPU", not ok and "CPU mode" in why)
+    ok, _ = decide_cuda_acceleration(GPU_FORCE, True, True)
+    check("cuda decision: force gpu available -> CUDA", ok)
 
     # ---- dispatch ----
     check("apply_bridge dispatch + off",

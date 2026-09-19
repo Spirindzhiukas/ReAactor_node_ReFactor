@@ -87,14 +87,20 @@ by name) — then pick the set in the node's `dll_version` selector (`auto` pick
 `refresh` re-scans after you add DLLs). `nvngx_dlssnr.dll` must be procured by you (NVIDIA's license
 prohibits redistributing it) — sources and licenses in `rfactor/dlssnr/dll_README.md`.
 
-HDR Colour Bridge: **Classic** (paper-white gain; Diffuse white 237 nits, Scene Paper-White Scale
-2.537, HDR Transfer Strength 1.0, Color Strength 1.0 by default) or **Anchored** (auto white point
-anchored to the frame's highlights + black-floor lever) — after RenoDX's DLSS 5 colour work by
-clshortfuse (MIT).
+**GPU acceleration (on by default):** frames are processed GPU-resident through the engine's CUDA
+entry point (`dlss5nr_process_cuda_v6`) — zero PCIe copies when the batch already lives in VRAM,
+orders of magnitude faster at 4K and with `nr_passes` > 1. `CPU (host staging)` stays as a compat
+fallback (and for engine builds too old for CUDA — you get a clear error).
+
+HDR Colour Bridge: **Classic** (paper-white gain; Diffuse white 220 nits, Scene Paper-White Scale
+1.0 — neutral by default — plus HDR Transfer Strength 1.0, Color Strength 1.0) or **Anchored**
+(auto white point anchored to the frame's highlights + black-floor lever) — after RenoDX's DLSS 5
+colour work by clshortfuse (MIT). The image-tuned defaults replace RenoDX's game-engine reference
+values (237 nits / 2.537), which overbrighten regular 8/16-bit images.
 
 Credit: [OreX (orex2121)](https://github.com/orex2121/ComfyUI-DLSS5-orex) (ComfyUI-DLSS5 — temporal
 history design), [RenoDX by clshortfuse](https://github.com/clshortfuse/renodx) (HDR bridge concept),
-[Merserk](https://github.com/Merserk) (neuroframe helper DLLs).
+[Merserk](https://github.com/Merserk) (neuroframe helper DLLs + engine ABI/CUDA reference).
 
 ## Masking without ultralytics
 
