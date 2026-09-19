@@ -78,3 +78,27 @@ def find_nr_runtime_dll(nr_dir):
         f"    {nr_dir}\n"
         "    Rule 1 of the layout guide: every NR set must contain the NR runtime "
         "(any filename starting with 'nvngx_dlssnr'). See ants/dlssnr/dll_README.md.")
+
+
+def stage_sr_dll(dll_path):
+    """A SEARCH-PATH DIR for the chosen SR dll.
+
+    The NGX core looks for the literal file name "nvngx_dlss.dll" inside the
+    search paths, so a build under any other name (nvngx_dlss_310.9.1.dll,
+    ...) is copied to a writable staging dir under that name. Returns the
+    directory to hand to NgxSession(search_paths=[...]). The copy is refreshed
+    when the source file changes (size mismatch)."""
+    import shutil
+    dll_path = os.path.abspath(dll_path)
+    if os.path.basename(dll_path).lower() == "nvngx_dlss.dll":
+        return os.path.dirname(dll_path)
+    from .ngx import writable_cache_dir
+    staged_dir = os.path.join(
+        writable_cache_dir("sr_staged"),
+        os.path.splitext(os.path.basename(dll_path))[0])
+    os.makedirs(staged_dir, exist_ok=True)
+    target = os.path.join(staged_dir, "nvngx_dlss.dll")
+    if (not os.path.isfile(target)
+            or os.path.getsize(target) != os.path.getsize(dll_path)):
+        shutil.copyfile(dll_path, target)
+    return staged_dir

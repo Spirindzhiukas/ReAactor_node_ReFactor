@@ -23,6 +23,23 @@ from . import schedule as nr_schedule_lib
 from .core import DLSSStandaloneManager
 
 ENGINE_NATIVE = "ANTs native NGX"
+
+# SR model presets: the letters the installed nvngx_dlss.dll understands,
+# with the artist-friendly community names (J/K/L/M transformer models).
+SR_MODEL_CHOICES = ["Default", "J - Transformer I Crisp", "K - Transformer I Stable",
+                    "L - Transformer II Quality", "M - Transformer II Fast"]
+SR_MODEL_DEFAULT = "L - Transformer II Quality"  # newest + highest quality
+_PRESET_TO_LETTER = {"Default": "Default", "J - Transformer I Crisp": "J",
+                     "K - Transformer I Stable": "K",
+                     "L - Transformer II Quality": "L", "M - Transformer II Fast": "M"}
+# NR preset hint (DLSSNR.Hint.Render.Preset; best-effort - the stock NR
+# runtime ignores unknown parameters, the RenoDX build may honor it).
+_NR_PRESET_TO_INT = dict(_PRESET_TO_LETTER, **{})
+_NR_PRESET_TO_INT = {"Default": 0, "J - Transformer I Crisp": 10,
+                     "K - Transformer I Stable": 11,
+                     "L - Transformer II Quality": 12, "M - Transformer II Fast": 13}
+PRE_DENOISE_SR = "SR (DLSS denoise)"
+PRE_DENOISE_MODEL = "Upscale Model"
 ENGINE_LEGACY = "Legacy neuroframe DLLs"
 from .hdr_bridge import (
     DIFFUSE_WHITE_NITS_DEFAULT,
@@ -70,18 +87,45 @@ class ReFactorDLSS5Enhancer:
         self.native_session = None
         self.native_key = None
         self.native_dll_path = None
+        self._nr_preset = 0
+        self._sr_choice = "auto"
+        self._sr_preset = "Default"
+        self._sr_stage_dir = None
+        self._sr_sessions = {}
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "image": ("IMAGE",),
-                "dll_version": (discovery.combo_choices(),
-                                {"tooltip": "Which user-supplied DLSS-NR DLL set to use "
-                                            "(models/DLSS/NR/<version>/ - any .dll filenames; legacy "
-                                            "dlssnr_<version>/ and flat models/DLSS layouts also scanned). "
-                                            "'auto' picks the first found set; 'refresh' re-scans after "
-                                            "you add DLLs (then re-select)."}),
+                "nr_dll_version": (discovery.category_choices("NR"),
+                                   {"tooltip": "NR runtime for the native engine - EVERY .dll directly "
+                                               "inside models/DLSS/NR/ is listed individually (plus one "
+                                               "entry per version subfolder). 'auto' picks the first found. "
+                                               "Use the refresh button after adding files."}),
+                "sr_dll_version": (discovery.category_choices("SR"),
+                                   {"tooltip": "SR runtime (nvngx_dlss*.dll) - each .dll directly inside "
+                                               "models/DLSS/SR/ is listed individually (e.g. nvngx_dlss.dll "
+                                               "AND nvngx_dlss_310.9.1.dll), plus version subfolders. Used by "
+                                               "the pre-denoise SR pass (and the SR node)."}),
+                "fg_dll_version": (discovery.category_choices("FG"),
+                                   {"tooltip": "Frame Generation builds (models/DLSS/FG/). RESERVED for a "
+                                               "future release - selecting a build has no effect yet."}),
+                "sr_model": (SR_MODEL_CHOICES,
+                             {"default": SR_MODEL_DEFAULT,
+                              "tooltip": "SR transformer model (DLSS.Hint.Render.Preset): J=Transformer I "
+                                         "Crisp, K=Transformer I Stable, L=Transformer II Quality, "
+                                         "M=Transformer II Fast. Default: L (newest, highest quality)."}),
+                "nr_model_preset": (list(_NR_PRESET_TO_INT),
+                                    {"default": "Default",
+                                     "tooltip": "NR model preset hint (J/K/L/M). Best-effort: the stock NR "
+                                                "runtime ignores unknown preset hints; builds that read the "
+                                                "hint switch transformer models."}),
+                "pre_denoise_mode": ([PRE_DENOISE_SR, PRE_DENOISE_MODEL],
+                                     {"default": PRE_DENOISE_SR,
+                                      "tooltip": "What runs as the pre-SR denoise pass: the ANTs DLSS SR host "
+                                                 "(1:1 DLAA with the chosen sr_dll_version + sr_model) or the "
+                                                 "wired upscale/denoise model (SCUNet-style). Default: SR."}),
                 "gpu_acceleration": ([GPU_AUTO, GPU_FORCE, GPU_OFF],
                                      {"default": GPU_AUTO,
                                       "tooltip": "Auto/Force: frames are processed GPU-resident via the engine's "
@@ -179,8 +223,7 @@ class ReFactorDLSS5Enhancer:
             self.native_gpu = None
         self.native_key = None
 
-    def load_bridge(self, dll_version: str, engine: str = ENGINE_LEGACY):
-        dll_dir = discovery.resolve_dll_dir(dll_version)
+    def load_bridge(self, nr_choice: str, engine: str = ENGINE_LEGACY):
         if engine == ENGINE_NATIVE:
             # Tear down the legacy engine if it was up; bring up our host.
             if self.manager is not None:
@@ -190,8 +233,7 @@ class ReFactorDLSS5Enhancer:
                     pass
                 del self.manager
                 self.manager = None
-            from ..dlsssr.discovery import find_nr_runtime_dll
-            dll_path = find_nr_runtime_dll(dll_dir)
+            dll_path = discovery.resolve_nr_runtime_path(nr_choice)
             self._ordinal = self.device.index if getattr(self.device, "index", None) is not None else 0
             # Sessions are size-keyed and created lazily on the first frame
             # (see _native_session_for); NGX providers must not be churned.
@@ -202,6 +244,7 @@ class ReFactorDLSS5Enhancer:
             return
         # Legacy helper engine
         self._close_native()
+        dll_dir = discovery.resolve_legacy_dir(nr_choice)
         if self.manager is None or self.manager_dll_dir != dll_dir:
             if self.manager is not None:
                 try:
@@ -219,7 +262,7 @@ class ReFactorDLSS5Enhancer:
 
     def _native_session_for(self, width, height, pass_settings):
         """Size-keyed native NR session (created lazily, reused across frames)."""
-        key = (self.native_dll_path, width, height)
+        key = (self.native_dll_path, width, height, self._nr_preset)
         if self.native_gpu is None:
             from ..dlsssr.d3d12 import D3D12Device, GpuContext
             self.native_gpu = GpuContext(D3D12Device.create(), adapter_index=self._ordinal)
@@ -231,12 +274,36 @@ class ReFactorDLSS5Enhancer:
                     pass
             from ..dlsssr.nr import DlssNrSession
             self.native_session = DlssNrSession(self.native_gpu, width, height,
-                                                self.native_dll_path)
+                                                self.native_dll_path,
+                                                nr_preset=self._nr_preset)
             self.native_key = key
         # look controls are re-set by the host before every evaluate; keep
         # the session's dict in sync with the pass plan
         self.native_session.settings.update(pass_settings)
         return self.native_session
+
+    def _sr_session_for(self, width, height):
+        """Lazily created 1:1 DLAA SR session (pre-denoise pass), keyed by
+        dll stage / size / preset so model swaps never churn the GPU side."""
+        from ..dlsssr import discovery as sr_disc
+        if self._sr_stage_dir is None:
+            dll_path = sr_disc.resolve_sr_dll(self._sr_choice)
+            self._sr_stage_dir = sr_disc.stage_sr_dll(dll_path)
+        key = (self._sr_stage_dir, width, height, self._sr_preset)
+        sess = self._sr_sessions.get(key)
+        if sess is None:
+            from ..dlsssr.sr import DlssSrSession
+            sess = DlssSrSession(self.native_gpu, width, height, width, height,
+                                 mode="DLAA", preset=self._sr_preset,
+                                 sr_dll_dir=self._sr_stage_dir)
+            self._sr_sessions[key] = sess
+        return sess
+
+    def _sr_denoise_frame(self, frame_t, reset):
+        """One 1:1 DLAA pass over a torch frame; returns the denoised frame."""
+        payload, w, h = self._frame_to_rgba8(frame_t)
+        out = self._sr_session_for(w, h).evaluate(payload, reset=reset)
+        return self._rgba8_to_frame(out, w, h, self.device)
 
     @staticmethod
     def _frame_to_rgba8(frame_t):
@@ -275,7 +342,9 @@ class ReFactorDLSS5Enhancer:
         out = out[0].to(device=frame.device, dtype=torch.float32)
         return blend_frames(frame, out, float(strength))
 
-    def enhance(self, image, dll_version, engine, gpu_acceleration, use_nr_schedule, style,
+    def enhance(self, image, nr_dll_version, sr_dll_version, fg_dll_version,
+                sr_model, nr_model_preset, pre_denoise_mode, engine,
+                gpu_acceleration, use_nr_schedule, style,
                 intensity, local_tone, local_structure, skin_structure,
                 color_strength, tone_preservation, face_skin_protection,
                 grain_preservation, auto_mask, temporal_history, scene_change_threshold,
@@ -283,11 +352,17 @@ class ReFactorDLSS5Enhancer:
                 hdr_transfer_strength, bridge_color_strength, black_lever,
                 pre_denoise_strength, denoise_model=None, nr_schedule=None, mask=None):
 
-        if dll_version == "refresh":
-            discovery.combo_choices()  # re-scan; user then re-selects the new entry
-
-        self.load_bridge(dll_version, engine)
+        self.load_bridge(nr_dll_version, engine)
         native = engine == ENGINE_NATIVE
+        self._nr_preset = int(_NR_PRESET_TO_INT.get(nr_model_preset, 0))
+        self._sr_choice = sr_dll_version
+        self._sr_preset = _PRESET_TO_LETTER.get(sr_model, "Default")
+        if fg_dll_version not in ("auto",):
+            logger.status(f"FG build '{fg_dll_version}' selected - Frame Generation "
+                          "is reserved for a future release; no effect yet.")
+        if pre_denoise_mode == PRE_DENOISE_SR and not native:
+            logger.warning("[ANTs] SR pre-denoise needs the native NGX engine - "
+                           "using the upscale-model pipeline for this run.")
 
         settings = {
             "style": nr_schedule_lib.STYLES[style], "intensity": intensity,
@@ -344,13 +419,20 @@ class ReFactorDLSS5Enhancer:
             torch.cuda.synchronize(cuda_dev)
 
         denoise_passes = [i + 1 for i, spec in enumerate(plan)
-                          if spec["denoise_model"] is not None and spec["denoise_strength"] > 1e-4]
+                          if (spec["denoise_model"] is not None
+                              or pre_denoise_mode == PRE_DENOISE_SR)
+                          and spec["denoise_strength"] > 1e-4]
         if denoise_passes:
-            first = next(spec["denoise_model"] for spec in plan
-                         if spec["denoise_model"] is not None)
-            scale = getattr(first, "scale", 1)
-            logger.status(f"DLSS5 pre-SR denoise on pass(es) {denoise_passes}: "
-                          f"{scale}x model from the Upscale-Model pipeline")
+            if pre_denoise_mode == PRE_DENOISE_SR and native:
+                logger.status(f"DLSS5 pre-SR denoise on pass(es) {denoise_passes}: "
+                              f"ANTs SR host (1:1 DLAA, dll '{sr_dll_version}', "
+                              f"model '{sr_model}')")
+            else:
+                first = next(spec["denoise_model"] for spec in plan
+                             if spec["denoise_model"] is not None)
+                scale = getattr(first, "scale", 1)
+                logger.status(f"DLSS5 pre-SR denoise on pass(es) {denoise_passes}: "
+                              f"{scale}x model from the Upscale-Model pipeline")
             if scale != 1:
                 logger.status("DLSS5 pre-SR denoise note: non-1x model connected - its output is "
                               "resized back to the input resolution before the engine.")
@@ -426,10 +508,15 @@ class ReFactorDLSS5Enhancer:
 
                 d_model = pass_spec["denoise_model"]
                 d_strength = pass_spec["denoise_strength"]
-                denoise_this = d_model is not None and d_strength > 1e-4
+                if pre_denoise_mode == PRE_DENOISE_SR:
+                    denoise_this = d_strength > 1e-4  # SR mode: no model needed
+                else:
+                    denoise_this = d_model is not None and d_strength > 1e-4
 
                 if native:
-                    if denoise_this:
+                    if denoise_this and pre_denoise_mode == PRE_DENOISE_SR:
+                        frame_t = self._sr_denoise_frame(frame_t, do_reset)
+                    elif denoise_this:
                         frame_t = self._pre_denoise_frame(frame_t, d_model, d_strength)
                     look = {"style": pass_spec["style"], **pass_spec["settings"]}
                     sess = self._native_session_for(int(frame_t.shape[1]),

@@ -15,6 +15,7 @@
  * `web` folder (WEB_DIRECTORY = "./web"), not a "js" folder.
  */
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
 const SCHED_CLASS = "ANTsDLSSNRScheduler";
 const ENH_CLASS = "ANTsDLSS5Enhancer";
@@ -233,6 +234,45 @@ function refreshConnectedEnhancers(schedNode) {
 }
 
 /* ------------------------------ registration ---------------------------- */
+
+/* --------------------------- refresh button ------------------------------ *
+ * The DLSS5 node's per-category selectors (nr/sr/fg dll versions) list the
+ * contents of models/DLSS/<category>/ at object_info time. This button
+ * re-reads object_info and repopulates the combos, so newly dropped DLLs
+ * show up without a browser reload. Lives at the top of the node's UI.     */
+async function refreshDlssCombos(node) {
+    const res = await api.fetchApi("/object_info/" + ENH_CLASS);
+    const info = (await res.json())[ENH_CLASS];
+    if (!info || !info.input) return;
+    const spec = Object.assign({}, info.input.required || {}, info.input.optional || {});
+    for (const w of node.widgets) {
+        if (w.type === "combo" && spec[w.name]) {
+            const values = spec[w.name][0];
+            if (Array.isArray(values)) {
+                w.options.values = values;
+                if (!values.includes(w.value)) w.value = values[0];
+            }
+        }
+    }
+    app.graph.setDirtyCanvas(true, true);
+}
+
+app.registerExtension({
+    name: "ANTs.DLSS5.RefreshButton",
+    beforeRegisterNodeDef(nodeType, nodeData) {
+        if (nodeData.name !== ENH_CLASS) return;
+        const originalCreated = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function () {
+            const result = originalCreated ? originalCreated.apply(this, arguments) : this;
+            const btn = this.addWidget("button", "\u27f3 Refresh DLSS model folders", null,
+                                       () => refreshDlssCombos(this));
+            btn.serialize = false;
+            const at = this.widgets.indexOf(btn);
+            this.widgets.splice(0, 0, this.widgets.splice(at, 1)[0]);  // top of the UI
+            return result;
+        };
+    },
+});
 
 app.registerExtension({
     name: "ANTs.DLSS5.NRSchedule",

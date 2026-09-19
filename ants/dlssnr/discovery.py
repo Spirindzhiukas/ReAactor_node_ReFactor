@@ -207,3 +207,56 @@ def resolve_dll_dir(choice: str, category: str = "NR"):
 def combo_choices(category: str = "NR"):
     names = [s["name"] for s in discover_dll_sets(category)]
     return (["auto"] + names + ["refresh"]) if names else ["auto", "refresh"]
+
+
+def category_entries(category: str):
+    """Selector entries for one category: **each flat .dll directly inside
+    models/DLSS/<category>/ is its own entry** (named after the file - the
+    owner's duplicate-dll requirement, e.g. nvngx_dlss.dll AND
+    nvngx_dlss_310.9.1.dll listed separately), plus one entry per
+    <version>/ subfolder. [{"name", "path", "kind": "dll"|"dir"}]."""
+    root = os.path.join(DLSS_ROOT, category)
+    out = []
+    if os.path.isdir(root):
+        for entry in sorted(os.listdir(root)):
+            candidate = os.path.join(root, entry)
+            if os.path.isdir(candidate):
+                if dll_files(candidate):
+                    out.append({"name": entry, "path": candidate, "kind": "dir"})
+            elif entry.lower().endswith(".dll"):
+                out.append({"name": entry, "path": candidate, "kind": "dll"})
+    return out
+
+
+def category_choices(category: str):
+    """Combo values for a per-category selector: 'auto' + entry names.
+
+    No 'refresh' entry - the DLSS5 node's dedicated refresh button re-reads
+    models/DLSS via object_info."""
+    return ["auto"] + [e["name"] for e in category_entries(category)]
+
+
+def resolve_nr_runtime_path(choice: str):
+    """The NR runtime .dll for the native host: a chosen flat dll directly,
+    a chosen set's nvngx_dlssnr*.dll, or (auto/vanished) the first found."""
+    from ..dlsssr.discovery import find_nr_runtime_dll  # lazy: no import cycle
+    for entry in category_entries("NR"):
+        if choice and entry["name"] == choice:
+            if entry["kind"] == "dll":
+                return entry["path"]
+            return find_nr_runtime_dll(entry["path"])
+    for entry in category_entries("NR"):
+        if entry["kind"] == "dll":
+            return entry["path"]
+    sets = discover_dll_sets("NR")
+    if sets:
+        return find_nr_runtime_dll(sets[0]["path"])
+    return default_dll_dir()  # raises the loud "no DLSS-NR DLL set" error
+
+
+def resolve_legacy_dir(choice: str):
+    """Set DIR for the legacy helper engine (helpers sit next to the runtime)."""
+    for entry in category_entries("NR"):
+        if choice and entry["name"] == choice:
+            return entry["path"] if entry["kind"] == "dir" else os.path.dirname(entry["path"])
+    return resolve_dll_dir("auto")

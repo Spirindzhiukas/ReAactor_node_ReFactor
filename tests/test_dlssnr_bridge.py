@@ -234,6 +234,71 @@ def main():
     finally:
         discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, discovery.PACKAGE_DLL_DIR = saved
 
+    # ---- per-category selectors (owner restructure) ----
+    import importlib as _il
+    sys.path.insert(0, str(REPO.parent))
+    _pkg = _il.import_module(REPO.name)
+    types_def = _pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5Enhancer"].INPUT_TYPES()
+    req = types_def["required"]
+    check("dlss5: dll_version replaced by per-category selectors",
+          "dll_version" not in req
+          and "nr_dll_version" in req and "sr_dll_version" in req
+          and "fg_dll_version" in req)
+    check("dlss5: SR model preset defaults to L (newest highest quality)",
+          req["sr_model"][1]["default"] == "L - Transformer II Quality"
+          and "L - Transformer II Quality" in req["sr_model"][0])
+    check("dlss5: NR preset widget present, defaults to driver Default",
+          req["nr_model_preset"][0][0] == "Default"
+          and req["nr_model_preset"][1]["default"] == "Default")
+    check("dlss5: pre_denoise_mode present, defaults to SR",
+          req["pre_denoise_mode"][1]["default"] == "SR (DLSS denoise)"
+          and "SR (DLSS denoise)" in req["pre_denoise_mode"][0])
+    check("dlss5: no 'refresh' entries in the category combos",
+          all("refresh" not in req[w][0]
+              for w in ("nr_dll_version", "sr_dll_version", "fg_dll_version")))
+
+    saved = (discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, discovery.PACKAGE_DLL_DIR)
+    root = tempfile.mkdtemp(prefix="ants_cat_")
+    discovery.DLSS_ROOT = root
+    discovery.LEGACY_DLSSNR_PATH = os.path.join(root, "missing_legacy")
+    discovery.PACKAGE_DLL_DIR = os.path.join(root, "missing_pkg")
+    try:
+        os.makedirs(os.path.join(root, "NR"))
+        open(os.path.join(root, "NR", "nvngx_dlssnr_RenoDX.dll"), "wb").write(b"x")
+        open(os.path.join(root, "NR", "nvngx_dlssnr_320.dll"), "wb").write(b"x")
+        os.makedirs(os.path.join(root, "SR", "310.9.1"))
+        open(os.path.join(root, "SR", "310.9.1", "nvngx_dlss.dll"), "wb").write(b"c")
+        open(os.path.join(root, "SR", "nvngx_dlss.dll"), "wb").write(b"a" * 3)
+        open(os.path.join(root, "SR", "nvngx_dlss_310.9.1.dll"), "wb").write(b"b" * 5)
+        check("discovery: flat NR dlls listed individually",
+              discovery.category_choices("NR") == ["auto", "nvngx_dlssnr_320.dll",
+                                                   "nvngx_dlssnr_RenoDX.dll"])
+        check("discovery: flat SR dlls listed individually (owner duplicate test)",
+              discovery.category_choices("SR") == ["auto", "310.9.1", "nvngx_dlss.dll",
+                                                   "nvngx_dlss_310.9.1.dll"])
+        check("discovery: SR version subfolder + FG reserved-empty",
+              "310.9.1" in discovery.category_choices("SR")
+              and discovery.category_choices("FG") == ["auto"])
+        check("discovery: NR runtime path resolves a chosen flat dll",
+              discovery.resolve_nr_runtime_path("nvngx_dlssnr_320.dll")
+              == os.path.join(root, "NR", "nvngx_dlssnr_320.dll"))
+        check("discovery: NR auto -> first flat dll",
+              discovery.resolve_nr_runtime_path("auto")
+              == os.path.join(root, "NR", "nvngx_dlssnr_320.dll"))
+        # staging: a same-named dll passes through; others are copied to the
+        # writable cache as nvngx_dlss.dll (what the NGX core searches for)
+        from ants.dlsssr.discovery import stage_sr_dll
+        direct = stage_sr_dll(os.path.join(root, "SR", "nvngx_dlss.dll"))
+        check("staging: nvngx_dlss.dll passes through to its own dir",
+              direct == os.path.join(root, "SR"))
+        staged = stage_sr_dll(os.path.join(root, "SR", "nvngx_dlss_310.9.1.dll"))
+        check("staging: renamed build staged as nvngx_dlss.dll in a writable dir",
+              os.path.isfile(os.path.join(staged, "nvngx_dlss.dll"))
+              and os.path.getsize(os.path.join(staged, "nvngx_dlss.dll")) == 5
+              and "sr_staged" in staged)
+    finally:
+        discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, discovery.PACKAGE_DLL_DIR = saved
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

@@ -106,7 +106,7 @@ class DLSSSRUpscaler:
                           f"preset {preset_letter}, dll {dll_path}")
             self.session = DlssSrSession(
                 self.gpu, width, height, out_w, out_h, mode=mode_key,
-                preset=preset_letter, sr_dll_dir=dll_path)
+                preset=preset_letter, sr_dll_dir=discovery.stage_sr_dll(dll_path))
             self._session_key = key
 
         results = []

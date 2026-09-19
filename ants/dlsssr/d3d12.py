@@ -19,8 +19,8 @@ IID_ID3D12Device = guid("{189819f1-1db6-4b57-be54-1821339b85f7}")
 IID_ID3D12CommandQueue = guid("{0ec870a6-5d7e-4c22-8cfc-5baae07616ed}")
 IID_ID3D12CommandAllocator = guid("{6102dee4-af59-4b09-b999-b44d73f09b24}")
 IID_ID3D12GraphicsCommandList = guid("{5b160d0f-ac1b-4185-8ba8-b3ae42a5a455}")
-IID_ID3D12Resource = guid("{696442be-a72e-4059-bc79-5b5c980402ad}")
-IID_ID3D12Fence = guid("{4a689c71-05ba-48b1-b644-f72e384e1b5a}")
+IID_ID3D12Resource = guid("{696442be-a72e-4059-bc79-5b5c98040fad}")
+IID_ID3D12Fence = guid("{0a753dcf-c4d8-4b91-adf6-be5a60d95a76}")
 
 # --- enums / constants (d3d12.h) ---
 D3D_FEATURE_LEVEL_11_0 = 0xB000
