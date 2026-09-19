@@ -21,6 +21,9 @@ from ..utils import (
 from . import discovery
 from . import schedule as nr_schedule_lib
 from .core import DLSSStandaloneManager
+
+ENGINE_NATIVE = "ANTs native NGX"
+ENGINE_LEGACY = "Legacy neuroframe DLLs"
 from .hdr_bridge import (
     DIFFUSE_WHITE_NITS_DEFAULT,
     PAPER_WHITE_SCALE_DEFAULT,
@@ -63,6 +66,10 @@ class ReFactorDLSS5Enhancer:
         self.manager = None
         self.manager_dll_dir = None
         self._ordinal = 0
+        self.native_gpu = None
+        self.native_session = None
+        self.native_key = None
+        self.native_dll_path = None
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -82,6 +89,13 @@ class ReFactorDLSS5Enhancer:
                                                  "batch already lives in VRAM; orders of magnitude faster at 4K and "
                                                  "with nr_passes > 1. CPU: legacy host staging (compat fallback). "
                                                  "If the engine DLL is too old for CUDA, a clear error tells you."}),
+                "engine": ([ENGINE_NATIVE, ENGINE_LEGACY],
+                           {"default": ENGINE_NATIVE,
+                            "tooltip": "ANTs native NGX: our own pure-Python host drives nvngx_dlssnr.dll "
+                                       "directly (full control, no 3rd-party helper DLLs; 8-bit RGBA path). "
+                                       "Legacy neuroframe: the original helper-DLL engine (float32 path, "
+                                       "kept as a fallback; scheduled for removal once the native host "
+                                       "is validated on your rig)."}),
                 "use_nr_schedule": ("BOOLEAN", {"default": False, "label_off": "OFF", "label_on": "ON",
                                                 "tooltip": "Replace the engine's single-pass reconstruction with a multi-pass "
                                                            "NR Schedule from the ANTs DLSS NR Scheduler node (varied styles per "
@@ -150,8 +164,44 @@ class ReFactorDLSS5Enhancer:
         "nvngx_dlssnr.dll must be procured by you (redistribution prohibited)."
     )
 
-    def load_bridge(self, dll_version: str):
+    def _close_native(self):
+        if self.native_session is not None:
+            try:
+                self.native_session.close()
+            except Exception:
+                pass
+            self.native_session = None
+        if self.native_gpu is not None:
+            try:
+                self.native_gpu.close()
+            except Exception:
+                pass
+            self.native_gpu = None
+        self.native_key = None
+
+    def load_bridge(self, dll_version: str, engine: str = ENGINE_LEGACY):
         dll_dir = discovery.resolve_dll_dir(dll_version)
+        if engine == ENGINE_NATIVE:
+            # Tear down the legacy engine if it was up; bring up our host.
+            if self.manager is not None:
+                try:
+                    self.manager.shutdown()
+                except Exception:
+                    pass
+                del self.manager
+                self.manager = None
+            from ..dlsssr.discovery import find_nr_runtime_dll
+            dll_path = find_nr_runtime_dll(dll_dir)
+            self._ordinal = self.device.index if getattr(self.device, "index", None) is not None else 0
+            # Sessions are size-keyed and created lazily on the first frame
+            # (see _native_session_for); NGX providers must not be churned.
+            self.native_key = None
+            self.native_dll_path = dll_path
+            logger.status(f"DLSS-5 native NGX host engine selected (dll: {dll_path}); "
+                          "the session is created on the first frame.")
+            return
+        # Legacy helper engine
+        self._close_native()
         if self.manager is None or self.manager_dll_dir != dll_dir:
             if self.manager is not None:
                 try:
@@ -166,6 +216,44 @@ class ReFactorDLSS5Enhancer:
             self.manager_dll_dir = dll_dir
             gpu = self.manager.gpu_name() or f"GPU {self._ordinal}"
             logger.status(f"DLSS-5 Bridge initialized on {gpu} using DLL set: {dll_dir}")
+
+    def _native_session_for(self, width, height, pass_settings):
+        """Size-keyed native NR session (created lazily, reused across frames)."""
+        key = (self.native_dll_path, width, height)
+        if self.native_gpu is None:
+            from ..dlsssr.d3d12 import D3D12Device, GpuContext
+            self.native_gpu = GpuContext(D3D12Device.create(), adapter_index=self._ordinal)
+        if self.native_session is None or self.native_key != key:
+            if self.native_session is not None:
+                try:
+                    self.native_session.close()
+                except Exception:
+                    pass
+            from ..dlsssr.nr import DlssNrSession
+            self.native_session = DlssNrSession(self.native_gpu, width, height,
+                                                self.native_dll_path)
+            self.native_key = key
+        # look controls are re-set by the host before every evaluate; keep
+        # the session's dict in sync with the pass plan
+        self.native_session.settings.update(pass_settings)
+        return self.native_session
+
+    @staticmethod
+    def _frame_to_rgba8(frame_t):
+        import numpy as _np
+        rgb8 = (_np.clip(frame_t.cpu().numpy(), 0.0, 1.0) * 255.0).round().astype(_np.uint8)
+        h, w = rgb8.shape[0], rgb8.shape[1]
+        rgba = _np.empty((h, w, 4), dtype=_np.uint8)
+        rgba[:, :, :3] = rgb8
+        rgba[:, :, 3] = 255
+        return rgba.tobytes(), w, h
+
+    @staticmethod
+    def _rgba8_to_frame(payload, width, height, device):
+        import numpy as _np
+        arr = _np.frombuffer(payload, dtype=_np.uint8).reshape(height, width, 4)
+        t = torch.from_numpy(arr[:, :, :3].astype(_np.float32) / 255.0)
+        return t.to(device)
 
     def _pre_denoise_frame(self, frame, model, strength):
         """Run a comfy-style 1x denoise/restoration model on one [H,W,C] torch
@@ -187,7 +275,7 @@ class ReFactorDLSS5Enhancer:
         out = out[0].to(device=frame.device, dtype=torch.float32)
         return blend_frames(frame, out, float(strength))
 
-    def enhance(self, image, dll_version, gpu_acceleration, use_nr_schedule, style,
+    def enhance(self, image, dll_version, engine, gpu_acceleration, use_nr_schedule, style,
                 intensity, local_tone, local_structure, skin_structure,
                 color_strength, tone_preservation, face_skin_protection,
                 grain_preservation, auto_mask, temporal_history, scene_change_threshold,
@@ -198,7 +286,8 @@ class ReFactorDLSS5Enhancer:
         if dll_version == "refresh":
             discovery.combo_choices()  # re-scan; user then re-selects the new entry
 
-        self.load_bridge(dll_version)
+        self.load_bridge(dll_version, engine)
+        native = engine == ENGINE_NATIVE
 
         settings = {
             "style": nr_schedule_lib.STYLES[style], "intensity": intensity,
@@ -235,8 +324,14 @@ class ReFactorDLSS5Enhancer:
 
         pbar = progress_bar(len(image))
 
-        use_cuda, cuda_why = decide_cuda_acceleration(
-            gpu_acceleration, torch.cuda.is_available(), self.manager.cuda_available()[0])
+        if native:
+            use_cuda, cuda_why = False, "native NGX host (D3D12 path)"
+            if mask is not None:
+                logger.status("DLSS5 note: the native NGX engine has no mask-plane input - "
+                              "the connected mask is ignored (Auto Mask still applies).")
+        else:
+            use_cuda, cuda_why = decide_cuda_acceleration(
+                gpu_acceleration, torch.cuda.is_available(), self.manager.cuda_available()[0])
         logger.status(f"DLSS5 processing via {'CUDA' if use_cuda else 'host staging (CPU)'} - {cuda_why}")
 
         if use_cuda:
@@ -291,6 +386,8 @@ class ReFactorDLSS5Enhancer:
 
             if use_cuda:
                 frame = src_gpu[i]
+            elif native:
+                frame_t = image[i]
             else:
                 frame_np = src_np[i]
 
@@ -329,7 +426,16 @@ class ReFactorDLSS5Enhancer:
                 d_strength = pass_spec["denoise_strength"]
                 denoise_this = d_model is not None and d_strength > 1e-4
 
-                if use_cuda:
+                if native:
+                    if denoise_this:
+                        frame_t = self._pre_denoise_frame(frame_t, d_model, d_strength)
+                    look = {"style": pass_spec["style"], **pass_spec["settings"]}
+                    sess = self._native_session_for(int(frame_t.shape[1]),
+                                                    int(frame_t.shape[0]), look)
+                    payload, w_px, h_px = self._frame_to_rgba8(frame_t)
+                    out = sess.evaluate(payload, reset=do_reset)
+                    frame_t = self._rgba8_to_frame(out, w_px, h_px, self.device)
+                elif use_cuda:
                     if denoise_this:
                         frame = self._pre_denoise_frame(frame, d_model, d_strength)
                     dest = torch.empty_like(frame)
@@ -356,7 +462,11 @@ class ReFactorDLSS5Enhancer:
                     frame_np = dest_np
 
             # HDR Colour Bridge: global, applied once after the final pass
-            if use_cuda:
+            if native:
+                if bridge_mode != "off":
+                    frame_t = apply_bridge(frame_t, bridge_mode, **bridge_kwargs)
+                out_tensor = frame_t
+            elif use_cuda:
                 if bridge_mode != "off":
                     frame = apply_bridge(frame, bridge_mode, **bridge_kwargs)
                 out_tensor = frame if frame.device == self.device else frame.to(self.device)

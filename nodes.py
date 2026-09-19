@@ -38,6 +38,7 @@ from .ants.loaders import (
     detection_model_name,
 )
 from .ants.dlssnr import DLSSNRScheduler, ReFactorDLSS5Enhancer
+from .ants.dlsssr.node import DLSSSRUpscaler
 from .ants.torch_utils import normalize_ as normalize, stat_mode
 from .ants.upscaler import upscale_bgr_face
 from .ants.upres import (
@@ -1197,6 +1198,7 @@ NODE_CLASS_MAPPINGS = {
     "ANTsUnload": ReFactorUnload,
     "ANTsDLSS5Enhancer": ReFactorDLSS5Enhancer,
     "ANTsDLSSNRScheduler": DLSSNRScheduler,
+    "ANTsDLSSSRUpscaler": DLSSSRUpscaler,
     # --- Model Loaders ---
     "ANTsFaceSwapModelLoader": ReFactorFaceSwapModelLoader,
     "ANTsFaceRestoreModelLoader": ReFactorFaceRestoreModelLoader,
@@ -1223,6 +1225,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ANTsUnload": "ANTs⚡Unload Models",
     "ANTsDLSS5Enhancer": "ANTs⚡DLSS5 Frame Enhancer",
     "ANTsDLSSNRScheduler": "ANTs⚡DLSS NR Scheduler",
+    "ANTsDLSSSRUpscaler": "ANTs⚡DLSS SR Upscaler",
     # --- Model Loaders ---
     "ANTsFaceSwapModelLoader": "ANTs⚡FaceSwap Model Loader",
     "ANTsFaceRestoreModelLoader": "ANTs⚡FaceRestore Model Loader",
