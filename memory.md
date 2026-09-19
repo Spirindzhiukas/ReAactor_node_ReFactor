@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 258 checks + gates (details below)
+- **Suite:** ALL GREEN — 272 checks + gates (details below)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -109,7 +109,7 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | smoke_import.py | — | import + 18-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 258 checks, all green at the native-flow commit (20 nodes; package `ants/`).** Sandbox venv: numpy, opencv-python-headless, Sandbox venv: numpy, opencv-python-headless,
+**Total: 272 checks, all green at the selector-restructure commit (20 nodes; package `ants/`).** Sandbox venv: numpy, opencv-python-headless,
 pillow, pyflakes, pefile (NO torch — stub harness only). huggingface.co is TLS-blocked from the
 sandbox (DLL zips can't be downloaded there — verify engine versions on the owner rig).
 
@@ -135,11 +135,32 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - DONE (owner-confirmed): GPU acceleration ("speed on par with OreX"), pre-SR denoise via
   upscale models ("helps a lot"; scunet_color_real_gan/psnr favorites).
 - DLSS5 bridge/temporal/discovery: owner has the speed result; bridge defaults 220/1.0 in place.
-- SR node + DLSS5 native engine: RIG TESTING, layer 1 cleared. Run 1:
-  frame_np UnboundLocalError on scene-aware auto (fixed). Run 2: denoise ran
-  (SCUNet), then D3D12CreateDevice -> E_NOINTERFACE = guid() reversed the
-  GUID field order, ALL IIDs wrong (fixed vs hand-written canonical bytes,
-  non-circular tests; lesson: never verify a helper against itself). Awaiting
-  run 3 to reach Init/shim/feature-create (24 dlsssr checks).
+- DLSS5 rig progress: run 1 frame_np UnboundLocalError (fixed); run 2
+  guid() reversed field order, ALL IIDs wrong (fixed vs canonical literals,
+  non-circular tests); run 3 CreateCommandQueue list+tuple (fixed) ->
+  built the FAKE-COM flow harness (tests/test_native_flow.py, real ctypes
+  vtables + d3d12.h signatures cross-checked vs DVT) which exposed 8 more
+  pre-rig bugs (u32-for-u64 fence/signal/setevent argtypes, barrier missing
+  ALL_SUBRESOURCES @16, illegal CopyResource texture<->buffer ->
+  CopyTextureRegion slot 16 + 48B copy locations, sessions never set
+  self.gpu, Map/Unmap c_void_p-into-u32, int(c_void_p) traps, win32.wide,
+  spurious None iid forwarded by _create); run 4 CreateFence E_NOINTERFACE
+  => IID_ID3D12Fence was Fence1's GUID (base = 0a753dcf-c4d8-4b91-
+  adf6-be5a60d95a76) + ID3D12Resource ends 0fad not 02ad (both pinned by
+  tests). Rig-proven so far: D3D12CreateDevice, CreateCommandQueue,
+  CreateCommandAllocator, CreateCommandList (slots + IIDs + call plumbing).
+  Sandbox CANNOT verify: shim machine-thunk on Windows, real NGX runtime
+  responses, remaining slot behavior under real drivers.
+- DLSS5 UI RESTRUCTURED (owner request, shipped): dll_version REMOVED;
+  nr_dll_version / sr_dll_version / fg_dll_version (each flat .dll in
+  models/DLSS/<CAT>/ listed individually + version subfolders, 'auto'
+  default); sr_model J/K/L/M artist presets (default "L - Transformer II
+  Quality"); nr_model_preset (best-effort DLSSNR.Hint.Render.Preset);
+  pre_denoise_mode (SR 1:1 DLAA default / Upscale Model); refresh = JS
+  button at the top of the node (web/dlss5_nr_schedule.js) re-fetching
+  object_info; stage_sr_dll() copies non-canonical-named SR dlls to a
+  writable dir as nvngx_dlss.dll (NGX core searches the literal name) -
+  SR node + DLSS5 pre-denoise both use it (also fixed SR node passing a
+  file path where a search dir belongs).
 - NR Schedules (new): scheduler JS dynamics + enhancer greying in a real browser, schedule
   off/on parity, per-pass settings bypass, per-pass denoise slots, 4K multi-pass speed.
