@@ -35,21 +35,15 @@ KNOWN_ENGINE_EXPORTS = (
 )
 
 
-def try_pefile(path):
+def file_version(path):
     try:
         import pefile
     except ImportError:
-        return None
-    try:
-        return pefile.PE(path, fast_load=True)
-    except Exception:
-        return None
-
-
-def file_version(path):
-    pe = try_pefile(path)
-    if pe is None:
         return "version info unavailable (pip install pefile for details)"
+    try:
+        pe = pefile.PE(path, fast_load=True)
+    except Exception:
+        return "no version resource"
     try:
         pe.parse_data_directories(
             directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]])
@@ -65,10 +59,12 @@ def file_version(path):
 
 
 def exports(path):
-    pe = try_pefile(path)
-    if pe is None:
+    try:
+        import pefile
+    except ImportError:
         return None
     try:
+        pe = pefile.PE(path, fast_load=True)
         pe.parse_data_directories(
             directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_EXPORT"]])
         table = getattr(pe, "DIRECTORY_ENTRY_EXPORT", None)
@@ -80,18 +76,26 @@ def exports(path):
         return None
 
 
-def find_ngx_core():
+def find_ngx_core(diagnose=None):
+    """Locate _nvngx.dll / nvngx.dll; when missing, `diagnose` (a list)
+    receives the folders scanned so a rerun report is actionable."""
     hits = []
     system32 = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "System32")
     for name in (NGX_CORE, NGX_LOADER):
         p = os.path.join(system32, name)
         if os.path.isfile(p):
             hits.append(("System32", p))
-    pattern = os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
-                           "System32", "DriverStore", "FileRepository",
-                           "nv*.inf_amd64_*", "*")
+    repo = os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
+                        "System32", "DriverStore", "FileRepository")
+    folders = sorted(glob.glob(os.path.join(repo, "nv*.inf_amd64_*")))
+    if diagnose is not None:
+        diagnose.append(f"scanned {len(folders)} DriverStore folder(s) under {repo}")
+        for folder in folders[:5]:
+            diagnose.append(f"  e.g. {os.path.basename(folder)}")
+        if not folders:
+            diagnose.append("  no nv*.inf_amd64_* folders - is the NVIDIA driver installed?")
     candidates = {}
-    for folder in glob.glob(pattern):
+    for folder in folders:
         for name in (NGX_CORE, NGX_LOADER):
             p = os.path.join(folder, name)
             if os.path.isfile(p):
@@ -105,12 +109,21 @@ def find_ngx_core():
 
 
 def find_models_root(argv):
-    """Locate ComfyUI's models/DLSS from argv or common layouts."""
+    """Locate ComfyUI's models/DLSS from argv or common layouts.
+
+    Accepts, per argument: a ComfyUI root, a models folder, or the DLSS
+    folder itself.
+    """
     roots = []
     for arg in argv[1:]:
-        candidate = os.path.join(arg, "models", "DLSS")
-        if os.path.isdir(candidate):
-            roots.append(candidate)
+        arg = os.path.normpath(arg)
+        direct = arg if os.path.basename(arg).lower() == "dlss" else None
+        via_models = os.path.join(arg, "DLSS")
+        via_root = os.path.join(arg, "models", "DLSS")
+        for candidate in (direct, via_models, via_root):
+            if candidate and os.path.isdir(candidate) and candidate not in roots:
+                roots.append(candidate)
+                break
     here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     for marker in (os.path.join(os.pardir, os.pardir), "."):
         candidate = os.path.normpath(os.path.join(here, marker, "models", "DLSS"))
@@ -133,9 +146,12 @@ def main():
     print("=== ANTs DLSS rig probe (read-only) ===\n")
 
     print("[1] NGX core (driver-shipped; SR hosting needs this):")
-    cores = find_ngx_core()
+    diagnosis = []
+    cores = find_ngx_core(diagnose=diagnosis)
     if not cores:
         print("    NOT FOUND - install/update the NVIDIA display driver")
+        for line in diagnosis:
+            print(f"    [scan] {line}")
     for where, path in cores:
         print(f"    {where}: {path}")
         print(f"      {file_version(path)}")
@@ -143,8 +159,9 @@ def main():
     print("\n[2] models/DLSS contents (user-supplied; never bundled):")
     roots = find_models_root(sys.argv)
     if not roots:
-        print("    models/DLSS not found - pass the ComfyUI root as an argument:")
-        print(f"    python {sys.argv[0]} C:\\ComfyUI_PORTABLE\\ComfyUI")
+        print("    models/DLSS not found - pass ONE of these as the argument:")
+        print(f"      the ComfyUI root :  python {sys.argv[0]} C:\\ComfyUI_PORTABLE\\ComfyUI")
+        print(f"      or the DLSS dir  :  python {sys.argv[0]} C:\\ComfyUI_PORTABLE\\ComfyUI\\models\\DLSS")
     for root in roots:
         print(f"    root: {root}")
         for path in dll_scan(root, SR_DLL_HINTS + NR_HINTS + ENGINE_HINTS):

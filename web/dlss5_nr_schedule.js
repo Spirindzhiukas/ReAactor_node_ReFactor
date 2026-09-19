@@ -19,8 +19,8 @@ import { app } from "../../scripts/app.js";
 const SCHED_CLASS = "ANTsDLSSNRScheduler";
 const ENH_CLASS = "ANTsDLSS5Enhancer";
 
-const STYLES = ["Default", "Nature", "Cinematic"];
-const STYLE_CYCLE_DEFAULT = ["Nature", "Cinematic"];
+const STYLES = ["Default", "Natural", "Cinematic"];
+const STYLE_CYCLE_DEFAULT = ["Natural", "Cinematic"];
 
 // [widget key, human label, min, max, step, default]
 const PER_PASS_NUMERIC = [

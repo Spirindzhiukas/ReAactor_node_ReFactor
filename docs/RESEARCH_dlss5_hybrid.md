@@ -63,7 +63,7 @@ drives. Neither replaces the other; both still need the user-supplied
 Both current pipelines inherit the first-generation RenoDX approach
 (`renodx-dlss5.addon64`; colour composition by clshortfuse, MIT — see
 OptiScaler_DLSSNR's credited port for the modern form). Implemented in
-`rfactor/dlssnr/hdr_bridge.py` (pure numpy, post-bridge, unit-tested):
+`ants/dlssnr/hdr_bridge.py` (pure numpy, post-bridge, unit-tested):
 
 - **Classic (Paper-White Gain)** — default: sRGB→linear → gain by
   `scene_paper_white_scale` (default 1.0) → extended-Reinhard shoulder
@@ -105,7 +105,7 @@ the pre-SR denoise stage** — `ANTsUpscaleModelLoader` → optional
 (limitlesslab, ESRGAN-pixel-unshuffle restoration model trained on
 compression artifacts + moderate noise, explicitly intended "as a
 preparatory step before upscaling"). The stage runs through our
-comfy-core-mirrored `rfactor/upscaler.py` (spandrel loading, tiled
+comfy-core-mirrored `ants/upscaler.py` (spandrel loading, tiled
 inference, OOM tile-halving), keeps the frame resolution invariant (non-1x
 model outputs are resized back), works on-GPU in the CUDA path, and blends
 by strength. Credit: limitlesslab (PureScale), Zhang et al. (SCUNet).
@@ -216,5 +216,5 @@ is nowhere to send the value.
 
 Therefore: **preset selection today = which nvngx_dlssnr build you install**
 → our ``dll_version`` selector with the recommended artist-named folder
-convention (see ``rfactor/dlssnr/dll_README.md``). Flip-to-widget trigger
+convention (see ``ants/dlssnr/dll_README.md``). Flip-to-widget trigger
 (kept in plan.md): a future engine/dll exposing a preset parameter.

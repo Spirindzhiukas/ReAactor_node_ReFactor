@@ -50,7 +50,7 @@ class DLSSNRScheduler:
 
     DESCRIPTION = (
         "Builds a multi-pass NR plan for the ANTs DLSS5 Frame Enhancer: a style "
-        "per pass (default cycle: Nature/Cinematic — the owner-validated pattern "
+        "per pass (default cycle: Natural/Cinematic — the owner-validated pattern "
         "that beats monolithic nr_passes), optional per-pass full settings and "
         "per-pass pre-SR denoise models. Slots left unconnected inherit the "
         "main node's denoise model and strength."

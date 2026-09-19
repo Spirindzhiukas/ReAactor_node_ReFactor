@@ -9,13 +9,24 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 213 checks + gates (details below; SR research adds tools/probe_dlss_rig.py)
+- **Suite:** ALL GREEN — 219 checks + gates (details below)
+- **Owner rig facts (probe round):** models/DLSS lives FLAT at
+  `C:\ComfyUI_PORTABLE\ComfyUI\models\DLSS\` with the neuroframe pair +
+  `nvngx_dlss.dll` (56 MB) + `nvngx_dlssd/g.dll` +
+  `nvngx_dlssnr_RenoDX_4000_series_friendly.dll` (158 MB). Probe v1 reported
+  nothing (run without the path arg / pre-hardening) — probe v2 accepts the
+  ComfyUI root, models dir, or the DLSS dir itself and prints [scan]
+  diagnosis lines; owner to re-run (the NGX core NOT FOUND needs the [scan]
+  output to interpret). NOTE: dll_README.md was accidentally clobbered with a
+  plan.md snapshot in commit 11074ed (script mixed Path state) — rebuilt in
+  the layout commit; docs edits now go through write_file/path-based only.
 
 ## Shipped history (short)
 
 | Commit | What |
 |---|---|
-| SR research commit | Regular DLSS SR verdict: feasible WITHOUT a compiled bridge — DVT (HicirTech/DLSS-Video-Transcoder, no LICENSE — reference technique only, never copy code) hosts NGX via pure FFI (LoadLibraryExW driver _nvngx.dll + nvngx.dll loader) and runs sr in.png --preset L on stills; presets are HOST-settable on nvngx_dlss.dll via DLSS.Hint.Render.Preset.<Mode> params (enum Default 0, A-F 1-6, J 10, K 11, L 12, M 13, N/O reserved; DLAA variant needs in==out); THE upscaler dll = nvngx_dlss.dll (user-procured, models/DLSS/dlss_<version>/); NGX core is driver-shipped, never bundled; our route = pure-Python ctypes NGX host (rfactor/dlsssr/) + D3D12 COM plumbing, modes DLAA/1.5/1.724/2/3 + output resized back to input; bonus route: neuroframe frame path (process_cuda_video_frame) has separate output dims (NV12/P010, RGBA8 in descriptors). Probe: tools/probe_dlss_rig.py |
+| layout commit | package renamed rfactor/ -> ants/ (last pre-rebrand artifact, suite-guarded); discovery v2: models/DLSS/<NR|SR|FG>/<version>/ category sets (NR selector excludes SR/FG; SR/FG reserved for future nodes), dlssnr_<version>/ legacy kept, flat models/DLSS labeled after the nvngx_dlssnr* runtime inside (owner's RenoDX-named dll now visible in the selector); probe v2 hardened (any-root arg + NGX [scan] diagnosis); "Nature"->"Natural" display rename (Merserk's runtime.py maps style 1 to Natural; OreX agrees; ABI ints unchanged); dll_README rebuilt (clobbered in 11074ed) |
+| SR research commit | Regular DLSS SR verdict: feasible WITHOUT a compiled bridge — DVT (HicirTech/DLSS-Video-Transcoder, no LICENSE — reference technique only, never copy code) hosts NGX via pure FFI (LoadLibraryExW driver _nvngx.dll + nvngx.dll loader) and runs sr in.png --preset L on stills; presets are HOST-settable on nvngx_dlss.dll via DLSS.Hint.Render.Preset.<Mode> params (enum Default 0, A-F 1-6, J 10, K 11, L 12, M 13, N/O reserved; DLAA variant needs in==out); THE upscaler dll = nvngx_dlss.dll (user-procured, models/DLSS/dlss_<version>/); NGX core is driver-shipped, never bundled; our route = pure-Python ctypes NGX host (ants/dlsssr/) + D3D12 COM plumbing, modes DLAA/1.5/1.724/2/3 + output resized back to input; bonus route: neuroframe frame path (process_cuda_video_frame) has separate output dims (NV12/P010, RGBA8 in descriptors). Probe: tools/probe_dlss_rig.py |
 | NR-schedule commit | NR Schedules: ANTs⚡DLSS NR Scheduler node (19 total) emits NR_SCHEDULE; style-per-pass (Nature/Cinematic cycle default), per-pass settings (bypass main widgets), per-pass denoise w/ 4 model slots (inherit main model); passes chain, bridge global post-final-pass; JS UIs in web/ (dynamic rows + live cross-node greying); schedule.py pure validated core; nr_passes removed. Preset verdict: nvngx_dlssnr has NO model-preset param (OreX string-table verify); presets = dll_version folders, artist names table in dll_README (J Crisp / K Stable / L Quality / M Fast) |
 | pre-SR commit | DLSS5 pre-SR denoise: optional `denoise_model` socket (UPSCALE_MODEL via ANTsUpscaleModelLoader) + `pre_denoise_strength`; 1x denoisers (SCUNet, PureScale2 1x_PureVision) through the comfy-core mirror; resolution invariant; OIDN + OptiX rejected (MC-noise domain / device-side ABI) |
 | GPU commit | DLSS5 GPU acceleration: `gpu_acceleration` widget (Auto def / Force / CPU); `dlss5nr_process_cuda_v6` device-pointer path (torch primary-context interop, zero PCIe when VRAM-resident); HDR bridge torch backend (on-GPU); host fallback optimized; defaults owner-tuned to 220 nits / 1.0 scale (neutral) |
@@ -42,15 +53,15 @@ Utilities: `ANTsImageDuplicator`, `ANTsImageRGBA2RGB`, `ANTsUnload`.
 
 - `nodes.py` — node registrations, the main execute() (OPTIONS merge, pre-pass contract,
   restore selection), Mappings/Display.
-- `rfactor/swapper.py` — swap engine (inswapper/hyperswap via `rfactor/engine/`), frame-safe
+- `ants/swapper.py` — swap engine (inswapper/hyperswap via `ants/engine/`), frame-safe
   restore gate.
-- `rfactor/faceboost/` — restoration (CodeFormer/GFPGAN/VQGAN archs, facelib detection:
+- `ants/faceboost/` — restoration (CodeFormer/GFPGAN/VQGAN archs, facelib detection:
   RetinaFace + Yolov5Face; `codeformer_fidelity` widget).
-- `rfactor/upres.py` + `rfactor/upscaler.py` — face-res interpolation + comfy-core-mirrored
+- `ants/upres.py` + `ants/upscaler.py` — face-res interpolation + comfy-core-mirrored
   upscale models (stub seam for tests: `upscale_image_with_model`).
-- `rfactor/masking/` — Mask Builder (ultralytics-free: SAM3/SAM2/RMBG sockets + built-in
+- `ants/masking/` — Mask Builder (ultralytics-free: SAM3/SAM2/RMBG sockets + built-in
   feathered fallback).
-- `rfactor/dlssnr/` — DLSS5 nodes: `schedule.py` (pure NR-schedule core: parse/validate/clamp/pad, build_pass_plan bypass semantics, STYLES registry for future modes), `scheduler_node.py` (ANTsDLSSNRScheduler → NR_SCHEDULE + 4 denoise model slots, early loud slot validation), `web/dlss5_nr_schedule.js` via root WEB_DIRECTORY (scheduler dynamic per-pass rows → schedule_data JSON; enhancer greys bypassed widgets ⛓; pure graph-state sync), `core.py` (ctypes ABI **v6** struct: style/intensity/tone/
+- `ants/dlssnr/` — DLSS5 nodes: `schedule.py` (pure NR-schedule core: parse/validate/clamp/pad, build_pass_plan bypass semantics, STYLES registry for future modes), `scheduler_node.py` (ANTsDLSSNRScheduler → NR_SCHEDULE + 4 denoise model slots, early loud slot validation), `web/dlss5_nr_schedule.js` via root WEB_DIRECTORY (scheduler dynamic per-pass rows → schedule_data JSON; enhancer greys bypassed widgets ⛓; pure graph-state sync), `core.py` (ctypes ABI **v6** struct: style/intensity/tone/
   structure/skin/automask/reset/color_strength/tone_preservation/mask/face_skin_protection/
   grain_preservation/nr_passes/shimmer_suppression/prefer_nvof; `dlss5nr_init(ordinal,
   dll_dir, err)` with 4096-char error buffer; HOST path `dlss5nr_process_v6` + CUDA path
@@ -60,14 +71,14 @@ Utilities: `ANTsImageDuplicator`, `ANTsImageRGBA2RGB`, `ANTsUnload`.
   probing `.dll`s for the `dlss5nr_init` export), `discovery.py`
   (models/DLSS/dlssnr_<version> → flat models/DLSS → legacy models/dlssnr → package dll/),
   optional `denoise_model` UPSCALE_MODEL socket + `pre_denoise_strength` (1x denoisers
-  via `rfactor/upscaler.py`, pre-engine), `hdr_bridge.py` (numpy AND torch backends behind
+  via `ants/upscaler.py`, pre-engine), `hdr_bridge.py` (numpy AND torch backends behind
   op shims — one math path; Classic:
   sRGB→lin → paper-white gain → extended-Reinhard knee → chroma-around-luma; Anchored:
   index-percentile-luma white point + black_lever; defaults 220 nits / 1.0 scale = neutral;
   float32 [0,1] HWC), `node.py` (`gpu_acceleration` Auto/Force/CPU widget; GPU-resident
   loop with per-frame `torch.cuda.synchronize`; temporal_history Auto threshold 0.24 /
   Continuous / Per-frame reset).
-- `rfactor/model_paths.py` — `DLSS_MODELS_PATH = models/DLSS` (+ legacy `DLSSNR_MODELS_PATH`);
+- `ants/model_paths.py` — `DLSS_MODELS_PATH = models/DLSS` (+ legacy `DLSSNR_MODELS_PATH`);
   known low-pri bug: `_migrate_legacy_dirs` off-by-one.
 - `docs/` — `RESEARCH_dlss5_hybrid.md` (ours-vs-OreX verdict, bridge math, 2-dll-vs-1,
   pre-SR conclusion), `RESEARCH_ultralytics_eye_fix.md` (tabled eyes, §8),
@@ -88,12 +99,12 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | test_facerestore_routing.py | 21 | restore routing incl. e2e loud-failure |
 | test_detection_state_dict.py | 7 | detector state dicts |
 | test_upres.py | 27 | upRes/upscale paths |
-| test_dlssnr_bridge.py | 29 | HDR bridge math + defaults neutrality + models/DLSS discovery + loud error + GPU decision |
+| test_dlssnr_bridge.py | 36 | HDR bridge math + defaults neutrality + discovery (categories, flat labels, loud error) + GPU decision |
 | test_nr_schedule.py | 32 | schedule parse/validate/pad, plan bypass + denoise fallback, loud slot errors, node surface (nr_passes gone) |
 | smoke_import.py | — | import + 18-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 213 checks, all green at the NR-schedule commit (19 nodes).** Sandbox venv: numpy, opencv-python-headless,
+**Total: 219 checks, all green at the layout commit (19 nodes; Python package `ants/`).** Sandbox venv: numpy, opencv-python-headless,
 pillow, pyflakes, pefile (NO torch — stub harness only). huggingface.co is TLS-blocked from the
 sandbox (DLL zips can't be downloaded there — verify engine versions on the owner rig).
 

@@ -8,7 +8,7 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
 ## Project identity
 
 - **ANTs Face Nodes for ComfyUI** (ex "ReActor ReFactor"); `app_title`/`version_flag` in
-  `rfactor/version.py`, package `comfyui-ants-face-nodes` in `pyproject.toml`.
+  `ants/version.py`, package `comfyui-ants-face-nodes` in `pyproject.toml`.
 - Lineage: fork/rework of Gourieff's ComfyUI-ReActor face-swap nodepack, rebranded to the
   **ANTs⚡** node family. **No backward workflow compatibility is required** — the owner
   explicitly authorized breaking old node names/workflows.
@@ -50,7 +50,7 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
   (torch/insightface/etc. stubs) — **the sandbox has no torch and cannot install it**;
   never add torch-dependent imports outside the stub boundary
   (`upscale_image_with_model` is the sanctioned stub seam).
-- **Gates before every commit:** `pyflakes` over `rfactor/`, `nodes.py`, `tests/`
+- **Gates before every commit:** `pyflakes` over `ants/`, `nodes.py`, `tests/`
   (benign exceptions: star-import notes in `codeformer_arch.py`); `tests/test_pyflakes.py`,
   `tests/test_scope_check.py`, `tests/smoke_import.py` (asserts exactly 18 nodes), plus
   the full suite. Current tally: **171 checks** (see `memory.md`).

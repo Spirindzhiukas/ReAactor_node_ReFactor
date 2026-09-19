@@ -34,7 +34,7 @@ def main():
     # ---- defaults ----
     d = sc.default_schedule(2)
     check("default: 2 passes, styles cycle Nature/Cinematic",
-          d["passes"] == 2 and d["styles"] == ["Nature", "Cinematic"])
+          d["passes"] == 2 and d["styles"] == ["Natural", "Cinematic"])
     check("default: per-pass switches off, slots inherit main (-1)",
           not d["use_per_pass_settings"] and not d["use_per_pass_denoise"]
           and d["denoise_model_slots"] == [-1, -1])
@@ -48,7 +48,7 @@ def main():
     # ---- parse: empty falls back, json round-trips ----
     p = sc.parse_schedule("", 3)
     check("parse: empty data -> default for the pass count",
-          p["passes"] == 3 and p["styles"] == ["Nature", "Cinematic", "Nature"])
+          p["passes"] == 3 and p["styles"] == ["Natural", "Cinematic", "Natural"])
     import json
     payload = dict(d)
     p2 = sc.parse_schedule(json.dumps(payload), 2)
@@ -60,7 +60,7 @@ def main():
         ("json array", "[1,2]"),
         ("bad version", json.dumps({**d, "version": 99})),
         ("zero passes", json.dumps({**d, "passes": 0})),
-        ("unknown style", json.dumps({**d, "styles": ["Nature", "Noir"]})),
+        ("unknown style", json.dumps({**d, "styles": ["Natural", "Noir"]})),
         ("settings not a list", json.dumps({**d, "use_per_pass_settings": True, "passes_settings": 5})),
         ("strengths not a list", json.dumps({**d, "use_per_pass_denoise": True, "denoise_strengths": "x"})),
         ("bad slot range", json.dumps({**d, "denoise_model_slots": [0, 9]})),
@@ -92,7 +92,7 @@ def main():
     check("plan: per-pass settings OFF -> main widgets drive every pass",
           all(spec["settings"]["intensity"] == main_settings["intensity"] for spec in plan))
     check("plan: styles cycle even when settings are global",
-          [spec["style"] for spec in plan] == [sc.STYLES["Nature"], sc.STYLES["Cinematic"]])
+          [spec["style"] for spec in plan] == [sc.STYLES["Natural"], sc.STYLES["Cinematic"]])
     check("plan: main denoise model + strength inherited",
           all(spec["denoise_model"] == "MAIN_MODEL" and spec["denoise_strength"] == 0.7
               for spec in plan))
@@ -132,7 +132,7 @@ def main():
 
     # ---- describe ----
     check("describe: one-line summary",
-          sc.describe(sc.default_schedule(2)) == "2 pass(es): Nature -> Cinematic")
+          sc.describe(sc.default_schedule(2)) == "2 pass(es): Natural -> Cinematic")
     check("describe: flags per-pass options",
           "per-pass settings" in sc.describe(sched2) and "per-pass denoise" in sc.describe(sched3))
 

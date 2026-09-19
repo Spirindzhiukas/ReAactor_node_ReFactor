@@ -29,9 +29,18 @@ stays a lean "what's next". Rules: `CLAUDE.md`. Facts: `memory.md`.
 - [x] DLSS preset mechanism SOLVED: presets are host-settable NGX params on nvngx_dlss.dll
       (DLSS.Hint.Render.Preset.<Mode>) — the flip trigger is OUR OWN NGX host, not a
       neuroframe ABI change (RESEARCH_dlss5_hybrid §8 + RESEARCH_dlss_sr_upscaler §3).
-- [ ] Owner runs tools/probe_dlss_rig.py on the rig (NGX core + nvngx_dlss.dll version +
-      engine exports report) and procures nvngx_dlss.dll into models/DLSS/dlss_<version>/.
-- [ ] Build rfactor/dlsssr/ — pure-Python ctypes NGX host (reference technique:
+- [x] Owner rig already HAS nvngx_dlss.dll (+ dlssd/dlssg + a RenoDX-tuned
+      nvngx_dlssnr build) flat in models/DLSS/ — probe v2 re-run pending for
+      NGX-core status + engine exports ([scan] lines now included; it accepts
+      the ComfyUI root, the models dir, or the DLSS dir directly).
+- [ ] SR node (`ants/dlsssr/`): pure-FFI NGX host; selector over
+      models/DLSS/SR/<version>/ sets (owner notes several SR dll variants
+      exist); modes DLAA/Q/B/P/UP + output always rescaled back to input;
+      artist preset names.
+- [ ] FG (Frame Generation) — future version per owner (Merserk/OreX do video
+      FG); models/DLSS/FG/<version>/ reserved in discovery v2.
+- [x] RR (Ray Reconstruction) — OUT OF SCOPE (owner confirmed: no way to drive it).
+- [ ] Build ants/dlsssr/ — pure-Python ctypes NGX host (reference technique:
       DLSS-Video-Transcoder; NVIDIA/DLSS SDK headers = the API source; never copy DVT code,
       no LICENSE). Widgets after the host works: sr_upscale_mode (DLAA/Q/B/P/UP),
       sr_preset (artist names), sr_return_interpolation (lanczos/... — output always

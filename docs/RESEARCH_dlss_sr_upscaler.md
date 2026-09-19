@@ -63,7 +63,7 @@ no C++ toolchain required**. Python can do this with `ctypes`
 (+ `comtypes`/manual vtables for the D3D12 device, textures, residency).
 That is the implementation route for us:
 
-1. `rfactor/dlsssr/` — pure-Python NGX host: locate `_nvngx.dll`/`nvngx.dll`
+1. `ants/dlsssr/` — pure-Python NGX host: locate `_nvngx.dll`/`nvngx.dll`
    (System32 → DriverStore scan, newest wins), bind the NGX C exports,
    create a D3D12 device, wrap torch-CUDA or D3D12 resources as NGX
    parameters, `NGX_EvaluateFeature(SuperSampling)` with our mode/preset

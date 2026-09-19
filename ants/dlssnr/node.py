@@ -71,8 +71,10 @@ class ReFactorDLSS5Enhancer:
                 "image": ("IMAGE",),
                 "dll_version": (discovery.combo_choices(),
                                 {"tooltip": "Which user-supplied DLSS-NR DLL set to use "
-                                            "(models/DLSS/dlssnr_<version>/, any .dll filenames). 'auto' picks "
-                                            "the first found set; 'refresh' re-scans after you add DLLs (then re-select)."}),
+                                            "(models/DLSS/NR/<version>/ - any .dll filenames; legacy "
+                                            "dlssnr_<version>/ and flat models/DLSS layouts also scanned). "
+                                            "'auto' picks the first found set; 'refresh' re-scans after "
+                                            "you add DLLs (then re-select)."}),
                 "gpu_acceleration": ([GPU_AUTO, GPU_FORCE, GPU_OFF],
                                      {"default": GPU_AUTO,
                                       "tooltip": "Auto/Force: frames are processed GPU-resident via the engine's "
@@ -85,7 +87,7 @@ class ReFactorDLSS5Enhancer:
                                                            "NR Schedule from the ANTs DLSS NR Scheduler node (varied styles per "
                                                            "pass - measurably better than the old nr_passes repeat). When the "
                                                            "schedule carries per-pass settings, those bypass this node's widgets."}),
-                "style": (["Default", "Nature", "Cinematic"],),
+                "style": (["Default", "Natural", "Cinematic"],),
                 "intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "0..2, def: 1.0"}),
                 "local_tone": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "0..2, def: 0.0"}),
                 "local_structure": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "0..2, def: 1.0"}),

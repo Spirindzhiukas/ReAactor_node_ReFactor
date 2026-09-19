@@ -153,6 +153,43 @@ def main():
             sets2 = discovery.discover_dll_sets()
             check("discovery: flat models/DLSS dlls form an unnamed set",
                   any(s["name"] == "(models/DLSS)" for s in sets2))
+            open(os.path.join(root, "loose_engine.dll"), "wb").close()
+            os.remove(os.path.join(root, "loose_engine.dll"))
+
+            # category subfolders: models/DLSS/<NR|SR|FG>/<version>/
+            nr_v = os.path.join(root, "NR", "nvngx_v1")
+            sr_v = os.path.join(root, "SR", "dlss_310_5")
+            fg_v = os.path.join(root, "FG", "fg_330")
+            for d in (nr_v, sr_v, fg_v):
+                os.makedirs(d)
+                open(os.path.join(d, "x.dll"), "wb").write(b"x")
+            nr_sets = discovery.discover_dll_sets("NR")
+            check("discovery: NR category set found via NR/<version>",
+                  any(x["name"] == "nvngx_v1" and x["category"] == "NR" for x in nr_sets))
+            check("discovery: NR selector excludes SR/FG sets",
+                  not any(x["name"] in ("dlss_310_5", "fg_330") for x in nr_sets))
+            sr_sets = discovery.discover_dll_sets("SR")
+            check("discovery: SR category discovered for the future SR selector",
+                  any(x["name"] == "dlss_310_5" and x["category"] == "SR" for x in sr_sets)
+                  and not any(x["name"] == "nvngx_v1" for x in sr_sets))
+            check("discovery: no filter returns every category",
+                  {"nvngx_v1", "dlss_310_5", "fg_330"} <=
+                  {x["name"] for x in discovery.discover_dll_sets()})
+            check("discovery: NR combo has no SR entries",
+                  "dlss_310_5" not in discovery.combo_choices("NR"))
+
+            # flat dll named like an NR runtime -> label carries it
+            open(os.path.join(root, "nvngx_dlssnr_RenoDX_friendly.dll"), "wb").write(b"x")
+            sets3 = discovery.discover_dll_sets()
+            check("discovery: flat set label names the NR runtime found inside",
+                  any(x["name"] == "(models/DLSS - nvngx_dlssnr_RenoDX_friendly)"
+                      for x in sets3))
+
+            # flat dll directly inside a category folder
+            open(os.path.join(root, "SR", "nvngx_dlss.dll"), "wb").write(b"x")
+            check("discovery: flat files inside a category folder form that category's set",
+                  any(x["name"] == "(SR)" and x["category"] == "SR"
+                      for x in discovery.discover_dll_sets("SR")))
         finally:
             discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, discovery.PACKAGE_DLL_DIR = saved
 

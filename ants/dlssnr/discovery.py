@@ -1,19 +1,29 @@
 """DLSS-NR DLL set discovery (models/DLSS layout, any filenames).
 
-The DLLs themselves (the neuroframe helper pair and/or NVIDIA's
-``nvngx_dlssnr.dll``) are and remain **3rd-party, manually installed** files —
-this nodepack never downloads them (NVIDIA's license prohibits redistributing
-``nvngx_dlssnr.dll``; the neuroframe bridge belongs to its authors).
+The DLLs themselves (NR runtime, SR runtime, neuroframe helpers, ...) are and
+remain **3rd-party, manually installed** files — this nodepack never downloads
+them (NVIDIA's license prohibits redistributing the nvngx_dlss* runtimes; the
+neuroframe bridge belongs to its authors).
 
-Owner-decided layout (DLLs are models, so they live with the models):
+Owner-decided layout (DLLs are models, so they live with the models), one
+folder per version under a category:
 
-1. ``ComfyUI/models/DLSS/dlssnr_<version_name>/`` — user sets, one folder per
-   version. **Any .dll filenames are accepted**: the engine is identified by
-   probing its exports at load time, not by file name (OreX's single-file
-   practice works too — whatever the folder contains is the set).
-2. ``ComfyUI/models/DLSS/`` (flat .dll files)              — one unnamed set
-3. ``ComfyUI/models/dlssnr/<version>/`` + flat              — legacy fallback
-4. ``.../custom_nodes/<this>/ants/dlssnr/dll``           — legacy package dir
+1. ``ComfyUI/models/DLSS/NR/<version_name>/``    — Neural Rendering sets
+   (the DLSS5 enhancer's ``dll_version`` selector). **Any .dll filenames are
+   accepted**: the engine is identified by probing its exports at load time,
+   not by file name.
+2. ``ComfyUI/models/DLSS/SR/<version_name>/``    — Super Resolution sets
+   (``nvngx_dlss.dll`` builds; reserved for the upcoming SR feature).
+3. ``ComfyUI/models/DLSS/FG/<version_name>/``    — Frame Generation sets
+   (reserved for a future video feature).
+4. ``ComfyUI/models/DLSS/dlssnr_<version>/``     — legacy convention, still
+   scanned (category NR).
+5. ``ComfyUI/models/DLSS/`` (flat .dll files)    — one unnamed set, labeled
+   after the NV NR runtime found inside (e.g. ``(models/DLSS -
+   nvngx_dlssnr_RenoDX_4000_series_friendly)``) so mixed flat folders stay
+   identifiable in the selector.
+6. ``ComfyUI/models/dlssnr/<version>/`` + flat   — legacy fallback
+7. ``.../custom_nodes/<this>/ants/dlssnr/dll``   — legacy package dir
 """
 
 import os
@@ -21,9 +31,11 @@ import os
 from .. import model_paths
 from ..log import logger
 
-_REQUIRED_HINTS = ("nvngx_dlssnr.dll",)  # name HINTS only - never required by name
 LEGACY_DLSSNR_PATH = model_paths.DLSSNR_MODELS_PATH
 DLSS_ROOT = model_paths.DLSS_MODELS_PATH
+
+# category subfolders (owner layout): name -> human description
+CATEGORY_SUBFOLDERS = {"NR": "Neural Rendering", "SR": "Super Resolution", "FG": "Frame Generation"}
 
 PACKAGE_DLL_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "dll")
 
@@ -33,6 +45,14 @@ def dll_files(path: str):
     if not os.path.isdir(path):
         return []
     return sorted(f for f in os.listdir(path) if f.lower().endswith(".dll"))
+
+
+def _nr_runtime_label(files):
+    """Human label of the NV NR runtime inside a set (for flat folders)."""
+    for f in files:
+        if f.lower().startswith("nvngx_dlssnr"):
+            return os.path.splitext(f)[0]
+    return None
 
 
 def validate_set(path: str):
@@ -55,47 +75,84 @@ def validate_set(path: str):
     }
 
 
-def discover_dll_sets():
-    """List usable DLL sets: [{"name", "path", "complete", "missing", ...}]."""
+def discover_dll_sets(category=None):
+    """List usable DLL sets.
+
+    category: "NR" | "SR" | "FG" | None. NR selectors see NR-tagged and
+    uncategorized (legacy/flat) sets; pass an explicit category for the
+    SR/FG selectors (future nodes); None returns everything.
+    Each set: {"name", "path", "complete", "missing", "dlls", "has_nvngx",
+    "category"}.
+    """
     found = []
     seen = set()
 
-    def add(label, candidate):
+    def add(label, candidate, cat):
         if os.path.realpath(candidate) in seen:
             return
         info = validate_set(candidate)
         if info:
-            found.append({"name": label, **info})
+            found.append({"name": label, "category": cat, **info})
             seen.add(os.path.realpath(candidate))
 
-    # 1. models/DLSS/dlssnr_<version_name>/  (enforced location)
     if os.path.isdir(DLSS_ROOT):
+        # 1. category subfolders: models/DLSS/<NR|SR|FG>/<version>/
+        for cat_name in CATEGORY_SUBFOLDERS:
+            cat_dir = os.path.join(DLSS_ROOT, cat_name)
+            if not os.path.isdir(cat_dir):
+                continue
+            for entry in sorted(os.listdir(cat_dir)):
+                candidate = os.path.join(cat_dir, entry)
+                if os.path.isdir(candidate):
+                    add(entry, candidate, cat_name)
+            # flat DLLs directly inside the category folder
+            add(f"({cat_name})", cat_dir, cat_name)
+
+        # 2. legacy convention: models/DLSS/dlssnr_<version>/
         for entry in sorted(os.listdir(DLSS_ROOT)):
             candidate = os.path.join(DLSS_ROOT, entry)
-            if os.path.isdir(candidate):
-                add(entry, candidate)
-        # 2. flat DLLs directly in models/DLSS
-        add("(models/DLSS)", DLSS_ROOT)
+            if os.path.isdir(candidate) and entry.lower().startswith("dlssnr"):
+                add(entry, candidate, "NR")
 
-    # 3-4. legacy locations, kept as graceful fallbacks
+        # 3. generic subfolders (uncategorized; e.g. older manual layouts)
+        #    and the flat files in models/DLSS itself
+        for entry in sorted(os.listdir(DLSS_ROOT)):
+            candidate = os.path.join(DLSS_ROOT, entry)
+            if os.path.isdir(candidate) and entry not in CATEGORY_SUBFOLDERS \
+                    and not entry.lower().startswith("dlssnr"):
+                files = dll_files(candidate)
+                label = entry if _nr_runtime_label(files) is None \
+                    else f"{entry} - {_nr_runtime_label(files)}"
+                add(label, candidate, None)
+        flat = dll_files(DLSS_ROOT)
+        if flat:
+            nr = _nr_runtime_label(flat)
+            label = "(models/DLSS)" if nr is None else f"(models/DLSS - {nr})"
+            add(label, DLSS_ROOT, None)
+
+    # 6-7. legacy locations, kept as graceful fallbacks (category NR)
     if os.path.isdir(LEGACY_DLSSNR_PATH):
         for entry in sorted(os.listdir(LEGACY_DLSSNR_PATH)):
             candidate = os.path.join(LEGACY_DLSSNR_PATH, entry)
             if os.path.isdir(candidate):
-                add(f"{entry} (legacy models/dlssnr)", candidate)
-        add("(legacy models/dlssnr)", LEGACY_DLSSNR_PATH)
-    add("built-in (package)", PACKAGE_DLL_DIR)
+                add(f"{entry} (legacy models/dlssnr)", candidate, "NR")
+        add("(legacy models/dlssnr)", LEGACY_DLSSNR_PATH, "NR")
+    add("built-in (package)", PACKAGE_DLL_DIR, "NR")
 
-    return found
+    if category is None:
+        return found
+    return [s for s in found if s["category"] in (category, None)]
 
 
 def default_dll_dir():
-    sets = discover_dll_sets()
+    sets = discover_dll_sets("NR")
     if not sets:
         raise RuntimeError(
             "[ANTs] No DLSS-NR DLL set found.\n"
             "    Place the 3rd-party DLLs into\n"
-            f"    {os.path.join(DLSS_ROOT, 'dlssnr_<version_name>')}/\n"
+            f"    {os.path.join(DLSS_ROOT, 'NR', 'dlssnr_<version_name>')}/\n"
+            "    (legacy locations models/DLSS/dlssnr_<version_name>/ and flat\n"
+            "    models/DLSS are still scanned).\n"
             "    ANY .dll filenames are accepted (the engine is found by its exports,\n"
             "    not by name). That folder must contain the bridge/helper DLLs and the\n"
             "    NVIDIA nvngx_dlssnr.dll runtime (whose public redistribution is\n"
@@ -104,9 +161,9 @@ def default_dll_dir():
     return sets[0]["path"]
 
 
-def resolve_dll_dir(choice: str):
+def resolve_dll_dir(choice: str, category: str = "NR"):
     """Map a combo choice ('auto' / a discovered name / 'refresh') to a dir."""
-    sets = discover_dll_sets()
+    sets = discover_dll_sets(category)
     if not sets:
         return default_dll_dir()
     if choice in ("auto", "refresh"):
@@ -119,6 +176,6 @@ def resolve_dll_dir(choice: str):
     return chosen["path"]
 
 
-def combo_choices():
-    names = [s["name"] for s in discover_dll_sets()]
+def combo_choices(category: str = "NR"):
+    names = [s["name"] for s in discover_dll_sets(category)]
     return (["auto"] + names + ["refresh"]) if names else ["auto", "refresh"]

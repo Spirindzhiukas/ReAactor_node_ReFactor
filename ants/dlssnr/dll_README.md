@@ -1,67 +1,79 @@
-# plan.md — Active Execution Roadmap
+# Third-party DLLs (enforced location: `ComfyUI/models/DLSS/<CATEGORY>/<version>/`)
 
-The step-by-step checklist. Tick items off **in the commit that does them**, add new items
-as they are agreed with the owner, and move finished context into `memory.md` so this file
-stays a lean "what's next". Rules: `CLAUDE.md`. Facts: `memory.md`.
+DLLs are models — they live under ComfyUI's models tree, one **category**
+folder per feature, one folder per version inside, and **any .dll filenames
+are accepted** (the engine is identified by its exports at load time, not by
+name; OreX-style single-file sets work too).
 
-## 🧪 Awaiting owner test (gate for v1.1.0 stable)
+Categories:
 
-- [ ] Owner tests DLSS5 hybrid + GPU acceleration: **GPU Acceleration Auto** (expect ~OreX-class
-      speed at 4K with nr_passes 4 — the old host path measured ~100× slower), HDR bridge
-      Classic/Anchored/Off with owner-tuned neutral defaults (220 nits / 1.0 scale), temporal
-      history Auto/Continuous/Per-frame reset, DLLs in `models/DLSS/dlssnr_<version>/` under any
-      filenames. If the engine zip is old (no CUDA export) the node says so loudly — update
-      neuroframe_dlls.zip from Gourieff's HF dataset.
-- [ ] Owner tests the OPTIONS-socket part of `88305cb` (ANTsOptions → ANTsFaceDancer merge).
-- [ ] If both pass → tag **v1.1.0** and open/merge the PR to `main`.
+- **`NR/`** — Neural Rendering (the ANTs⚡DLSS5 Frame Enhancer);
+- **`SR/`** — Super Resolution (`nvngx_dlss.dll` builds; reserved for the
+  upcoming SR feature);
+- **`FG/`** — Frame Generation (reserved for a future video feature).
 
-## 🔜 Next up (agreed direction, in order)
+RR (Ray Reconstruction) is out of scope — there is no way to drive it from a
+still-image host.
 
-- [ ] Fix any owner-reported issues from the test round above (priority over new features).
-- [ ] After first real-world Anchored-mode use: evaluate whether `black_lever`/`highlight
-      anchor` defaults feel right; consider an `Anchored+Classic blend` only if the owner asks.
-- [ ] Optional cleanup when convenient: `model_paths._migrate_legacy_dirs` off-by-one.
-- [ ] Consider replacing the numpy thumbnail scene heuristic with the engine's native
-      `dlss5nr_scene_score_v1` export for temporal Auto mode.
-- [x] Pre-SR denoise — owner-confirmed helping a lot (SCUNet favorites).
-- [ ] Owner tests NR Schedules: scheduler JS (dynamic rows, model-slot hiding), enhancer
-      widget greying while wired, schedule off/on parity, per-pass denoise fallback.
-- [x] DLSS preset mechanism SOLVED: presets are host-settable NGX params on nvngx_dlss.dll
-      (DLSS.Hint.Render.Preset.<Mode>) — the flip trigger is OUR OWN NGX host, not a
-      neuroframe ABI change (RESEARCH_dlss5_hybrid §8 + RESEARCH_dlss_sr_upscaler §3).
-- [ ] Owner runs tools/probe_dlss_rig.py on the rig (NGX core + nvngx_dlss.dll version +
-      engine exports report) and procures nvngx_dlss.dll into models/DLSS/dlss_<version>/.
-- [ ] Build rfactor/dlsssr/ — pure-Python ctypes NGX host (reference technique:
-      DLSS-Video-Transcoder; NVIDIA/DLSS SDK headers = the API source; never copy DVT code,
-      no LICENSE). Widgets after the host works: sr_upscale_mode (DLAA/Q/B/P/UP),
-      sr_preset (artist names), sr_return_interpolation (lanczos/... — output always
-      resized back to input). Zero-MV still quality = A/B on the rig first.
-- [ ] Future DLSS styles/modes: add to schedule.STYLES (single registry) — UI/parser/enhancer
-      derive automatically.
-- [ ] Idea shortlist (owner asked "what else"): native dlss5nr_scene_score_v1 for temporal
-      Auto; per-pass optional preview outputs (pass 1 vs final); per-pass timing log lines
-      (helps tune schedules); VRAM headroom via dlss5nr_cuda_status; shareable schedule-preset
-      JSON strings.
-- [ ] README screenshots/usage examples for the DLSS5 section (owner-provided, when he has them).
+## Neural Rendering sets (`models/DLSS/NR/<version>/`)
 
-## 🌱 Long-term ideas (discussed, not committed)
+1. Create e.g. `ComfyUI/models/DLSS/NR/v1/`
+2. Put the bridge/helper DLLs there:
+   - [neuroframe_dlls.zip](https://huggingface.co/datasets/Gourieff/ReActor/blob/main/DLSSNR/neuroframe_dlls.zip)
+     (`neuroframe_caller.dll` + `neuroframe_engine.dll`), and/or
+   - an OreX-style bridge (`dlss5nr_bridge.dll` / `nvngx.dll_comfy.dll`, from
+     [ComfyUI-DLSS5-orex](https://github.com/orex2121/ComfyUI-DLSS5-orex)) —
+     note: OreX's own bridge targets his node's ABI; ours probes for the
+     neuroframe exports, so keep the neuroframe pair for this node.
+3. Put your `nvngx_dlssnr.dll`** next to them.
 
-- [ ] Native bridge project: build our own in-process D3D12/NGX bridge from OreX's MIT C++
-      sources (`bridge/`) to gain zero-PCIe interop, upscale modes (1x–3x), VRAM chunking,
-      VIDEO support — while keeping our control surface. Only if the owner wants the "more
-      oomph" endgame; big effort, separate project.
-- [ ] External pre-denoiser stage (e.g. OIDN) before DLSS-NR — new dependency; needs owner
-      buy-in (see research conclusion: NVIDIA ships no separate pre-SR denoise DLL).
-- [ ] Bundling neuroframe DLLs with the pack (license permits, `LICENSE-Merserk.txt`) —
-      decided against for now; revisit if owner wants one-click install.
+Also scanned (fallbacks): `models/DLSS/dlssnr_<version>/` (the previous
+convention), flat DLLs directly in `models/DLSS/` (the selector labels the
+set after the `nvngx_dlssnr*` runtime found inside, e.g.
+`(models/DLSS - nvngx_dlssnr_RenoDX_4000_series_friendly)`),
+`models/dlssnr/<version>/`, and the package `dll/` folder.
 
-## 💤 Blocked / tabled (do NOT start without owner instruction)
+<sub>* neuroframe helper author [Merserk](https://github.com/Merserk), [LICENSE](https://huggingface.co/datasets/Gourieff/ReActor/blob/main/DLSSNR/LICENSE-Merserk.txt)
+<br>
+** Public distribution of this file is prohibited by NVIDIA, [LICENSE](https://huggingface.co/datasets/Gourieff/ReActor/blob/main/DLSSNR/LICENSE-NVIDIA-DLSS.txt)
 
-- [ ] Eyes restoration (detection-only findings in `docs/RESEARCH_ultralytics_eye_fix.md` §8).
-- [ ] inswapper_128_fp16 work (topic closed).
+## Regular DLSS Super Resolution (upscaler) — planned sibling feature
 
-## ✅ Recently completed (detail lives in memory.md / git log)
+To add regular DLSS SR/DLAA (the x1/x1.5/x1.724/x2/x3 modes with the J/K/L/M
+model presets), obtain **`nvngx_dlss.dll`** (the SR feature DLL — DLSS Swapper,
+TechPowerUp driver packages, or a game folder) and put it into a set:
 
-- [x] `588f790` — DLSS5 hybrid upgrade (HDR bridge, temporal history, models/DLSS discovery).
-- [x] `88305cb` — pre-pass + consolidation (20→18) + ANTs rebrand v1.1.0-alpha1.
-- [x] Rebrand residuals sweep (`[ANTs]` startup banner).
+```
+ComfyUI/models/DLSS/SR/<preset-or-version>/nvngx_dlss.dll
+```
+
+The NGX core (`_nvngx.dll` + `nvngx.dll`) is part of your NVIDIA display
+driver and is loaded from System32/DriverStore — it is never shipped or
+downloaded. Preset letters (J–M) map to models inside the installed
+`nvngx_dlss.dll` (old DLLs do not know newer letters). See
+`docs/RESEARCH_dlss_sr_upscaler.md` for the design; run
+`python tools/probe_dlss_rig.py <ComfyUI root>` to check your rig.
+
+## Recommended folder naming — DLSS model presets as versions
+
+The current `nvngx_dlssnr` runtime exposes **no model-preset parameter**
+(verified by OreX against the DLL string table: 61 `DLSSNR.*` parameters,
+none for model selection), so a preset = which DLL build you install. Name
+your version folders after the preset, with the community/artist names:
+
+| Folder | Preset | Artist name |
+|---|---|---|
+| `NR/J_Transformer1_Crisp` | J | Transformer I · Crisp (sharpest, a bit more flicker) |
+| `NR/K_Transformer1_Stable` | K | Transformer I · Stable (DLSS 4 "Latest") |
+| `NR/L_Transformer2_Quality` | L | Transformer II · Quality (heavy, Ultra-Perf default) |
+| `NR/M_Transformer2_Fast` | M | Transformer II · Fast (Performance default) |
+| `NR/Default` | — | whatever the installed build ships as default |
+
+## Nature vs Natural — settled
+
+The engine's own reference client (Merserk's Visual Enhancer, `runtime.py`)
+maps style 1 to **"Natural"** (OreX agrees). "Nature" was a transcription
+artifact of the inherited node — the semantics differ (*Natural* = an
+unaltered, naturalistic treatment; *Nature* reads as an outdoors scene
+style), so the pack displays **Natural** everywhere. The engine ABI int is
+unchanged (0 Default / 1 Natural / 2 Cinematic).

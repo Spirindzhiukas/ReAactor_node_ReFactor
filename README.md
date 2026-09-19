@@ -75,21 +75,22 @@ The engine validates execution providers against the installed build and logs wh
 | `reswapper_128/256.onnx` | `models/reswapper/` | manual |
 | `hyperswap_1x_256.onnx` | `models/hyperswap/` | manual (see [facefusion models](https://huggingface.co/facefusion/models-3.3.0/tree/main)) |
 | GFPGAN / CodeFormer / GPEN | `models/facerestore_models/` | downloaded when the FaceRestore Model Loader executes with a canonical entry |
-| DLSS-NR DLLs (3rd-party) | `models/DLSS/dlssnr_<version>/` (any filenames) | **manual only** — see `rfactor/dlssnr/dll_README.md` |
+| DLSS-NR DLLs (3rd-party) | `models/DLSS/dlssnr_<version>/` (any filenames) | **manual only** — see `ants/dlssnr/dll_README.md` |
 
 ## DLSS5 (ANTs⚡DLSS5 Frame Enhancer)
 
 Hybrid enhancer: our feature-rich DLSS-NR surface + OreX-inspired temporal history management + a RenoDX-inspired HDR Colour Bridge stage. Design notes, comparison and full credits: [docs/RESEARCH_dlss5_hybrid.md](docs/RESEARCH_dlss5_hybrid.md).
 
 This node never downloads DLLs. Place your DLL sets into `ComfyUI/models/DLSS/dlssnr_<version>/` —
-one folder per version, **any .dll filenames accepted** (the engine is identified by its exports, not
+category folders (`NR/`, `SR/`, `FG/`) with one folder per version inside, **any .dll filenames accepted** (the engine is identified by its exports, not
 by name) — then pick the set in the node's `dll_version` selector (`auto` picks the first found set;
 `refresh` re-scans after you add DLLs). `nvngx_dlssnr.dll` must be procured by you (NVIDIA's license
-prohibits redistributing it) — sources and licenses in `rfactor/dlssnr/dll_README.md`.
+prohibits redistributing it) — sources and licenses in `ants/dlssnr/dll_README.md`.
 
 **NR Schedules** — replace the old ``nr_passes`` repeat with the **ANTs⚡DLSS NR Scheduler**: a style
-per pass (Nature/Cinematic cycling is the owner-validated default; varied passes beat monolithic
-`nr_passes = 4`), optional per-pass full settings (bypass the main node's widgets when on), per-pass
+per pass (Natural/Cinematic cycling is the owner-validated default; varied passes beat monolithic
+`nr_passes = 4` — the engine's author names style 1 **Natural**, not "Nature"; same ABI int,
+corrected display), optional per-pass full settings (bypass the main node's widgets when on), per-pass
 pre-SR denoise with dedicated model slots. Dynamic JS UI on both nodes (pack's `web/` folder); the
 Python side validates everything and works headless without it.
 
