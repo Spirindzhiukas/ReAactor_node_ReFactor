@@ -34,10 +34,19 @@ from .rfactor.loaders import (
     ReFactorFaceSwapModelLoader,
     ReFactorFaceRestoreModelLoader,
     ReFactorFaceDetectionModelLoader,
+    ReFactorUpscaleModelLoader,
     detection_model_name,
 )
 from .rfactor.dlssnr import ReFactorDLSS5Enhancer
 from .rfactor.torch_utils import normalize_ as normalize, stat_mode
+from .rfactor.upscaler import upscale_bgr_face
+from .rfactor.upres import (
+    UPRES_CHOICES,
+    UPRES_USE_MODEL,
+    decide_restore_size,
+    interp_flag,
+    restore_model_native,
+)
 from .rfactor.utils import (
     run_facerestore_onnx,
     batch_tensor_to_pil,
@@ -89,6 +98,14 @@ class ReFactorFaceSwap:
                 "face_restore_visibility": ("FLOAT", {"default": 1, "min": 0.1, "max": 1, "step": 0.05}),
                 "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
                                                   "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
+                "face_restore_upres": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON",
+                                                   "tooltip": "Face Restore upRes interpolator. ON: if the restore model can run at "
+                                                              "the face's own resolution it does (no pixel scaling); otherwise the face is "
+                                                              "brought to the model's native resolution, restored, and scaled back to the "
+                                                              "image resolution. OFF: classic behavior (always restore at the model's native size)."}),
+                "upres_interpolation": (UPRES_CHOICES, {"default": "Lanczos",
+                                                        "tooltip": "Pixel interpolation for the upRes scaling (and 'Use Upscale model' to "
+                                                                   "scale with a connected UpscaleModel instead)."}),
                 "detect_gender_input": (["no","female","male"], {"default": "no"}),
                 "detect_gender_source": (["no","female","male"], {"default": "no"}),
                 "input_faces_index": ("STRING", {"default": "0"}),
@@ -101,9 +118,9 @@ class ReFactorFaceSwap:
                 "FaceRestore_model": ("FACE_RESTORE_MODEL",),
                 "FaceDetection_model": ("FACE_DETECT_MODEL",),
                 # ---------------------------------------------------------------
+                "UpscaleModel": ("UPSCALE_MODEL",),
                 "target_face_image": ("IMAGE",),
                 "target_face_model": ("FACE_MODEL",),
-                "face_boost": ("FACE_BOOST",),
             },
             "hidden": {"faces_order": "FACES_ORDER"},
         }
@@ -117,12 +134,7 @@ class ReFactorFaceSwap:
         # self.face_helper = None
         self.faces_order = ["large-small", "large-small"]
         # self.face_size = FACE_SIZE
-        self.face_boost_enabled = False
         self.restore = True
-        self.boost_model = None
-        self.interpolation = "Bicubic"
-        self.boost_model_visibility = 1
-        self.boost_cf_weight = 0.5
         self.last_swapped_bboxes = None
         # self.last_swapped_indices = None
         self.restore_swapped_only = True
@@ -134,6 +146,9 @@ class ReFactorFaceSwap:
         face_restore_visibility,
         codeformer_fidelity,
         face_detection_model="retinaface_resnet50",
+        face_restore_upres=True,
+        upres_interpolation="Lanczos",
+        upscale_model=None,
     ):
         """face_restore_model: FACE_RESTORE_MODEL dict {"name","path"} or None."""
 
@@ -215,6 +230,17 @@ class ReFactorFaceSwap:
                 FACE_SIZE = faceSize
                 FACE_HELPER = self.face_helper
 
+            # ---- upRes configuration ---------------------------------------
+            # native size + whether the model accepts arbitrary input sizes
+            native_restore_size, dynamic_restore = restore_model_native(
+                restore_model_name,
+                ort_session if ".onnx" in restore_model_name else None)
+            use_model_scale_back = (upres_interpolation == UPRES_USE_MODEL and upscale_model is not None)
+            if upres_interpolation == UPRES_USE_MODEL and upscale_model is None:
+                logger.status("upRes 'Use Upscale model' selected but no UpscaleModel is connected - using Lanczos")
+            warp_interp = interp_flag(upres_interpolation) if upres_interpolation != UPRES_USE_MODEL else cv2.INTER_LANCZOS4
+            self.face_helper.interpolation = warp_interp
+
             # Copying Tensor to CPU (if it isn't) to convert torch.Tensor to np.ndarray
             image_np = 255. * result.cpu().numpy()
 
@@ -239,6 +265,27 @@ class ReFactorFaceSwap:
                 self.face_helper.clean_all()
                 self.face_helper.read_image(cur_image_np)
                 self.face_helper.get_face_landmarks_5(only_center_face=False, resize=640, eye_dist_threshold=5)
+
+                # ---- upRes decision: restore at the face's own resolution when
+                # the model supports it, otherwise at its native size ----
+                face_px_helper = None
+                face_px = None
+                if self.face_helper.det_faces:
+                    f_scale = self.face_helper.input_img.shape[1] / float(cur_image_np.shape[1])
+                    face_px_helper = max(max(b[2] - b[0], b[3] - b[1]) for b in self.face_helper.det_faces)
+                    face_px = face_px_helper / f_scale
+                effective = decide_restore_size(native_restore_size, dynamic_restore, face_px, face_restore_upres)
+                if face_px is not None and effective != self.face_helper.face_size[0]:
+                    logger.status(f"Face restore upRes: face ~{int(face_px)}px, model is "
+                                  f"{'dynamic' if dynamic_restore else 'fixed'} at {native_restore_size}px -> restoring at {effective}px")
+                    self.face_helper = FaceRestoreHelper(1, face_size=effective, crop_ratio=(1, 1), det_model=face_detection_model, save_ext='png', use_parse=True, device=device)
+                    FACE_SIZE = effective
+                    FACE_HELPER = self.face_helper
+                    self.face_helper.interpolation = warp_interp
+                    self.face_helper.clean_all()
+                    self.face_helper.read_image(cur_image_np)
+                    self.face_helper.get_face_landmarks_5(only_center_face=False, resize=640, eye_dist_threshold=5)
+
                 self.face_helper.align_warp_face()
                 
                 # restored_face = None
@@ -339,6 +386,17 @@ class ReFactorFaceSwap:
                         restored_face = cropped_face * (1 - face_restore_visibility) + restored_face * face_restore_visibility
 
                     restored_face = restored_face.astype("uint8")
+
+                    # upRes: when the restored face must be scaled back UP to the
+                    # face's own resolution, optionally use the comfy upscale model
+                    if use_model_scale_back and face_px_helper is not None and face_px_helper > self.face_helper.face_size[0] * 1.05:
+                        try:
+                            target = int(round(face_px_helper))
+                            upscaled = upscale_bgr_face(upscale_model, restored_face)
+                            restored_face = cv2.resize(upscaled, (target, target), interpolation=cv2.INTER_AREA)
+                        except Exception as error:
+                            logger.error(f"Upscale-model scale-back failed ({error}); using interpolation")
+
                     self.face_helper.add_restored_face(restored_face)
                 
                 self.face_helper.get_inverse_affine(None)
@@ -379,31 +437,15 @@ class ReFactorFaceSwap:
         return result
 
 
-    def execute(self, enabled, original_image, face_restore_visibility, codeformer_fidelity, detect_gender_source, detect_gender_input, source_faces_index, input_faces_index, console_log_level, FaceSwap_model=None, FaceRestore_model=None, FaceDetection_model=None, target_face_image=None, target_face_model=None, face_boost=None, faces_order=None):
+    def execute(self, enabled, original_image, face_restore_visibility, codeformer_fidelity, face_restore_upres, upres_interpolation, detect_gender_source, detect_gender_input, source_faces_index, input_faces_index, console_log_level, FaceSwap_model=None, FaceRestore_model=None, FaceDetection_model=None, UpscaleModel=None, target_face_image=None, target_face_model=None, faces_order=None):
 
         device = model_management.get_torch_device()
 
         if isinstance(original_image, torch.Tensor) and original_image.device != device:
             original_image = original_image.to(device)
 
-        if face_boost is not None:
-            self.face_boost_enabled = face_boost["enabled"]
-            self.boost_model = face_boost.get("face_restore_model")
-            self.interpolation = face_boost["interpolation"]
-            self.boost_model_visibility = face_boost["visibility"]
-            self.boost_cf_weight = face_boost["codeformer_fidelity"]
-            self.restore = face_boost["restore_with_main_after"]
-        else:
-            self.face_boost_enabled = False
-
-        # Effective restore/detect models: the FaceBoost bundle wins when it
-        # carries one, otherwise the node's own loader inputs are used.
-        if self.face_boost_enabled and self.boost_model is not None:
-            restore_info = self.boost_model
-            restore_visibility, restore_fidelity = self.boost_model_visibility, self.boost_cf_weight
-        else:
-            restore_info = FaceRestore_model
-            restore_visibility, restore_fidelity = face_restore_visibility, codeformer_fidelity
+        restore_info = FaceRestore_model
+        restore_visibility, restore_fidelity = face_restore_visibility, codeformer_fidelity
         det_name = detection_model_name(FaceDetection_model)
 
         if faces_order is None:
@@ -445,12 +487,6 @@ class ReFactorFaceSwap:
                 gender_target=detect_gender_input,
                 face_model=target_face_model,
                 faces_order=faces_order,
-                # face boost:
-                face_boost_enabled=self.face_boost_enabled,
-                face_restore_model=self.boost_model,
-                face_restore_visibility=self.boost_model_visibility,
-                codeformer_fidelity=self.boost_cf_weight,
-                interpolation=self.interpolation,
             )
             result = batched_pil_to_tensor(p.init_images)
             if len(p.bbox) > 0:
@@ -462,8 +498,11 @@ class ReFactorFaceSwap:
             else:
                 face_model_to_provide = target_face_model
 
-            if self.restore or not self.face_boost_enabled:
-                result = ReFactorFaceSwap.restore_face(self, result, restore_info, restore_visibility, restore_fidelity, det_name)
+            if self.restore:
+                result = ReFactorFaceSwap.restore_face(self, result, restore_info, restore_visibility, restore_fidelity, det_name,
+                                                       face_restore_upres=face_restore_upres,
+                                                       upres_interpolation=upres_interpolation,
+                                                       upscale_model=UpscaleModel)
 
         else:
             image_black = Image.new("RGB", (512, 512))
@@ -484,6 +523,14 @@ class ReFactorFaceSwapOpt:
                 "face_restore_visibility": ("FLOAT", {"default": 1, "min": 0.1, "max": 1, "step": 0.05}),
                 "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
                                                   "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
+                "face_restore_upres": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON",
+                                                   "tooltip": "Face Restore upRes interpolator. ON: if the restore model can run at "
+                                                              "the face's own resolution it does (no pixel scaling); otherwise the face is "
+                                                              "brought to the model's native resolution, restored, and scaled back to the "
+                                                              "image resolution. OFF: classic behavior (always restore at the model's native size)."}),
+                "upres_interpolation": (UPRES_CHOICES, {"default": "Lanczos",
+                                                        "tooltip": "Pixel interpolation for the upRes scaling (and 'Use Upscale model' to "
+                                                                   "scale with a connected UpscaleModel instead)."}),
             },
             "optional": {
                 # --- the three model sockets grouped together, in load order ---
@@ -491,10 +538,10 @@ class ReFactorFaceSwapOpt:
                 "FaceRestore_model": ("FACE_RESTORE_MODEL",),
                 "FaceDetection_model": ("FACE_DETECT_MODEL",),
                 # ---------------------------------------------------------------
+                "UpscaleModel": ("UPSCALE_MODEL",),
                 "target_face_image": ("IMAGE",),
                 "target_face_model": ("FACE_MODEL",),
                 "options": ("OPTIONS",),
-                "face_boost": ("FACE_BOOST",),
             }
         }
 
@@ -513,14 +560,9 @@ class ReFactorFaceSwapOpt:
         self.console_log_level = 1
         self.restore_swapped_only = True
         # self.face_size = 512
-        self.face_boost_enabled = False
         self.restore = True
-        self.boost_model = None
-        self.interpolation = "Bicubic"
-        self.boost_model_visibility = 1
-        self.boost_cf_weight = 0.5
 
-    def execute(self, enabled, original_image, face_restore_visibility, codeformer_fidelity, FaceSwap_model=None, FaceRestore_model=None, FaceDetection_model=None, target_face_image=None, target_face_model=None, options=None, face_boost=None):
+    def execute(self, enabled, original_image, face_restore_visibility, codeformer_fidelity, face_restore_upres, upres_interpolation, FaceSwap_model=None, FaceRestore_model=None, FaceDetection_model=None, UpscaleModel=None, target_face_image=None, target_face_model=None, options=None):
 
         if options is not None:
             self.faces_order = [options["input_faces_order"], options["source_faces_order"]]
@@ -531,14 +573,13 @@ class ReFactorFaceSwapOpt:
             self.source_faces_index = options["source_faces_index"]
             self.restore_swapped_only = options["restore_swapped_only"]
 
-        if face_boost is not None:
-            self.face_boost_enabled = face_boost["enabled"]
-            self.restore = face_boost["restore_with_main_after"]
-        else:
-            self.face_boost_enabled = False
-
         result = ReFactorFaceSwap.execute(
-            self,enabled,original_image,FaceSwap_model,self.detect_gender_source,self.detect_gender_input,self.source_faces_index,self.input_faces_index,self.console_log_level,face_restore_visibility,codeformer_fidelity,target_face_image,target_face_model,FaceRestore_model,FaceDetection_model,self.faces_order, face_boost=face_boost
+            self, enabled, original_image, face_restore_visibility, codeformer_fidelity,
+            face_restore_upres, upres_interpolation,
+            self.detect_gender_source, self.detect_gender_input,
+            self.source_faces_index, self.input_faces_index, self.console_log_level,
+            FaceSwap_model, FaceRestore_model, FaceDetection_model, UpscaleModel,
+            target_face_image, target_face_model, faces_order=self.faces_order
         )
 
         return result
@@ -866,9 +907,18 @@ class ReFactorRestoreFace:
                 "visibility": ("FLOAT", {"default": 1, "min": 0.0, "max": 1, "step": 0.05}),
                 "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
                                                   "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
+                "face_restore_upres": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON",
+                                                   "tooltip": "Face Restore upRes interpolator. ON: if the restore model can run at "
+                                                              "the face's own resolution it does (no pixel scaling); otherwise the face is "
+                                                              "brought to the model's native resolution, restored, and scaled back to the "
+                                                              "image resolution. OFF: classic behavior (always restore at the model's native size)."}),
+                "upres_interpolation": (UPRES_CHOICES, {"default": "Lanczos",
+                                                        "tooltip": "Pixel interpolation for the upRes scaling (and 'Use Upscale model' to "
+                                                                   "scale with a connected UpscaleModel instead)."}),
             },
             "optional": {
                 "FaceDetection_model": ("FACE_DETECT_MODEL",),
+                "UpscaleModel": ("UPSCALE_MODEL",),
             }
         }
 
@@ -876,10 +926,13 @@ class ReFactorRestoreFace:
     FUNCTION = "execute"
     CATEGORY = "ReFactor"
 
-    def execute(self, image, FaceRestore_model, visibility, codeformer_fidelity, FaceDetection_model=None):
+    def execute(self, image, FaceRestore_model, visibility, codeformer_fidelity, face_restore_upres, upres_interpolation, FaceDetection_model=None, UpscaleModel=None):
         result = ReFactorFaceSwap.restore_face(
             self, image, FaceRestore_model, visibility, codeformer_fidelity,
-            detection_model_name(FaceDetection_model)
+            detection_model_name(FaceDetection_model),
+            face_restore_upres=face_restore_upres,
+            upres_interpolation=upres_interpolation,
+            upscale_model=UpscaleModel
         )
         return (result,)
 
@@ -894,10 +947,19 @@ class ReFactorRestoreFaceAdvanced:
                 "visibility": ("FLOAT", {"default": 1, "min": 0.0, "max": 1, "step": 0.05}),
                 "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
                                                   "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
+                "face_restore_upres": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON",
+                                                   "tooltip": "Face Restore upRes interpolator. ON: if the restore model can run at "
+                                                              "the face's own resolution it does (no pixel scaling); otherwise the face is "
+                                                              "brought to the model's native resolution, restored, and scaled back to the "
+                                                              "image resolution. OFF: classic behavior (always restore at the model's native size)."}),
+                "upres_interpolation": (UPRES_CHOICES, {"default": "Lanczos",
+                                                        "tooltip": "Pixel interpolation for the upRes scaling (and 'Use Upscale model' to "
+                                                                   "scale with a connected UpscaleModel instead)."}),
                 "face_selection": (["all", "filter", "largest"],{"default": "all"}),
             },
             "optional": {
                 "FaceDetection_model": ("FACE_DETECT_MODEL",),
+                "UpscaleModel": ("UPSCALE_MODEL",),
                 "sort_by": (["area", "x_position", "y_position", "detection_confidence"],{"default": "area"}),
                 "reverse_order": ("BOOLEAN", {"default": False}),
                 "take_start": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
@@ -910,7 +972,7 @@ class ReFactorRestoreFaceAdvanced:
     CATEGORY = "ReFactor"
 
     def execute(
-            self, image, FaceRestore_model, visibility, codeformer_fidelity, face_selection, sort_by="area", reverse_order=False, take_start=0, take_count=1, FaceDetection_model=None
+            self, image, FaceRestore_model, visibility, codeformer_fidelity, face_restore_upres, upres_interpolation, face_selection, sort_by="area", reverse_order=False, take_start=0, take_count=1, FaceDetection_model=None, UpscaleModel=None
         ):
 
         min_x_position=0.0
@@ -921,6 +983,7 @@ class ReFactorRestoreFaceAdvanced:
         result = image
 
         face_restore_model = FaceRestore_model
+        upscale_model = UpscaleModel
 
         if face_restore_model is not None and not model_management.processing_interrupted():
 
@@ -978,6 +1041,16 @@ class ReFactorRestoreFaceAdvanced:
                 FACE_SIZE = faceSize
                 FACE_HELPER = self.face_helper
 
+            # ---- upRes configuration (mirrors the main node) ----------------
+            native_restore_size, dynamic_restore = restore_model_native(
+                restore_model_name,
+                ort_session if ".onnx" in restore_model_name else None)
+            use_model_scale_back = (upres_interpolation == UPRES_USE_MODEL and upscale_model is not None)
+            if upres_interpolation == UPRES_USE_MODEL and upscale_model is None:
+                logger.status("upRes 'Use Upscale model' selected but no UpscaleModel is connected - using Lanczos")
+            warp_interp = interp_flag(upres_interpolation) if upres_interpolation != UPRES_USE_MODEL else cv2.INTER_LANCZOS4
+            self.face_helper.interpolation = warp_interp
+
             image_np = 255. * result.cpu().numpy()
 
             total_images = image_np.shape[0]
@@ -998,6 +1071,26 @@ class ReFactorRestoreFaceAdvanced:
                 self.face_helper.clean_all()
                 self.face_helper.read_image(cur_image_np)
                 self.face_helper.get_face_landmarks_5(only_center_face=False, resize=640, eye_dist_threshold=5)
+
+                # ---- upRes decision (mirrors the main node) ----------------
+                face_px_helper = None
+                face_px = None
+                if self.face_helper.det_faces:
+                    f_scale = self.face_helper.input_img.shape[1] / float(cur_image_np.shape[1])
+                    face_px_helper = max(max(b[2] - b[0], b[3] - b[1]) for b in self.face_helper.det_faces)
+                    face_px = face_px_helper / f_scale
+                effective = decide_restore_size(native_restore_size, dynamic_restore, face_px, face_restore_upres)
+                if face_px is not None and effective != self.face_helper.face_size[0]:
+                    logger.status(f"Face restore upRes: face ~{int(face_px)}px, model is "
+                                  f"{'dynamic' if dynamic_restore else 'fixed'} at {native_restore_size}px -> restoring at {effective}px")
+                    self.face_helper = FaceRestoreHelper(1, face_size=effective, crop_ratio=(1, 1), det_model=detection_model_name(FaceDetection_model), save_ext='png', use_parse=True, device=device)
+                    FACE_SIZE = effective
+                    FACE_HELPER = self.face_helper
+                    self.face_helper.interpolation = warp_interp
+                    self.face_helper.clean_all()
+                    self.face_helper.read_image(cur_image_np)
+                    self.face_helper.get_face_landmarks_5(only_center_face=False, resize=640, eye_dist_threshold=5)
+
                 self.face_helper.align_warp_face()
 
                 # Face-Filter Mode
@@ -1119,6 +1212,16 @@ class ReFactorRestoreFaceAdvanced:
                         restored_face = cropped_face * (1 - visibility) + restored_face * visibility
 
                     restored_face = restored_face.astype("uint8")
+
+                    # upRes: upscale-model scale-back (mirrors the main node)
+                    if use_model_scale_back and face_px_helper is not None and face_px_helper > self.face_helper.face_size[0] * 1.05:
+                        try:
+                            target = int(round(face_px_helper))
+                            upscaled = upscale_bgr_face(upscale_model, restored_face)
+                            restored_face = cv2.resize(upscaled, (target, target), interpolation=cv2.INTER_AREA)
+                        except Exception as error:
+                            logger.error(f"Upscale-model scale-back failed ({error}); using interpolation")
+
                     self.face_helper.add_restored_face(restored_face)
 
                 self.face_helper.get_inverse_affine(None)
@@ -1265,39 +1368,6 @@ class ReFactorOptions:
         return (options, )
 
 
-class ReFactorFaceBoost:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "enabled": ("BOOLEAN", {"default": True, "label_off": "OFF", "label_on": "ON"}),
-                "interpolation": (["Nearest","Bilinear","Bicubic","Lanczos"], {"default": "Bicubic"}),
-                "visibility": ("FLOAT", {"default": 1, "min": 0.1, "max": 1, "step": 0.05}),
-                "codeformer_fidelity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05,
-                                                  "tooltip": "CodeFormer fidelity weight (0 = better quality, 1 = better identity)"}),
-                "restore_with_main_after": ("BOOLEAN", {"default": False}),
-            },
-            "optional": {
-                "FaceRestore_model": ("FACE_RESTORE_MODEL",),
-            }
-        }
-
-    RETURN_TYPES = ("FACE_BOOST",)
-    FUNCTION = "execute"
-    CATEGORY = "ReFactor"
-
-    def execute(self, enabled, interpolation, visibility, codeformer_fidelity, restore_with_main_after, FaceRestore_model=None):
-        face_boost: dict = {
-            "enabled": enabled,
-            "face_restore_model": FaceRestore_model,
-            "interpolation": interpolation,
-            "visibility": visibility,
-            "codeformer_fidelity": codeformer_fidelity,
-            "restore_with_main_after": restore_with_main_after,
-        }
-        return (face_boost, )
-
-
 class ReFactorUnload:
     @classmethod
     def INPUT_TYPES(s):
@@ -1374,7 +1444,6 @@ NODE_CLASS_MAPPINGS = {
     "ReFactorFaceSwap": ReFactorFaceSwap,
     "ReFactorFaceSwapOpt": ReFactorFaceSwapOpt,
     "ReFactorOptions": ReFactorOptions,
-    "ReFactorFaceBoost": ReFactorFaceBoost,
     "ReFactorMaskBuilder": ReFactorMaskBuilder,
     "ReFactorSetWeight": ReFactorSetWeight,
     # --- Operations with Face Models ---
@@ -1394,6 +1463,7 @@ NODE_CLASS_MAPPINGS = {
     "ReFactorFaceSwapModelLoader": ReFactorFaceSwapModelLoader,
     "ReFactorFaceRestoreModelLoader": ReFactorFaceRestoreModelLoader,
     "ReFactorFaceDetectionModelLoader": ReFactorFaceDetectionModelLoader,
+    "ReFactorUpscaleModelLoader": ReFactorUpscaleModelLoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1401,7 +1471,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ReFactorFaceSwap": "ReFactor ⚡ Fast Face Swap",
     "ReFactorFaceSwapOpt": "ReFactor ⚡ Fast Face Swap [OPTIONS]",
     "ReFactorOptions": "ReFactor ⚡ Options",
-    "ReFactorFaceBoost": "ReFactor ⚡ Face Booster",
     "ReFactorMaskBuilder": "ReFactor ⚡ Mask Builder",
     "ReFactorSetWeight": "ReFactor ⚡ Set Face Swap Weight",
     # --- Operations with Face Models ---
@@ -1421,4 +1490,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ReFactorFaceSwapModelLoader": "FaceSwap Model Loader ⚡ ReFactor",
     "ReFactorFaceRestoreModelLoader": "FaceRestore Model Loader ⚡ ReFactor",
     "ReFactorFaceDetectionModelLoader": "FaceDetection Model Loader ⚡ ReFactor",
+    "ReFactorUpscaleModelLoader": "Upscale Model Loader ⚡ ReFactor",
 }

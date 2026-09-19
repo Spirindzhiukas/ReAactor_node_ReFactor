@@ -17,7 +17,6 @@ import comfy.model_management as model_management
 from .ort_utils import resolve_providers
 from . import model_paths
 from .utils import get_image_md5hash, progress_bar, progress_bar_reset
-from .faceboost import swapper, restorer
 
 insightface_path = model_paths.insightface_path
 insightface_models_path = model_paths.insightface_models_path
@@ -251,11 +250,6 @@ def swap_face(
     gender_target: int = 0,
     face_model: Union[Face, None] = None,
     faces_order: List = ["large-small", "large-small"],
-    face_boost_enabled: bool = False,
-    face_restore_model = None,
-    face_restore_visibility: int = 1,
-    codeformer_fidelity: float = 0.5,
-    interpolation: str = "Bicubic",
 ):
     global SOURCE_FACES, SOURCE_IMAGE_HASH, TARGET_FACES, TARGET_IMAGE_HASH
     result_image = target_img
@@ -373,15 +367,8 @@ def swap_face(
                         # 3. Берем валидное лицо (если их меньше, чем целей — идем по кругу)
                         source_face_to_use = valid_source_faces[source_face_idx % len(valid_source_faces)]
                         
-                        if face_boost_enabled and "hyperswap" not in model:
-                            logger.status(f"Face Boost is enabled (inswapper/reswapper only)")
-                            bgr_fake, M = face_swapper.get(result, target_face, source_face_to_use, paste_back=False)
-                            bgr_fake, scale = restorer.get_restored_face(bgr_fake, face_restore_model, face_restore_visibility, codeformer_fidelity, interpolation)
-                            M *= scale
-                            result = swapper.in_swap(result, bgr_fake, M)
-                        else:
-                            result = face_swapper.get(result, target_face, source_face_to_use)
-                            
+                        result = face_swapper.get(result, target_face, source_face_to_use)
+                        
                         bbox.append(tuple(map(float, target_face.bbox)))
                         swapped_indexes.append(target_face_index)
 
@@ -411,11 +398,6 @@ def swap_face_many(
     gender_target: int = 0,
     face_model: Union[Face, None] = None,
     faces_order: List = ["large-small", "large-small"],
-    face_boost_enabled: bool = False,
-    face_restore_model = None,
-    face_restore_visibility: int = 1,
-    codeformer_fidelity: float = 0.5,
-    interpolation: str = "Bicubic",
 ):
     global SOURCE_FACES, SOURCE_IMAGE_HASH, TARGET_FACES_LIST, TARGET_IMAGE_LIST_HASH
     result_images = target_imgs
@@ -549,15 +531,8 @@ def swap_face_many(
                             target_used_in_any_image = True
                             source_face_to_use = valid_source_faces[source_face_idx % len(valid_source_faces)]
                             
-                            result = target_img
-                            if face_boost_enabled and "hyperswap" not in model:
-                                bgr_fake, M = face_swapper.get(target_img, target_face_single, source_face_to_use, paste_back=False)
-                                bgr_fake, scale = restorer.get_restored_face(bgr_fake, face_restore_model, face_restore_visibility, codeformer_fidelity, interpolation)
-                                M *= scale
-                                result = swapper.in_swap(target_img, bgr_fake, M)
-                            else:
-                                result = face_swapper.get(target_img, target_face_single, source_face_to_use)
-                                
+                            result = face_swapper.get(target_img, target_face_single, source_face_to_use)
+                            
                             results[i] = result
                             bbox.append(tuple(map(float, target_face_single.bbox)))
                             swapped_indexes.append(target_face_index)

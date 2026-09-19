@@ -9,7 +9,6 @@ A dependency-hygiene-focused rework of the ReActor node:
 - 3rd-party DLSS-NR DLLs stay manual, now with user-supplied version sets.
 """
 
-import os
 
 # The nodepack is a proper package: nothing is ever injected into sys.path.
 from .rfactor import __version__, model_paths

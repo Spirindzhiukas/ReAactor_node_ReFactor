@@ -108,6 +108,11 @@ class FaceRestoreHelper(object):
         self.use_parse = use_parse
         self.face_parse = init_parsing_model(model_name='parsenet', device=self.device)
 
+        # cv2 interpolation used for the crop warp and the paste-back warp
+        # (ReFactor sets this from the node's upRes interpolation choice;
+        # INTER_LINEAR is the historical default)
+        self.interpolation = cv2.INTER_LINEAR
+
     def set_upscale_factor(self, upscale_factor):
         self.upscale_factor = upscale_factor
 
@@ -274,7 +279,7 @@ class FaceRestoreHelper(object):
             else:
                 input_img = self.input_img
             cropped_face = cv2.warpAffine(
-                input_img, affine_matrix, self.face_size, borderMode=border_mode, borderValue=(135, 133, 132))  # gray
+                input_img, affine_matrix, self.face_size, flags=self.interpolation, borderMode=border_mode, borderValue=(135, 133, 132))  # gray
             self.cropped_faces.append(cropped_face)
             # save the cropped face
             if save_cropped_path is not None:
@@ -328,7 +333,7 @@ class FaceRestoreHelper(object):
                     extra_offset = 0
                 inverse_affine[:, 2] += extra_offset
                 face_size = self.face_size
-            inv_restored = cv2.warpAffine(restored_face, inverse_affine, (w_up, h_up))
+            inv_restored = cv2.warpAffine(restored_face, inverse_affine, (w_up, h_up), flags=getattr(self, "interpolation", cv2.INTER_LINEAR))
 
             # if draw_box or not self.use_parse:  # use square parse maps
             #     mask = np.ones(face_size, dtype=np.float32)

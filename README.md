@@ -97,22 +97,36 @@ Connect any ComfyUI-native segmentation into the **Mask Builder**:
 
 **Model loaders** (the facerestore_cf pattern — models via dedicated nodes, typed sockets):
 `ReFactorFaceSwapModelLoader` → `FACE_SWAP_MODEL`, `ReFactorFaceRestoreModelLoader` → `FACE_RESTORE_MODEL`,
-`ReFactorFaceDetectionModelLoader` → `FACE_DETECT_MODEL`. Swap models get their own loader (not shared
+`ReFactorFaceDetectionModelLoader` → `FACE_DETECT_MODEL`, `ReFactorUpscaleModelLoader` → `UPSCALE_MODEL`
+(comfy-native listing + spandrel loading; the output even plugs into the stock
+"Upscale Image (using Model)" node). Swap models get their own loader (not shared
 with restore) because they are persistent cached ONNX sessions with family routing
 (inswapper / reswapper / hyperswap), unlike per-run restoration models.
 
 **Main:** `ReFactorFaceSwap` / `ReFactorFaceSwapOpt` with sockets
 `original_image`, `target_face_image` (the face donor image), `target_face_model` (prebuilt FACE_MODEL),
-`FaceSwap_model`, `FaceRestore_model`, `FaceDetection_model`, `face_boost`.
+`FaceSwap_model`, `FaceRestore_model`, `FaceDetection_model`, `UpscaleModel`.
 The old monolithic `facedetection` / `face_restore_model` / `swap_model` dropdowns are gone —
 connect the loaders instead. The three model sockets sit **grouped together** at the top of the
 optional inputs (in load order). CodeFormer's `codeformer_weight` is now named correctly everywhere:
 `codeformer_fidelity` (same CodeFormer `w` parameter that facerestore_cf calls fidelity).
 
+**Face Restore upRes interpolator** (absorbs — and replaces — the old Face Booster node): the
+`face_restore_upres` switch (default ON) plus the `upres_interpolation` selector
+(Lanczos / Bicubic / Bilinear / Nearest / **Use Upscale model**). With the switch ON, the restore
+model runs at the face's own resolution whenever the model supports it (dynamic-input models like
+GFPGAN restore small faces with **no** pixel scaling at all); otherwise the face is brought to the
+model's native resolution, restored, and scaled back to the image resolution. "Use Upscale model"
+delegates the scale-back to a connected `UPSCALE_MODEL` (tiled, OOM-aware — same code path as
+ComfyUI's stock upscale node) and always normalizes the result back to the face's exact resolution,
+whatever the model's 1x/2x/4x/8x output is. `ReFactorFaceBoost` is **removed** — the main node now
+restores better than the booster did (proper affine paste-back with soft masks at any resolution,
+no crop-space aliasing).
+
 **Restore-only mode:** leave `FaceSwap_model` unconnected and the node skips swapping entirely while
 still applying face restoration to `original_image` — useful as a standalone restorer pipeline stage.
 
-**Also:** `ReFactorOptions`, `ReFactorFaceBoost`, `ReFactorMaskBuilder`, `ReFactorSetWeight`,
+**Also:** `ReFactorOptions`, `ReFactorMaskBuilder`, `ReFactorSetWeight`,
 `ReFactorSaveFaceModel` / `ReFactorLoadFaceModel` / `ReFactorBuildFaceModel` / `ReFactorMakeFaceModelBatch`,
 `ReFactorRestoreFace` / `ReFactorRestoreFaceAdvanced` (both now take `FACE_RESTORE_MODEL` /
 `FACE_DETECT_MODEL` inputs), `ReFactorFaceSimilarity`, `ReFactorImageDuplicator`,

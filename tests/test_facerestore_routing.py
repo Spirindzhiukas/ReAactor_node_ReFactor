@@ -53,11 +53,12 @@ class FakeOrtSession:
 class _FakeHelper:
     """Minimal FaceRestoreHelper stand-in for the main restore path."""
 
-    def __init__(self, crops):
+    def __init__(self, crops, face_size=512):
         self.cropped_faces = list(crops)
         self.det_faces = [(10.0, 10.0, 210.0, 210.0, 0.99) for _ in crops]
         self.captured = []  # survives clean_all()
         self.input_img = None
+        self.face_size = (face_size, face_size)
 
     def clean_all(self):
         pass
@@ -90,6 +91,7 @@ class _WhiteOrt:
     def get_inputs(self):
         class _I:
             name = "input"
+            shape = [1, 3, 512, 512]
         return [_I()]
 
     def run(self, _names, feed):

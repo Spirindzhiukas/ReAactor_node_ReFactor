@@ -28,6 +28,7 @@ from .swapper import find_swap_model_file
 FACE_SWAP_MODEL = "FACE_SWAP_MODEL"
 FACE_RESTORE_MODEL = "FACE_RESTORE_MODEL"
 FACE_DETECT_MODEL = "FACE_DETECT_MODEL"
+UPSCALE_MODEL = "UPSCALE_MODEL"  # comfy-native type: our loader is wire-compatible
 
 DETECTION_MODELS = [
     "retinaface_resnet50",
@@ -164,3 +165,45 @@ def detection_model_name(info) -> str:
     if isinstance(info, dict) and info.get("name"):
         return info["name"]
     return _DEFAULT_DETECTION
+
+
+class ReFactorUpscaleModelLoader:
+    """ComfyUI-native upscale-model loader (same listing and same spandrel
+    loading as the core "Load Upscale Model" node; the output can even be
+    wired into the stock "Upscale Image (using Model)" node)."""
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model_name": (s._choices(), {"tooltip": "Upscale models from ComfyUI's upscale_models "
+                                                         "folder (ESRGAN/SPAN/SwinIR/...). Used by the "
+                                                         "swap node when upRes interpolation is set to "
+                                                         "'Use Upscale model'."}),
+            }
+        }
+
+    @classmethod
+    def _choices(cls):
+        try:
+            names = folder_paths.get_filename_list("upscale_models")
+            return list(names) if names else []
+        except Exception:
+            return []
+
+    RETURN_TYPES = (UPSCALE_MODEL,)
+    RETURN_NAMES = ("UpscaleModel",)
+    FUNCTION = "load_model"
+    CATEGORY = "ReFactor/loaders"
+
+    def load_model(self, model_name):
+        from .upscaler import load_upscale_model
+
+        model_path = folder_paths.get_full_path("upscale_models", model_name)
+        if not model_path:
+            raise FileNotFoundError(
+                f"Upscale model '{model_name}' not found in ComfyUI's upscale_models folder. "
+                "Put the model there (or refresh) and pick it again."
+            )
+        logger.status(f"Loading upscale model: {model_name}")
+        return (load_upscale_model(model_path),)

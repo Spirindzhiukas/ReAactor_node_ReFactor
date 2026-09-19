@@ -109,7 +109,7 @@ def main():
     for socket in ("original_image",):
         check(f"required socket '{socket}'", socket in ti["required"])
     for socket in ("FaceSwap_model", "FaceRestore_model", "FaceDetection_model",
-                   "target_face_image", "target_face_model", "face_boost"):
+                   "UpscaleModel", "target_face_image", "target_face_model"):
         check(f"optional socket '{socket}'", socket in ti["optional"])
     for gone in ("input_image", "swap_model", "facedetection", "face_restore_model", "source_image", "face_model"):
         check(f"old socket '{gone}' removed", gone not in ti["required"] and gone not in ti["optional"])
@@ -129,16 +129,26 @@ def main():
     from rfactor.faceboost.archs.registry import ARCH_REGISTRY
     check("CodeFormer registered in arch registry", "CodeFormer" in ARCH_REGISTRY)
 
-    boost = pkg.NODE_CLASS_MAPPINGS["ReFactorFaceBoost"].INPUT_TYPES()
-    check("FaceBoost uses fidelity + restore socket", "codeformer_fidelity" in boost["required"]
-          and "FaceRestore_model" in boost["optional"] and "boost_model" not in boost["required"])
+    # Face Booster is deprecated: its bundle, socket and node are gone
+    check("FACE_BOOST fully removed", "face_boost" not in ti["optional"] and "FACE_BOOST" not in str(ti)
+          and "ReFactorFaceBoost" not in pkg.NODE_CLASS_MAPPINGS)
+
+    # upRes contract on the four restore-capable nodes
+    for name in ("ReFactorFaceSwap", "ReFactorFaceSwapOpt", "ReFactorRestoreFace", "ReFactorRestoreFaceAdvanced"):
+        t = pkg.NODE_CLASS_MAPPINGS[name].INPUT_TYPES()
+        check(f"{name}: upRes widgets",
+              "face_restore_upres" in t["required"] and "upres_interpolation" in t["required"])
+        choices = list(t["required"]["upres_interpolation"][0])
+        check(f"{name}: interpolation choices end with 'Use Upscale model'",
+              choices[-1] == "Use Upscale model" and choices[0] == "Lanczos")
 
     adv = pkg.NODE_CLASS_MAPPINGS["ReFactorRestoreFaceAdvanced"].INPUT_TYPES()
     check("RestoreFaceAdvanced loader sockets", "FaceRestore_model" in adv["required"]
           and "FaceDetection_model" in adv["optional"])
 
     check("loaders registered", all(n in pkg.NODE_CLASS_MAPPINGS for n in (
-        "ReFactorFaceSwapModelLoader", "ReFactorFaceRestoreModelLoader", "ReFactorFaceDetectionModelLoader")))
+        "ReFactorFaceSwapModelLoader", "ReFactorFaceRestoreModelLoader",
+        "ReFactorFaceDetectionModelLoader", "ReFactorUpscaleModelLoader")))
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
