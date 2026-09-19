@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 287 checks + gates (details below, fixes after)
+- **Suite:** ALL GREEN — 289 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -167,6 +167,19 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - LEGACY engine: helper locates files by LITERAL 'nvngx_dlssnr.dll' name;
   owner's RenoDX-named build -> stage_legacy_runtime() copies the set to
   a writable dir under canonical names; manager gets the stage dir.
+- OWNER'S APPDATA MAP (post run 16): (a) MASQUERADER CAUGHT -
+  sr_staged/neuroframe_caller/nvngx_dlss.dll was 102.5 KB = Merserk's
+  CALLER STUB resolving as an SR runtime (a caller dll inside the SR
+  tree matched the nvngx_dlss* name filter); ADDED a size guard: SR
+  runtimes must be >=1MB (real builds are tens of MB), auto SKIPS stubs,
+  explicit choice of a stub raises loud; (b) AppData legacy stage
+  (nr_legacy_staged, ~316MB duplicated 158MB dlls) is OBSOLETE - owner
+  can delete it; (c) shim on disk IS the current unwind-capable build
+  (2.00KB = text still fits one 0x200 page); (d) empty logs dir was
+  consistent with the use-after-free. ARTIFACT ROOT MOVED under
+  models/DLSS/staged/ANTs/<tag> per owner directive (AppData only as
+  read-only fallback) - after next run: shim, staging AND the NGX log
+  all live under models/DLSS/staged/ANTs/.
 - RIG run 16: same exact crash at first EvaluateFeature (padding fix
   insufficient). ROOT-CAUSE CANDIDATE #1 FOUND: DVT's initExt does
   `this.keep.push(path, featureInfo)` - the runtime RETAINS the

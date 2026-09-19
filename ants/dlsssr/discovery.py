@@ -44,6 +44,28 @@ def sr_set_choices():
     return (["auto"] + [s["name"] for s in sets] + ["refresh"]) if sets else ["auto", "refresh"]
 
 
+# A real nvngx_dlss SR runtime is tens of MB; helper/caller stubs (e.g.
+# neuroframe_caller.dll renamed or misplaced) are ~100 KB. Anything under
+# this size is rejected as a masquerader, not an SR runtime.
+SR_RUNTIME_MIN_BYTES = 1_000_000
+
+
+def _is_sr_runtime(path):
+    try:
+        return os.path.getsize(path) >= SR_RUNTIME_MIN_BYTES
+    except OSError:
+        return False
+
+
+def _sr_set_dll(chosen):
+    if chosen["kind"] == "dll":
+        return chosen["path"]
+    dlls = [d for d in _dll_files(chosen["path"]) if d.lower().startswith("nvngx_dlss")]
+    if not dlls:
+        dlls = _dll_files(chosen["path"])
+    return os.path.join(chosen["path"], dlls[0])
+
+
 def resolve_sr_dll(choice):
     """Absolute path of the chosen nvngx_dlss*.dll (or the first found)."""
     sets = discover_sr_sets()
@@ -55,17 +77,25 @@ def resolve_sr_dll(choice):
             "    The SR runtime (nvngx_dlss.dll) is user-procured - its redistribution\n"
             "    is prohibited by NVIDIA (DLSS Swapper / driver packages are sources).")
     if choice in ("auto", "refresh"):
+        for candidate in sets:
+            path = _sr_set_dll(candidate)
+            if _is_sr_runtime(path):
+                return path
+        raise RuntimeError(
+            "[ANTs] No DLSS SR dll set found. Place nvngx_dlss*.dll builds into\n"
+            f"    {os.path.join(_dlss_root(), 'SR')}\\\n"
+            "    (every candidate there was under 1 MB - helper/caller stubs are\n"
+            "    NOT SR runtimes.)")
+    chosen = next((s for s in sets if s["name"] == choice), None)
+    if chosen is None:
         chosen = sets[0]
-    else:
-        chosen = next((s for s in sets if s["name"] == choice), None)
-        if chosen is None:
-            chosen = sets[0]
-    if chosen["kind"] == "dll":
-        return chosen["path"]
-    dlls = [d for d in _dll_files(chosen["path"]) if d.lower().startswith("nvngx_dlss")]
-    if not dlls:
-        dlls = _dll_files(chosen["path"])
-    return os.path.join(chosen["path"], dlls[0])
+    path = _sr_set_dll(chosen)
+    if not _is_sr_runtime(path):
+        raise RuntimeError(
+            f"[ANTs] '{os.path.basename(path)}' is under 1 MB - it is not an SR "
+            "runtime but a helper/caller stub. Pick the real nvngx_dlss*.dll build "
+            "(tens of MB) in the SR selector.")
+    return path
 
 
 def find_nr_runtime_dll(nr_dir):

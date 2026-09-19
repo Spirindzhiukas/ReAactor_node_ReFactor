@@ -111,8 +111,9 @@ def main():
     with tempfile.TemporaryDirectory() as td:
         sr_root = os.path.join(td, "SR")
         os.makedirs(sr_root)
-        open(os.path.join(sr_root, "nvngx_dlss.dll"), "wb").write(b"x")
-        open(os.path.join(sr_root, "nvngx_dlss_310.9.1.dll"), "wb").write(b"x")
+        # real SR runtimes are tens of MB; the guard rejects <1MB stubs
+        open(os.path.join(sr_root, "nvngx_dlss.dll"), "wb").write(b"x" * 1_100_000)
+        open(os.path.join(sr_root, "nvngx_dlss_310.9.1.dll"), "wb").write(b"x" * 1_200_000)
         saved = nr_disc.DLSS_ROOT
         nr_disc.DLSS_ROOT = td
         try:
@@ -133,6 +134,19 @@ def main():
                       and "redistribution" in str(exc))
         finally:
             nr_disc.DLSS_ROOT = saved
+
+        # ---- masquerader guard: a small "nvngx_dlss.dll" is a stub ----
+        os.makedirs(os.path.join(td, "SR"), exist_ok=True)
+        open(os.path.join(td, "SR", "nvngx_dlss.dll"), "wb").write(b"stub")
+        try:
+            sr_disc.resolve_sr_dll("nvngx_dlss")
+            check("sr: masquerader guard rejects a small stub", False)
+        except RuntimeError as exc:
+            check("sr: masquerader guard rejects a small stub",
+                  "under 1 MB" in str(exc) and "helper/caller stub" in str(exc))
+        open(os.path.join(td, "SR", "nvngx_dlss_310.9.1.dll"), "wb").write(b"x" * 1_100_000)
+        check("sr: auto skips stubs and finds the real runtime",
+              sr_disc.resolve_sr_dll("auto").endswith("nvngx_dlss_310.9.1.dll"))
 
         # NR runtime locator
         nr_dir = os.path.join(td, "NR", "v1")

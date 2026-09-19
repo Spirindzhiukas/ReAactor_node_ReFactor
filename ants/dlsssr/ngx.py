@@ -102,13 +102,19 @@ class FeatureCommonInfo:
 
 
 def writable_cache_dir(tag):
-    """A directory we can write artifacts into (shim PE, logs).
+    """A directory we can write artifacts into (shim PE, staging, logs).
 
-    The NGX core usually lives in the DriverStore (admin-only), so anything
-    we must create next to a *call* goes to %LOCALAPPDATA%\\ANTs\\<tag>,
-    falling back to the package dir, then the temp dir.
+    Owner directive: everything DLSS-related lives under models/DLSS - so
+    the primary location is models/DLSS/staged/ANTs/<tag>, falling back to
+    %LOCALAPPDATA%\\ANTs\\<tag> (models dir read-only), the package dir,
+    then the temp dir.
     """
     roots = []
+    try:
+        from ..dlssnr.discovery import DLSS_ROOT as _dlss_root
+        roots.append(os.path.join(_dlss_root, "staged", "ANTs", tag))
+    except Exception:
+        pass
     base = os.environ.get("LOCALAPPDATA")
     if base:
         roots.append(os.path.join(base, "ANTs", tag))
