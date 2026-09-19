@@ -327,15 +327,50 @@ def main():
     check("process_host rejects a non-contiguous destination loudly",
           "destination buffer must be a" in core_src)
 
-    # ---- native: rig-proven force-terminator builds are refused up front ----
+    # ---- native: rig-proven force-terminator builds (runs 14-19) ----
+    # The RenoDX-derived NR build kills the process at the first evaluate,
+    # but Merserk's own C++ host runs it fine - so we SKIP it on auto (queue
+    # safety) and WARN on explicit picks (owner consent), never hard-refuse.
     check("native: RenoDX-named builds match the force-terminator matcher",
           discovery.is_known_force_terminator(
               r"C:\m\DLSS\NR\nvngx_dlssnr_RenoDX_4000_series_friendly.dll")
           and not discovery.is_known_force_terminator(
               r"C:\m\DLSS\NR\nvngx_dlssnr.dll"))
-    check("native: the engine refuses force-terminators unless overridden",
+    saved = (discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH,
+             discovery.PACKAGE_DLL_DIR)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            discovery.DLSS_ROOT = td
+            nr_dir = os.path.join(td, "NR")
+            os.makedirs(nr_dir)
+            open(os.path.join(nr_dir, "nvngx_dlssnr_RenoDX_x.dll"),
+                 "wb").write(b"b")
+            open(os.path.join(nr_dir, "nvngx_dlssnr_stock.dll"), "wb").write(b"g")
+            check("native: NR auto skips the force-terminator build",
+                  discovery.resolve_nr_runtime_path("auto", skip_known_bad=True)
+                  .endswith("nvngx_dlssnr_stock.dll"))
+            check("native: NR auto without skip picks it (legacy still may)",
+                  discovery.resolve_nr_runtime_path("auto")
+                  .endswith("nvngx_dlssnr_RenoDX_x.dll"))
+            check("native: explicit force-terminator pick is honored",
+                  discovery.resolve_nr_runtime_path("nvngx_dlssnr_RenoDX_x.dll",
+                                                    skip_known_bad=True)
+                  .endswith("nvngx_dlssnr_RenoDX_x.dll"))
+            os.remove(os.path.join(nr_dir, "nvngx_dlssnr_stock.dll"))
+            try:
+                discovery.resolve_nr_runtime_path("auto", skip_known_bad=True)
+                check("native: auto with ONLY a force-terminator raises loud",
+                      False)
+            except RuntimeError as exc:
+                check("native: auto with ONLY a force-terminator raises loud",
+                      "[ANTs]" in str(exc) and "EXPLICITLY" in str(exc))
+    finally:
+        discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, \
+            discovery.PACKAGE_DLL_DIR = saved
+    check("native: the engine warns instead of refusing explicit picks",
           "is_known_force_terminator(dll_path)" in node_src
-          and "ANTS_ALLOW_KNOWN_BAD_NR" in node_src)
+          and "force-terminator" in node_src
+          and "ANTS_ALLOW_KNOWN_BAD_NR" not in node_src)
     check("native: the force-terminator list credits RenoDX provenance",
           '"renodx"' in (REPO / "ants" / "dlssnr" / "discovery.py").read_text()
           and "clshortfuse" in (REPO / "ants" / "dlssnr" / "discovery.py").read_text())

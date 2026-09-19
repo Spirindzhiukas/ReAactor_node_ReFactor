@@ -243,19 +243,19 @@ class ReFactorDLSS5Enhancer:
                     pass
                 del self.manager
                 self.manager = None
-            dll_path = discovery.resolve_nr_runtime_path(nr_choice)
-            if (discovery.is_known_force_terminator(dll_path)
-                    and not os.environ.get("ANTS_ALLOW_KNOWN_BAD_NR")):
-                raise RuntimeError(
-                    "[ANTs] Refusing to load '" + os.path.basename(dll_path) + "': "
-                    "this RenoDX-derived NR build force-terminates the whole "
-                    "process at the first NGX evaluate on a plain D3D12 host "
-                    "(rig-proven: instant silent death, no exception, no log - "
-                    "it expects to run behind ReShade inside a game). Pick a "
-                    "different NR build in models/DLSS/NR (a stock nvngx_dlssnr "
-                    "from DLSS Swapper fails cleanly and is a valid experiment), "
-                    "or set the environment variable ANTS_ALLOW_KNOWN_BAD_NR=1 "
-                    "to try it anyway at the risk of losing the session.")
+            dll_path = discovery.resolve_nr_runtime_path(nr_choice, skip_known_bad=True)
+            if discovery.is_known_force_terminator(dll_path):
+                # Explicit pick (or the only build installed): the owner
+                # consents - warn loudly and proceed instead of refusing.
+                logger.warning(
+                    "[ANTs] '" + os.path.basename(dll_path) + "' matches the "
+                    "rig-proven force-terminator list: RenoDX-derived NR builds "
+                    "kill the whole process at the first NGX evaluate on a "
+                    "plain D3D12 host (runs 14-19: instant silent death, no "
+                    "exception, no log). Merserk's own C++ host runs this "
+                    "build fine, so the gap is in our pure-Python provider - "
+                    "under active analysis. Proceeding because you selected "
+                    "it explicitly; a queue run may lose the session.")
             self._ordinal = self.device.index if getattr(self.device, "index", None) is not None else 0
             # Sessions are size-keyed and created lazily on the first frame
             # (see _native_session_for); NGX providers must not be churned.

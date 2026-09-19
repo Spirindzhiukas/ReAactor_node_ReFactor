@@ -237,15 +237,17 @@ def category_choices(category: str):
 
 
 # Rig-proven (runs 14-19): RenoDX-derived NR builds force-terminate the
-# whole process inside their first EvaluateFeature on a plain D3D12 host -
-# no exception is raised (a first-in-process vectored handler sees nothing)
-# and no NGX log is written. These builds are made to sit behind ReShade's
-# NGX dispatcher inside a game; a headless host hits a deliberate exit
-# path. Provenance/credit: the RenoDX project (clshortfuse) and the
-# community "4000 series friendly" repack. We refuse to select them by
-# default so a whole ComfyUI session cannot be lost mid-queue; the
-# ANTS_ALLOW_KNOWN_BAD_NR=1 environment variable overrides for
-# experimentation.
+# whole process inside their first EvaluateFeature on OUR pure-Python
+# provider - no exception is raised (a first-in-process vectored handler
+# sees nothing) and no NGX log is written (runs 14-19). CAVEAT (run 20):
+# Merserk's plain C++ host runs the SAME build fine, so the earlier
+# "these builds need ReShade" theory is DISPROVEN - the gap is in our
+# provider and is under active analysis (rig probes + his engine's
+# binaries). Until that closes we treat these builds as session-loss
+# risks: 'auto' selection SKIPS them (a queue run must not die), and an
+# EXPLICIT pick is honored with a loud warning (owner consent).
+# Provenance/credit: the RenoDX project (clshortfuse) and the community
+# "4000 series friendly" repack.
 KNOWN_FORCE_TERMINATOR_MARKERS = ("renodx",)
 
 
@@ -255,21 +257,44 @@ def is_known_force_terminator(dll_path):
     return any(marker in name for marker in KNOWN_FORCE_TERMINATOR_MARKERS)
 
 
-def resolve_nr_runtime_path(choice: str):
+def resolve_nr_runtime_path(choice: str, skip_known_bad: bool = False):
     """The NR runtime .dll for the native host: a chosen flat dll directly,
-    a chosen set's nvngx_dlssnr*.dll, or (auto/vanished) the first found."""
+    a chosen set's nvngx_dlssnr*.dll, or (auto/vanished) the first found.
+
+    skip_known_bad=True (native engine, auto selection) passes over
+    rig-proven force-terminator builds so a queue run cannot lose the
+    session; an EXPLICIT choice is always honored (the caller warns).
+    """
     from ..dlsssr.discovery import find_nr_runtime_dll  # lazy: no import cycle
     for entry in category_entries("NR"):
         if choice and entry["name"] == choice:
             if entry["kind"] == "dll":
                 return entry["path"]
             return find_nr_runtime_dll(entry["path"])
+    saw_bad = False
     for entry in category_entries("NR"):
-        if entry["kind"] == "dll":
-            return entry["path"]
+        if entry["kind"] != "dll":
+            continue
+        if skip_known_bad and is_known_force_terminator(entry["path"]):
+            saw_bad = True
+            continue
+        return entry["path"]
     sets = discover_dll_sets("NR")
-    if sets:
-        return find_nr_runtime_dll(sets[0]["path"])
+    for candidate in sets:
+        path = find_nr_runtime_dll(candidate["path"])
+        if path and skip_known_bad and is_known_force_terminator(path):
+            saw_bad = True
+            continue
+        if path:
+            return path
+    if saw_bad:
+        raise RuntimeError(
+            "[ANTs] Every NR build in models/DLSS/NR matches the rig-proven "
+            "force-terminator list (RenoDX-derived builds that kill the whole "
+            "process at the first NGX evaluate on a plain D3D12 host - runs "
+            "14-19). Select one EXPLICITLY in the engine dropdown to accept "
+            "the risk, or add a stock nvngx_dlssnr build (e.g. from DLSS "
+            "Swapper) so 'auto' has a safe pick.")
     return default_dll_dir()  # raises the loud "no DLSS-NR DLL set" error
 
 

@@ -380,3 +380,9 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   file path where a search dir belongs).
 - NR Schedules (new): scheduler JS dynamics + enhancer greying in a real browser, schedule
   off/on parity, per-pass settings bypass, per-pass denoise slots, 4K multi-pass speed.
+
+### 2026-09-20 — run-21 prep: guard softened + reference-host probe
+- Force-terminator guard RESHAPED (owner consent after rename bypass): discovery.resolve_nr_runtime_path(choice, skip_known_bad=False) — native AUTO now skips RenoDX-marker builds (saw_bad flag); if ONLY bad builds exist → loud [ANTs] RuntimeError (EXPLICITLY hint); EXPLICIT picks always honored. node.py native branch: WARN-and-proceed for explicit picks (Merserk's C++ host runs it fine; our provider gap under analysis); ANTS_ALLOW_KNOWN_BAD_NR REMOVED. Legacy staging path unchanged (no skip) — these builds are fine behind the legacy engine.
+- tools/probe_neuroframe_host.py NEW: stdlib-only PE32+ export/import decoder + class-based string miner, READ-ONLY, targets Merserk's proven host (neuroframe_engine_neural_rendering.dll, neuroframe_caller.dll full-ish strings; nvngx_dlssnr.dll 5 capped classes: NGX API surface, ReShade/RenoDX markers, failure words, GPU/driver gates, provider/dispatch/logging). Prints paste-sized report + writes probe_neuroframe_host_report.txt to cwd. VALIDATED on hand-crafted synthetic PE32+ (exports/imports/verdict-lead all correct).
+- ngx.py init facts (re-checked): NR path = classic-Init-first with Init_Ext fallback; classic returned hr=1 on rig so fallback never fired — Init-variant question only answerable from his bridge source or probe.
+- Suite: 299 checks ALL GREEN (bridge 65 [+4], schedule 32, pure 26, surface 58, sr 34, flow 16, facerestore 21, swapper 13, detection 7, upres 27) + pyflakes. .venv_test was wiped by sandbox reset — rebuilt with numpy/cv2/PIL/pefile/pyflakes.
