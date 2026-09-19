@@ -180,6 +180,18 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   models/DLSS/staged/ANTs/<tag> per owner directive (AppData only as
   read-only fallback) - after next run: shim, staging AND the NGX log
   all live under models/DLSS/staged/ANTs/.
+- RIG run 18: crash again at first evaluate; the param-KEYS dump printed
+  (names match DVT's table exactly); NO faulthandler trace, NO NGX log.
+  Node masks verified = 1/1 (DVT parity). SHIPPED ants/dlsssr/crashlog.py:
+  Python-registered VECTORED EXCEPTION HANDLER (first=1) armed right
+  before the first evaluate; on hardware-class exceptions (AV, illegal
+  instr, stack overflow, heap corruption, div0) writes
+  '[ANTs] NATIVE CRASH: exception 0x... (kind) at <module>+0x<offset>'
+  to stderr AND a pre-opened .../staged/ANTs/appdata/logs/native-crash.log,
+  then EXCEPTION_CONTINUE_SEARCH (cap 50 lines; non-Windows = no-op).
+  Run 19 reading guide: crash line present -> module+offset names the
+  culprit dll; NOTHING printed (no file/lines) = fail-fast signature =
+  the dll deliberately force-terminates on a non-ReShade host -> pivot.
 - RIG run 17: SAME crash at first EvaluateFeature even with padding +
   init keep-alive + unwind info + classic-Init-first (signatures now
   line-for-line identical to DVT: evaluate (list,handle,params,null),

@@ -371,7 +371,12 @@ class NgxSession:
         if first:
             self._eval_done = __import__("threading").Event()
             self._first_evaluate_watchdog()
-            _log().status("NGX EvaluateFeature -> (first frame; params: "
+            from . import crashlog
+            crash_file = os.path.join(writable_cache_dir("appdata"), "logs",
+                                      "native-crash.log")
+            crashlog.arm(crash_file)
+            _log().status("NGX EvaluateFeature -> (first frame; crash black "
+                          f"box: {crash_file}; params: "
                           + ", ".join(sorted(getattr(self.params, "store", {}))) + ")")
         hr = self._evaluate(self.gpu.list.ptr, ctypes.c_void_p(self.handle),
                             self.params.ptr, None)
