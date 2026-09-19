@@ -1,0 +1,145 @@
+"""Tests for the DLSS-NR hybrid: HDR Colour Bridge math + models/DLSS discovery.
+
+Usage: python tests/test_dlssnr_bridge.py
+"""
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "tests"))
+
+from smoke_import import install_stubs  # noqa: E402
+
+PASS = 0
+FAIL = 0
+
+
+def check(name, cond):
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+        print(f"  ok  {name}")
+    else:
+        FAIL += 1
+        print(f" FAIL {name}")
+
+
+def main():
+    install_stubs()
+    sys.path.insert(0, str(REPO))
+
+    from rfactor.dlssnr.hdr_bridge import (
+        anchored_bridge,
+        apply_bridge,
+        classic_bridge,
+        classic_bridge as cb,
+    )
+    from rfactor.dlssnr import discovery
+
+    rng = np.random.RandomState(7)
+    frame = rng.rand(64, 64, 3).astype(np.float32) * 0.8
+
+    # ---- Classic bridge ----
+    out = classic_bridge(frame)
+    check("classic: finite [0,1] output", out.shape == frame.shape and np.isfinite(out).all()
+          and out.min() >= 0 and out.max() <= 1)
+    check("classic: zero transfer strength = pass-through",
+          np.allclose(classic_bridge(frame, transfer_strength=0.0), frame))
+    check("classic: paper-white gain brightens midtones",
+          classic_bridge(frame, paper_white_scale=2.537).mean() > frame.mean())
+    check("classic: shoulder keeps highlights <= 1", classic_bridge(frame * 0 + 1.0).max() <= 1.0)
+    check("classic: diffuse white scales the knee",
+          not np.allclose(classic_bridge(frame, diffuse_white_nits=120.0),
+                          classic_bridge(frame, diffuse_white_nits=400.0)))
+    check("classic: color strength changes chroma",
+          not np.allclose(classic_bridge(frame, color_strength=0.2),
+                          classic_bridge(frame, color_strength=1.8)))
+    check("classic: transfer strength 0.5 sits between 0 and 1",
+          abs(classic_bridge(frame, transfer_strength=0.5).mean()
+              - (frame.mean() + classic_bridge(frame).mean()) / 2) < 0.05)
+
+    # ---- Anchored bridge ----
+    out_a = anchored_bridge(frame)
+    check("anchored: finite [0,1] output", np.isfinite(out_a).all() and out_a.max() <= 1.0)
+    check("anchored: pass-through at zero strength",
+          np.allclose(anchored_bridge(frame, transfer_strength=0.0), frame))
+    dark = (frame * 0.05).astype(np.float32)
+    check("anchored: dark frame with lever 0 == classic (same knee, nothing measured above it)",
+          np.allclose(anchored_bridge(dark, black_lever=0.0), cb(dark), atol=2e-3))
+    # bright frame: 5% pure-white patches -> measured highlight raises the knee,
+    # so highlights keep headroom instead of hard-clipping at classic's shoulder
+    bright = frame.copy()
+    bright[:3, :] = 1.0
+    check("anchored: highlight-anchored knee keeps bright pixels below classic's clip",
+          anchored_bridge(bright, black_lever=0.0).max() < cb(bright).max())
+    bl0 = anchored_bridge(frame, black_lever=0.0)
+    bl1 = anchored_bridge(frame, black_lever=1.0)
+    shadow_mask = frame.mean(axis=2) < 0.1
+    check("anchored: black lever restores shadows (dark pixels closer to input)",
+          abs(bl1[..., 0][shadow_mask].mean() - frame[..., 0][shadow_mask].mean())
+          < abs(bl0[..., 0][shadow_mask].mean() - frame[..., 0][shadow_mask].mean()))
+
+    # ---- dispatch ----
+    check("apply_bridge dispatch + off",
+          np.allclose(apply_bridge(frame, "off"), frame)
+          and np.allclose(apply_bridge(frame, "nonsense"), frame)
+          and np.allclose(apply_bridge(frame, "classic"), cb(frame)))
+
+    # ---- discovery: models/DLSS layout, ANY filenames ----
+    with tempfile.TemporaryDirectory() as td:
+        root = os.path.join(td, "DLSS")
+        v1 = os.path.join(root, "dlssnr_testA")
+        os.makedirs(v1)
+        # arbitrary filenames: OreX-style single bridge + nvidia runtime renamed
+        open(os.path.join(v1, "my_bridge.dll"), "wb").write(b"x")
+        open(os.path.join(v1, "runtime_thing.dll"), "wb").write(b"x")
+        saved = (discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, discovery.PACKAGE_DLL_DIR)
+        discovery.DLSS_ROOT = root
+        discovery.LEGACY_DLSSNR_PATH = os.path.join(td, "legacy_dlssnr")
+        discovery.PACKAGE_DLL_DIR = os.path.join(td, "nope")
+        try:
+            sets = discovery.discover_dll_sets()
+            check("discovery: dlssnr_<name> folder found with ANY filenames",
+                  any(s["name"] == "dlssnr_testA" and s["complete"] and len(s["dlls"]) == 2
+                      for s in sets))
+            check("discovery: nvngx hint detected by name",
+                  any(s.get("has_nvngx") is False for s in sets))
+            check("discovery: resolve by set name",
+                  discovery.resolve_dll_dir("dlssnr_testA") == v1)
+            check("discovery: combo = auto + names + refresh",
+                  discovery.combo_choices() == ["auto", "dlssnr_testA", "refresh"])
+
+            # flat files in models/DLSS = an unnamed set
+            open(os.path.join(root, "loose_engine.dll"), "wb").write(b"x")
+            sets2 = discovery.discover_dll_sets()
+            check("discovery: flat models/DLSS dlls form an unnamed set",
+                  any(s["name"] == "(models/DLSS)" for s in sets2))
+        finally:
+            discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, discovery.PACKAGE_DLL_DIR = saved
+
+    # ---- no sets at all -> the loud owner-specified error ----
+    saved = (discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, discovery.PACKAGE_DLL_DIR)
+    discovery.DLSS_ROOT = os.path.join(tempfile.gettempdir(), "definitely_missing_dlss")
+    discovery.LEGACY_DLSSNR_PATH = os.path.join(tempfile.gettempdir(), "definitely_missing_legacy")
+    discovery.PACKAGE_DLL_DIR = os.path.join(tempfile.gettempdir(), "definitely_missing_pkg")
+    try:
+        try:
+            discovery.default_dll_dir()
+            check("discovery: loud error when empty", False)
+        except RuntimeError as e:
+            check("discovery: loud error names dlssnr_<version_name> + any-filenames rule",
+                  "dlssnr_<version_name>" in str(e) and "ANY .dll filenames" in str(e))
+    finally:
+        discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, discovery.PACKAGE_DLL_DIR = saved
+
+    print(f"\n{PASS} passed, {FAIL} failed")
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

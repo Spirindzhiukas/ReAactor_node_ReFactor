@@ -31,7 +31,7 @@ without asking.
 | `sys.path` injection + absolute imports | collision risk with other node packs | **zero** — proper package-relative imports |
 | NSFW (SFW) filter | transformers ViT checker | **removed** (uncensored build — use responsibly and obey your local laws) |
 | Masking helper | bundled ultralytics YOLO + SAM loader | **Mask Builder**: accepts `MASK` / `BOUNDING_BOX` from ComfyUI's own nodes (SAM3, SAM2, RMBG, …), plus built-in soft face-region masks; grow / morphology / feather / invert post-chain |
-| DLSS5 Frame Enhancer | single flat DLL folder | **unchanged 3rd-party policy** + `dll_version` switcher: drop any number of user-supplied DLL sets into `models/dlssnr/<version>/` and pick per workflow |
+| DLSS5 Frame Enhancer | single flat DLL folder | **manual-only policy** + `dll_version` switcher: drop user-supplied DLL sets (any filenames) into `models/DLSS/dlssnr_<version>/` and pick per workflow |
 | `torch.load` | no `weights_only` | `weights_only=True` everywhere |
 | Downloads | raw urllib, no timeout/resume | timeout + resume + atomic `.part` + size checks + `REFACTOR_NO_AUTO_DOWNLOAD=1` opt-out |
 | basicsr vendored copy | full training framework (~100 files) | trimmed to the tiny registry/logger subset actually used |
@@ -75,15 +75,26 @@ The engine validates execution providers against the installed build and logs wh
 | `reswapper_128/256.onnx` | `models/reswapper/` | manual |
 | `hyperswap_1x_256.onnx` | `models/hyperswap/` | manual (see [facefusion models](https://huggingface.co/facefusion/models-3.3.0/tree/main)) |
 | GFPGAN / CodeFormer / GPEN | `models/facerestore_models/` | downloaded when the FaceRestore Model Loader executes with a canonical entry |
-| DLSS-NR DLLs (3rd-party) | `models/dlssnr/<version>/` | **manual only** — see `rfactor/dlssnr/dll_README.md` |
+| DLSS-NR DLLs (3rd-party) | `models/DLSS/dlssnr_<version>/` (any filenames) | **manual only** — see `rfactor/dlssnr/dll_README.md` |
 
-## DLSS5 Frame Enhancer (3rd-party DLLs)
+## DLSS5 (ANTs⚡DLSS5 Frame Enhancer)
 
-This node never downloads DLLs. Place `neuroframe_caller.dll`, `neuroframe_engine.dll` and
-`nvngx_dlssnr.dll` into `ComfyUI/models/dlssnr/<any-version-name>/` — as many versions as you like —
-then pick the set in the node's `dll_version` selector (`auto` picks the best complete set; `refresh`
-re-scans after you add DLLs). NVIDIA's license prohibits redistributing `nvngx_dlssnr.dll`, so DLL
-acquisition stays 100% yours — sources and licenses in `rfactor/dlssnr/dll_README.md`.
+Hybrid enhancer: our feature-rich DLSS-NR surface + OreX-inspired temporal history management + a RenoDX-inspired HDR Colour Bridge stage. Design notes, comparison and full credits: [docs/RESEARCH_dlss5_hybrid.md](docs/RESEARCH_dlss5_hybrid.md).
+
+This node never downloads DLLs. Place your DLL sets into `ComfyUI/models/DLSS/dlssnr_<version>/` —
+one folder per version, **any .dll filenames accepted** (the engine is identified by its exports, not
+by name) — then pick the set in the node's `dll_version` selector (`auto` picks the first found set;
+`refresh` re-scans after you add DLLs). `nvngx_dlssnr.dll` must be procured by you (NVIDIA's license
+prohibits redistributing it) — sources and licenses in `rfactor/dlssnr/dll_README.md`.
+
+HDR Colour Bridge: **Classic** (paper-white gain; Diffuse white 237 nits, Scene Paper-White Scale
+2.537, HDR Transfer Strength 1.0, Color Strength 1.0 by default) or **Anchored** (auto white point
+anchored to the frame's highlights + black-floor lever) — after RenoDX's DLSS 5 colour work by
+clshortfuse (MIT).
+
+Credit: [OreX (orex2121)](https://github.com/orex2121/ComfyUI-DLSS5-orex) (ComfyUI-DLSS5 — temporal
+history design), [RenoDX by clshortfuse](https://github.com/clshortfuse/renodx) (HDR bridge concept),
+[Merserk](https://github.com/Merserk) (neuroframe helper DLLs).
 
 ## Masking without ultralytics
 

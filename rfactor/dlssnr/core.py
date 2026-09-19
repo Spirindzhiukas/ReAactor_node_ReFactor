@@ -1,4 +1,5 @@
 import ctypes
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -47,20 +48,48 @@ class DLSSStandaloneManager:
         self._library = None
         self.dll_dir = dll_dir
 
+    @staticmethod
+    def find_engine_dll(dll_dir: str):
+        """Locate the bridge/engine DLL in a set regardless of file naming.
+
+        Per the owner's 'accept any filenames' rule: probe each .dll for the
+        engine's export (dlss5nr_init). Prefer a name containing 'engine'
+        first (cheap fast path), then brute-force probe. Non-Windows/test
+        envs fall back to name matching only.
+        """
+        candidates = sorted(f for f in os.listdir(dll_dir) if f.lower().endswith(".dll"))
+        named = [f for f in candidates if "engine" in f.lower()] or candidates
+        probed_any = False
+        for fname in named:
+            path = os.path.join(dll_dir, fname)
+            loader = getattr(ctypes, "WinDLL", None)
+            if loader is None:
+                return path  # non-Windows: name match is all we can do
+            try:
+                lib = loader(path)
+                if hasattr(lib, "dlss5nr_init"):
+                    return path
+                probed_any = True
+            except OSError:
+                continue
+        if probed_any or candidates:
+            raise NeuralBridgeError(
+                f"No DLL in '{dll_dir}' exports dlss5nr_init - this set does not "
+                "contain the neuroframe bridge/engine helper. Place the helper DLLs "
+                "(see rfactor/dlssnr/dll_README.md) next to nvngx_dlssnr.dll."
+            )
+        raise NeuralBridgeError(f"No .dll files found in '{dll_dir}'")
+
     def initialize(self, ordinal: int):
         with self._lock:
             if self._library is not None:
                 return True
-                
-            import os
-            
+
             if hasattr(os, 'add_dll_directory'):
                 os.add_dll_directory(self.dll_dir)
-                
-            engine_path = os.path.join(self.dll_dir, "neuroframe_engine.dll")
-            if not os.path.exists(engine_path):
-                raise NeuralBridgeError(f"Missing DLL: {engine_path}")
-            
+
+            engine_path = self.find_engine_dll(self.dll_dir)
+
             loader = getattr(ctypes, "WinDLL", ctypes.CDLL)
             try:
                 self._library = loader(engine_path)

@@ -21,6 +21,11 @@ from ..utils import (
 )
 from . import discovery
 from .core import DLSSStandaloneManager
+from .hdr_bridge import (
+    DIFFUSE_WHITE_NITS_DEFAULT,
+    PAPER_WHITE_SCALE_DEFAULT,
+    apply_bridge,
+)
 
 
 class ReFactorDLSS5Enhancer:
@@ -49,6 +54,28 @@ class ReFactorDLSS5Enhancer:
                 "grain_preservation": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "0..1, def: 0.0"}),
                 "nr_passes": ("INT", {"default": 1, "min": 1, "max": 4, "tooltip": "0..4, def: 1"}),
                 "auto_mask": ("BOOLEAN", {"default": False, "label_off": "OFF", "label_on": "ON", "tooltip": "Smart Protection Mask"}),
+                "temporal_history": (["Auto (scene-aware)", "Continuous", "Per-frame reset"],
+                                     {"default": "Auto (scene-aware)",
+                                      "tooltip": "Auto: the DLL's temporal history resets only on detected scene changes "
+                                                 "(threshold below). Continuous: never resets after the first frame (best for "
+                                                 "video-like batches). Per-frame reset: classic single-image behavior."}),
+                "scene_change_threshold": ("FLOAT", {"default": 0.24, "min": 0.01, "max": 1.0, "step": 0.01,
+                                                     "tooltip": "Mean-abs frame difference above which Auto history resets (OreX-style)."}),
+                "hdr_bridge_mode": (["Classic (Paper-White Gain)", "Anchored (Auto White Point)", "Off"],
+                                    {"default": "Classic (Paper-White Gain)",
+                                     "tooltip": "HDR Colour Bridge around the DLSS-NR model (RenoDX-inspired). Classic: fixed "
+                                                "paper-white gain (the first-generation bridge). Anchored: the white point "
+                                                "auto-anchors to each frame's measured highlights, with a black-floor lever."}),
+                "diffuse_white_nits": ("FLOAT", {"default": DIFFUSE_WHITE_NITS_DEFAULT, "min": 80.0, "max": 480.0, "step": 1.0,
+                                                 "tooltip": "Diffuse white of the target display in nits (RenoDX default 237)."}),
+                "scene_paper_white_scale": ("FLOAT", {"default": PAPER_WHITE_SCALE_DEFAULT, "min": 0.1, "max": 10.0, "step": 0.01,
+                                                      "tooltip": "Gain applied to scene linear before the shoulder (RenoDX 'Scene Paper-White Scale')."}),
+                "hdr_transfer_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
+                                                    "tooltip": "How strongly the bridge transfer applies (0 = off, 1 = full, >1 adds gain)."}),
+                "bridge_color_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
+                                                    "tooltip": "Chroma preservation around luma in the bridge (1 = unchanged)."}),
+                "black_lever": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
+                                          "tooltip": "Anchored mode only: restores the black floor after the highlight-anchored gain."}),
             },
             "optional": {
                 "mask": ("MASK",),
@@ -58,15 +85,18 @@ class ReFactorDLSS5Enhancer:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("enhanced_image",)
     FUNCTION = "enhance"
-    CATEGORY = "ReFactor"
+    CATEGORY = "ANTs"
     DESCRIPTION = (
+        "Hybrid DLSS-NR enhancer: helper-bridge engine (neuroframe, by Merserk,\n"
+        "distributed via Gourieff's ReActor dataset) + HDR Colour Bridge stage\n"
+        "(Classic / Anchored, after RenoDX's DLSS 5 colour work by clshortfuse,\n"
+        "MIT) + OreX-inspired temporal history (github.com/orex2121/\n"
+        "ComfyUI-DLSS5-orex).\n"
         "Requirements:\n"
-        "- NVIDIA display driver >= 616.x\n"
-        "- NVIDIA RTX 40/50-series GPU\n"
-        "(compatibility with older RTX series is unconfirmed)\n"
-        "- DLLs: neuroframe_caller.dll, neuroframe_engine.dll, nvngx_dlssnr.dll\n"
-        "in ComfyUI/models/dlssnr/<version>/ (3rd-party, manually installed —\n"
-        "see rfactor/dlssnr/dll_README.md for sources)"
+        "- NVIDIA display driver >= 616.x, RTX 40/50-series GPU\n"
+        "- DLLs into ComfyUI/models/DLSS/dlssnr_<version>/ - ANY .dll filenames\n"
+        "accepted (the engine is identified by its exports, not by name);\n"
+        "nvngx_dlssnr.dll must be procured by you (redistribution prohibited)."
     )
 
     def load_bridge(self, dll_version: str):
@@ -86,7 +116,10 @@ class ReFactorDLSS5Enhancer:
 
     def enhance(self, image, dll_version, style, intensity, local_tone, local_structure,
                 skin_structure, color_strength, tone_preservation,
-                face_skin_protection, grain_preservation, nr_passes, auto_mask, mask=None):
+                face_skin_protection, grain_preservation, nr_passes, auto_mask,
+                temporal_history, scene_change_threshold,
+                hdr_bridge_mode, diffuse_white_nits, scene_paper_white_scale,
+                hdr_transfer_strength, bridge_color_strength, black_lever, mask=None):
 
         if dll_version == "refresh":
             discovery.combo_choices()  # re-scan; user then re-selects the new entry
@@ -108,6 +141,18 @@ class ReFactorDLSS5Enhancer:
         pil_images = batch_tensor_to_pil(image)
         pbar = progress_bar(len(pil_images))
 
+        bridge_kwargs = dict(
+            diffuse_white_nits=float(diffuse_white_nits),
+            paper_white_scale=float(scene_paper_white_scale),
+            transfer_strength=float(hdr_transfer_strength),
+            color_strength=float(bridge_color_strength),
+            black_lever=float(black_lever),
+        )
+        bridge_mode = {"Classic (Paper-White Gain)": "classic",
+                       "Anchored (Auto White Point)": "anchored"}.get(hdr_bridge_mode, "off")
+        _reset_next = True
+        _prev_thumb = None
+
         for i in range(len(image)):
 
             if state.interrupted or model_management.processing_interrupted():
@@ -115,6 +160,22 @@ class ReFactorDLSS5Enhancer:
                 break
 
             img_np = np.ascontiguousarray(image[i].cpu().numpy().astype(np.float32))
+
+            # temporal history: decide the reset for this frame (OreX-style
+            # scene-aware auto, at frame level)
+            do_reset = True
+            if temporal_history == "Continuous":
+                do_reset = _reset_next
+            elif temporal_history == "Auto (scene-aware)":
+                thumb = img_np[::16, ::16].mean(axis=2)
+                if _prev_thumb is not None and _prev_thumb.shape == thumb.shape:
+                    diff = float(np.abs(thumb - _prev_thumb).mean())
+                    do_reset = diff > float(scene_change_threshold)
+                else:
+                    do_reset = True
+                _prev_thumb = thumb
+            _reset_next = False
+
             dest_np = np.ascontiguousarray(np.zeros_like(img_np))
 
             mask_np = None
@@ -126,9 +187,12 @@ class ReFactorDLSS5Enhancer:
                 source=img_np,
                 destination=dest_np,
                 settings=settings,
-                reset=True,
+                reset=do_reset,
                 mask=mask_np
             )
+
+            if bridge_mode != "off":
+                dest_np = apply_bridge(dest_np, bridge_mode, **bridge_kwargs)
 
             out_tensor = torch.from_numpy(dest_np).to(self.device)
             enhanced_batch.append(out_tensor)

@@ -1,19 +1,19 @@
-"""DLSS-NR DLL set discovery.
+"""DLSS-NR DLL set discovery (models/DLSS layout, any filenames).
 
-The DLLs themselves (``neuroframe_caller.dll``, ``neuroframe_engine.dll``,
+The DLLs themselves (the neuroframe helper pair and/or NVIDIA's
 ``nvngx_dlssnr.dll``) are and remain **3rd-party, manually installed** files —
 this nodepack never downloads them (NVIDIA's license prohibits redistributing
-``nvngx_dlssnr.dll``; the neuroframe bridge belongs to its author).
+``nvngx_dlssnr.dll``; the neuroframe bridge belongs to its authors).
 
-What is added on top of upstream: users can keep **several independent DLL
-versions** side by side and switch between them per workflow.
+Owner-decided layout (DLLs are models, so they live with the models):
 
-Scanned locations (in order):
-1. ``ComfyUI/models/dlssnr/<version_name>/``   — user sets, one folder per version
-2. ``ComfyUI/models/dlssnr/`` (flat files)     — a single unnamed user set
-3. ``.../custom_nodes/<this>/rfactor/dlssnr/dll`` — legacy built-in flat folder
-  (kept for compatibility with the upstream manual-install instructions;
-   also accepts DLLs dropped next to the old ``r_dlssnr/dll`` path)
+1. ``ComfyUI/models/DLSS/dlssnr_<version_name>/`` — user sets, one folder per
+   version. **Any .dll filenames are accepted**: the engine is identified by
+   probing its exports at load time, not by file name (OreX's single-file
+   practice works too — whatever the folder contains is the set).
+2. ``ComfyUI/models/DLSS/`` (flat .dll files)              — one unnamed set
+3. ``ComfyUI/models/dlssnr/<version>/`` + flat              — legacy fallback
+4. ``.../custom_nodes/<this>/rfactor/dlssnr/dll``           — legacy package dir
 """
 
 import os
@@ -21,67 +21,87 @@ import os
 from .. import model_paths
 from ..log import logger
 
-_ENGINE_DLL = "neuroframe_engine.dll"
-_REQUIRED_DLLS = ("neuroframe_caller.dll", "neuroframe_engine.dll", "nvngx_dlssnr.dll")
+_REQUIRED_HINTS = ("nvngx_dlssnr.dll",)  # name HINTS only - never required by name
+LEGACY_DLSSNR_PATH = model_paths.DLSSNR_MODELS_PATH
+DLSS_ROOT = model_paths.DLSS_MODELS_PATH
 
 PACKAGE_DLL_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "dll")
 
 
-def validate_set(path: str):
-    """Return a description of a candidate DLL dir; None if it can't work."""
+def dll_files(path: str):
+    """All .dll filenames in a directory (any naming)."""
     if not os.path.isdir(path):
+        return []
+    return sorted(f for f in os.listdir(path) if f.lower().endswith(".dll"))
+
+
+def validate_set(path: str):
+    """Return a description of a candidate DLL dir; None if it has no DLLs.
+
+    'complete' means a non-empty set of DLLs (engine identity is verified by
+    export probing at load time - filenames are deliberately irrelevant).
+    'has_nvngx' is informational: the NGX runtime is usually recognizable by
+    name and the engine needs it next to itself at load time.
+    """
+    dlls = dll_files(path)
+    if not dlls:
         return None
-    present = {f.lower() for f in os.listdir(path) if f.lower().endswith(".dll")}
-    if not present:
-        return None
-    missing = [d for d in _REQUIRED_DLLS if d not in present]
-    return {"path": path, "complete": not missing, "missing": missing}
+    return {
+        "path": path,
+        "complete": True,
+        "missing": [],
+        "dlls": dlls,
+        "has_nvngx": any("nvngx" in d.lower() for d in dlls),
+    }
 
 
 def discover_dll_sets():
-    """List usable DLL sets: [{"name": label, "path": dir, "complete": bool, "missing": [...]}]."""
+    """List usable DLL sets: [{"name", "path", "complete", "missing", ...}]."""
     found = []
     seen = set()
 
-    root = model_paths.DLSSNR_MODELS_PATH
-    if os.path.isdir(root):
-        for entry in sorted(os.listdir(root)):
-            candidate = os.path.join(root, entry)
+    def add(label, candidate):
+        if os.path.realpath(candidate) in seen:
+            return
+        info = validate_set(candidate)
+        if info:
+            found.append({"name": label, **info})
+            seen.add(os.path.realpath(candidate))
+
+    # 1. models/DLSS/dlssnr_<version_name>/  (enforced location)
+    if os.path.isdir(DLSS_ROOT):
+        for entry in sorted(os.listdir(DLSS_ROOT)):
+            candidate = os.path.join(DLSS_ROOT, entry)
             if os.path.isdir(candidate):
-                info = validate_set(candidate)
-                if info:
-                    found.append({"name": entry, **info})
-                    seen.add(os.path.realpath(candidate))
+                add(entry, candidate)
+        # 2. flat DLLs directly in models/DLSS
+        add("(models/DLSS)", DLSS_ROOT)
 
-    info = validate_set(root)
-    if info and os.path.realpath(root) not in seen:
-        found.append({"name": "(models/dlssnr)", **info})
-        seen.add(os.path.realpath(root))
-
-    info = validate_set(PACKAGE_DLL_DIR)
-    if info:
-        found.insert(0, {"name": "built-in (package)", **info})
+    # 3-4. legacy locations, kept as graceful fallbacks
+    if os.path.isdir(LEGACY_DLSSNR_PATH):
+        for entry in sorted(os.listdir(LEGACY_DLSSNR_PATH)):
+            candidate = os.path.join(LEGACY_DLSSNR_PATH, entry)
+            if os.path.isdir(candidate):
+                add(f"{entry} (legacy models/dlssnr)", candidate)
+        add("(legacy models/dlssnr)", LEGACY_DLSSNR_PATH)
+    add("built-in (package)", PACKAGE_DLL_DIR)
 
     return found
 
 
 def default_dll_dir():
     sets = discover_dll_sets()
-    complete = [s for s in sets if s["complete"]]
-    chosen = (complete or sets or [None])[0]
-    if chosen is None:
+    if not sets:
         raise RuntimeError(
-            "[ReFactor] No DLSS-NR DLL set found.\n"
-            f"    Place the 3rd-party DLLs ({', '.join(_REQUIRED_DLLS)}) into\n"
-            f"    {model_paths.DLSSNR_MODELS_PATH}<version_name>/\n"
-            "    See rfactor/dlssnr/dll_README.md for sources and licensing."
+            "[ANTs] No DLSS-NR DLL set found.\n"
+            "    Place the 3rd-party DLLs into\n"
+            f"    {os.path.join(DLSS_ROOT, 'dlssnr_<version_name>')}/\n"
+            "    ANY .dll filenames are accepted (the engine is found by its exports,\n"
+            "    not by name). That folder must contain the bridge/helper DLLs and the\n"
+            "    NVIDIA nvngx_dlssnr.dll runtime (whose public redistribution is\n"
+            "    prohibited - obtain it yourself). Sources: rfactor/dlssnr/dll_README.md"
         )
-    if not chosen["complete"]:
-        logger.warning(
-            f"DLSS-NR DLL set '{chosen['name']}' is incomplete, missing: {chosen['missing']}. "
-            "The node will most likely fail to initialize."
-        )
-    return chosen["path"]
+    return sets[0]["path"]
 
 
 def resolve_dll_dir(choice: str):
@@ -89,9 +109,8 @@ def resolve_dll_dir(choice: str):
     sets = discover_dll_sets()
     if not sets:
         return default_dll_dir()
-    if choice == "auto" or choice == "refresh" or choice == "(models/dlssnr)":
-        complete = [s for s in sets if s["complete"]]
-        chosen = (complete or sets)[0]
+    if choice in ("auto", "refresh"):
+        chosen = sets[0]
     else:
         chosen = next((s for s in sets if s["name"] == choice), None)
         if chosen is None:

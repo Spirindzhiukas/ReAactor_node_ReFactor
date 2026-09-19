@@ -96,7 +96,7 @@ class ReFactorFaceSwapModelLoader:
     RETURN_TYPES = (FACE_SWAP_MODEL,)
     RETURN_NAMES = ("FaceSwap_model",)
     FUNCTION = "load_model"
-    CATEGORY = "ReFactor/loaders"
+    CATEGORY = "ANTs/loaders"
 
     def load_model(self, FaceSwap_model):
         if FaceSwap_model == "none":
@@ -125,7 +125,7 @@ class ReFactorFaceRestoreModelLoader:
     RETURN_TYPES = (FACE_RESTORE_MODEL,)
     RETURN_NAMES = ("FaceRestore_model",)
     FUNCTION = "load_model"
-    CATEGORY = "ReFactor/loaders"
+    CATEGORY = "ANTs/loaders"
 
     def load_model(self, FaceRestore_model):
         if FaceRestore_model == "none":
@@ -154,7 +154,7 @@ class ReFactorFaceDetectionModelLoader:
     RETURN_TYPES = (FACE_DETECT_MODEL,)
     RETURN_NAMES = ("FaceDetection_model",)
     FUNCTION = "load_model"
-    CATEGORY = "ReFactor/loaders"
+    CATEGORY = "ANTs/loaders"
 
     def load_model(self, FaceDetection_model):
         return ({"name": FaceDetection_model},)
@@ -194,7 +194,7 @@ class ReFactorUpscaleModelLoader:
     RETURN_TYPES = (UPSCALE_MODEL,)
     RETURN_NAMES = ("UpscaleModel",)
     FUNCTION = "load_model"
-    CATEGORY = "ReFactor/loaders"
+    CATEGORY = "ANTs/loaders"
 
     def load_model(self, model_name):
         from .upscaler import load_upscale_model

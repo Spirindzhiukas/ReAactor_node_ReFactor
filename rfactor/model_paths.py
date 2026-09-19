@@ -11,7 +11,8 @@ reinstalls and are shared with sibling node packs):
     models/facedetection/          retinaface / yolov5face detector weights (face boost)
     models/reactor/faces/          saved face models (.safetensors)  [legacy location]
     models/reactor_refactor/faces/ saved face models (.safetensors)  [ours]
-    models/dlssnr/<version>/       user-supplied DLSS NR DLL sets (3rd-party, manual)
+    models/DLSS/dlssnr_<version>/  user-supplied DLSS NR DLL sets (3rd-party, manual;
+                                   any .dll filenames accepted)
 """
 
 import os
@@ -38,7 +39,10 @@ FACE_MODELS_PATH = os.path.join(REACTOR_MODELS_PATH, "faces")
 FACE_MODELS_PATH_LEGACY = os.path.join(models_path, "reactor", "faces")
 
 # DLSS NR dll sets ----------------------------------------------------------
-DLSSNR_MODELS_PATH = os.path.join(models_path, "dlssnr")
+# Owner decision: DLLs are models -> they live under models/DLSS/ with one
+# folder per version (dlssnr_<name>); ANY .dll filenames inside are accepted.
+DLSS_MODELS_PATH = os.path.join(models_path, "DLSS")
+DLSSNR_MODELS_PATH = os.path.join(models_path, "dlssnr")  # legacy fallback
 
 
 def register_folders() -> None:
@@ -50,6 +54,7 @@ def register_folders() -> None:
         facerestore_models_path,
         facedetection_path,
         FACE_MODELS_PATH,
+        DLSS_MODELS_PATH,
         DLSSNR_MODELS_PATH,
     ):
         os.makedirs(path, exist_ok=True)

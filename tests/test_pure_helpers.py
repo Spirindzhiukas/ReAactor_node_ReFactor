@@ -74,33 +74,33 @@ def main():
     check("stat_mode picks smallest-on-tie", np.allclose(mode.flatten(), [1, 2, 3]))
     check("stat_mode keeps old-scipy shape", mode.shape == (1, 3))
 
-    # ---- DLSS dll discovery ------------------------------------------------
+    # ---- DLSS dll discovery (models/DLSS, any filenames) --------------------
     from rfactor import model_paths
     from rfactor.dlssnr import discovery
 
-    os.makedirs(model_paths.DLSSNR_MODELS_PATH, exist_ok=True)
     check("no dll sets initially", discovery.discover_dll_sets() == [])
     check("combo always has refresh", "refresh" in discovery.combo_choices())
 
-    v1 = os.path.join(model_paths.DLSSNR_MODELS_PATH, "dlss5-rc1")
+    v1 = os.path.join(model_paths.DLSS_MODELS_PATH, "dlssnr_dlss5-rc1")
     os.makedirs(v1)
     check("empty dir is not a set", discovery.discover_dll_sets() == [])
-    for dll in discovery._REQUIRED_DLLS:
-        open(os.path.join(v1, dll), "wb").write(b"x")
+    # ANY filenames are a valid set now - engine identity is probed at load
+    open(os.path.join(v1, "helper_a.dll"), "wb").write(b"x")
+    open(os.path.join(v1, "helper_b.dll"), "wb").write(b"x")
     sets = discovery.discover_dll_sets()
-    check("complete set discovered", len(sets) == 1 and sets[0]["name"] == "dlss5-rc1" and sets[0]["complete"])
-    check("resolve by name", discovery.resolve_dll_dir("dlss5-rc1") == v1)
-    check("resolve auto -> complete set", discovery.resolve_dll_dir("auto") == v1)
+    check("set with arbitrary filenames discovered",
+          len(sets) == 1 and sets[0]["name"] == "dlssnr_dlss5-rc1" and sets[0]["complete"])
+    check("resolve by name", discovery.resolve_dll_dir("dlssnr_dlss5-rc1") == v1)
+    check("resolve auto -> first set", discovery.resolve_dll_dir("auto") == v1)
+    check("missing name falls back to auto", discovery.resolve_dll_dir("nope") == v1)
+    check("empty dir yields refresh-only combo fallback", "refresh" in discovery.combo_choices())
 
-    v2 = os.path.join(model_paths.DLSSNR_MODELS_PATH, "dlss5-rc2")
+    v2 = os.path.join(model_paths.DLSS_MODELS_PATH, "dlssnr_dlss5-rc2")
     os.makedirs(v2)
-    for dll in discovery._REQUIRED_DLLS[:2]:  # incomplete set
-        open(os.path.join(v2, dll), "wb").write(b"x")
+    open(os.path.join(v2, "whatever.dll"), "wb").write(b"x")
     sets = discovery.discover_dll_sets()
-    check("two sets listed, incomplete flagged",
-          len(sets) == 2 and sorted(s["complete"] for s in sets) == [False, True])
-    check("auto prefers the complete set", discovery.resolve_dll_dir("auto") == v1)
-    check("missing name falls back", discovery.resolve_dll_dir("nope") in (v1, v2))
+    check("two sets listed", len(sets) == 2 and all(sset["complete"] for sset in sets))
+    check("auto picks the first set", discovery.resolve_dll_dir("auto") == v1)
 
     # ---- safe_download -----------------------------------------------------
     from rfactor.download import safe_download
