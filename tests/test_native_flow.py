@@ -417,6 +417,18 @@ def main():
         return routed
     ngx.NgxModule.fn = fake_fn
 
+    # ---- shim module-identity check: a foreign nvngx under our handle
+    # ---- must raise the loud collision error naming both files
+    win32.get_module_filename = lambda handle, buf_len=1024: "C:\\Windows\\System32\\nvngx.dll"
+    from ants.dlsssr.errors import DlssSrError as _Exc
+    try:
+        ngx.NgxModule("fake/nvngx_dlssnr.dll", use_shim=True)
+        check("shim: foreign-module collision raises", False)
+    except _Exc as exc:
+        check("shim: foreign-module collision raises",
+              "collision" in str(exc) and "System32" in str(exc))
+    win32.get_module_filename = lambda handle, buf_len=1024: ""  # unknown = skip check
+
     device = D3D12Device.create()
     gpu = GpuContext(device, adapter_index=0)
     names = [entry[0] for entry in RECORD]

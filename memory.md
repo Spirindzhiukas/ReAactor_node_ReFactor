@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 272 checks + gates (details below, fixes after)
+- **Suite:** ALL GREEN — 273 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -151,6 +151,19 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   CreateCommandAllocator, CreateCommandList (slots + IIDs + call plumbing).
   Sandbox CANNOT verify: shim machine-thunk on Windows, real NGX runtime
   responses, remaining slot behavior under real drivers.
+- RIG run 6 (shim-first live): fwd_set_slots STILL missing on BOTH
+  attempts, including a first-run-in-fresh-process -> collision by another
+  module UNLIKELY; suspect #1 = Windows GetProcAddress refusing OUR
+  hand-built shim's export directory (LoadLibrary does NOT walk the export
+  dir; pefile validates structure, not Windows semantics; full header audit
+  found no defect but that proves little). FIX SHIPPED: exports now resolve
+  by BUILD-TIME-KNOWN RVAs (HMODULE = relocated base, ASLR-safe) with
+  GetProcAddress as cross-check -> shim works even if GetProcAddress is
+  fussy; win32.get_module_filename identity check names the ACTUAL file
+  under the handle (definitive collision vs parser verdict on next run);
+  get_proc error text now includes WinError. If run 7 still fails at
+  fwd_create the RVA answer was wrong (would mean the handle isn't our
+  image) - the identity check will say so explicitly.
 - RIG run 5 (post-restructure): (a) scale UnboundLocalError in the
   pre-denoise log block (my refactor left `if scale != 1` outside the else)
   - fixed; (b) fwd_set_slots GetProcAddress failure = WINDOWS LOADER BASE-

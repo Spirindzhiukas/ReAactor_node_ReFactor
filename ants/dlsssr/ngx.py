@@ -140,17 +140,32 @@ class NgxModule:
             fwd_path = shim_mod.write_shim(
                 forwarder_dir or writable_cache_dir("shim"))
             self._fwd_handle = win32.load_library(fwd_path)
-            try:
-                set_slots = win32.get_proc(self._fwd_handle, "fwd_set_slots")
-                fwd_create = win32.get_proc(self._fwd_handle, "fwd_create")
-            except DlssSrError as exc:
+            # Identity check: which FILE did Windows actually map under this
+            # handle? (The loader matches modules by base name.)
+            loaded_from = win32.get_module_filename(self._fwd_handle)
+            if loaded_from and os.path.normcase(loaded_from) != os.path.normcase(
+                    os.path.abspath(fwd_path)):
                 win32.free_library(self._fwd_handle)
                 self._fwd_handle = None
                 raise DlssSrError(
-                    f"{exc}\n    The shim (nvngx.dll) was loaded but its exports are missing -"
-                    "\n    a DIFFERENT nvngx.dll is already loaded in this process."
-                    "\n    Restart ComfyUI so our host loads first, and make sure no"
-                    "\n    other custom node preloads nvngx.dll.") from None
+                    "[ANTs] nvngx.dll module-name collision: our shim could not be "
+                    f"loaded as a distinct module.\n    We loaded: {fwd_path}"
+                    f"\n    Windows returned: {loaded_from}"
+                    "\n    Another nvngx.dll is already loaded in this process - "
+                    "restart ComfyUI so the ANTs host loads first.")
+            _, exports = shim_mod.build_shim_dll()
+
+            def resolve(name):
+                try:
+                    return win32.get_proc(self._fwd_handle, name)
+                except DlssSrError:
+                    # GetProcAddress refuses our hand-built export directory
+                    # (the loader maps the image fine, it just won't parse
+                    # it) - resolve via the build-time-known RVA instead.
+                    return win32.export_address(self._fwd_handle, exports[name])
+
+            set_slots = resolve("fwd_set_slots")
+            fwd_create = resolve("fwd_create")
             self._set_slots = win32.callable_at(
                 set_slots, [_CVOID, _CVOID, _CVOID], None)
             self._fwd_stub = win32.callable_at(fwd_create, [_CVOID], _CVOID)

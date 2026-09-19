@@ -45,9 +45,26 @@ def get_proc(module_handle, name):
     addr = _k32.GetProcAddress(ctypes.c_void_p(module_handle), ctypes.c_char_p(name.encode()))
     if not addr:
         raise DlssSrError(
-            f"[ANTs] Export {name!r} not found in the loaded module - the DLL is "
-            "not the runtime this host expects.")
+            f"[ANTs] Export {name!r} not found in the loaded module (WinError "
+            f"{ctypes.get_last_error()}) - the DLL is not the runtime this host expects.")
     return addr
+
+
+def get_module_filename(module_handle, buf_len=1024):
+    """The image path Windows loaded for this module handle ('' if unknown)."""
+    if not _is_windows or not module_handle:
+        return ""
+    buf = ctypes.create_unicode_buffer(buf_len)
+    if not _k32.GetModuleFileNameW(ctypes.c_void_p(module_handle), buf, buf_len):
+        return ""
+    return buf.value
+
+
+def export_address(module_handle, rva):
+    """Export address by KNOWN RVA: HMODULE is the loaded image base, so
+    base + RVA is the function even if GetProcAddress refuses to parse our
+    export directory (the loader maps the image without walking it)."""
+    return int(module_handle) + int(rva)
 
 
 def free_library(module_handle):
