@@ -26,9 +26,16 @@ stays a lean "what's next". Rules: `CLAUDE.md`. Facts: `memory.md`.
 - [x] Pre-SR denoise — owner-confirmed helping a lot (SCUNet favorites).
 - [ ] Owner tests NR Schedules: scheduler JS (dynamic rows, model-slot hiding), enhancer
       widget greying while wired, schedule off/on parity, per-pass denoise fallback.
-- [ ] DLSS model preset widget — FLIP TO ACTIVE when a future nvngx_dlssnr/neuroframe build
-      exposes a preset parameter (names researched: J Crisp / K Stable / L Quality / M Fast;
-      see RESEARCH doc §8). Track Merserk engine releases + NVIDIA DLL updates.
+- [x] DLSS preset mechanism SOLVED: presets are host-settable NGX params on nvngx_dlss.dll
+      (DLSS.Hint.Render.Preset.<Mode>) — the flip trigger is OUR OWN NGX host, not a
+      neuroframe ABI change (RESEARCH_dlss5_hybrid §8 + RESEARCH_dlss_sr_upscaler §3).
+- [ ] Owner runs tools/probe_dlss_rig.py on the rig (NGX core + nvngx_dlss.dll version +
+      engine exports report) and procures nvngx_dlss.dll into models/DLSS/dlss_<version>/.
+- [ ] Build rfactor/dlsssr/ — pure-Python ctypes NGX host (reference technique:
+      DLSS-Video-Transcoder; NVIDIA/DLSS SDK headers = the API source; never copy DVT code,
+      no LICENSE). Widgets after the host works: sr_upscale_mode (DLAA/Q/B/P/UP),
+      sr_preset (artist names), sr_return_interpolation (lanczos/... — output always
+      resized back to input). Zero-MV still quality = A/B on the rig first.
 - [ ] Future DLSS styles/modes: add to schedule.STYLES (single registry) — UI/parser/enhancer
       derive automatically.
 - [ ] Idea shortlist (owner asked "what else"): native dlss5nr_scene_score_v1 for temporal
