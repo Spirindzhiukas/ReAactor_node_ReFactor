@@ -412,6 +412,8 @@ class ReFactorDLSS5Enhancer:
                 elif temporal_history == "Auto (scene-aware)":
                     if use_cuda:
                         thumb = frame[::16, ::16].mean(axis=2).cpu().numpy()
+                    elif native:
+                        thumb = frame_t[::16, ::16].mean(axis=2).cpu().numpy()
                     else:
                         thumb = frame_np[::16, ::16].mean(axis=2)
                     if _prev_thumb is not None and _prev_thumb.shape == thumb.shape:
