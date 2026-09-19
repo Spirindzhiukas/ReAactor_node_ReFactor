@@ -9,12 +9,13 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 178 checks + gates (details below)
+- **Suite:** ALL GREEN — 181 checks + gates (details below)
 
 ## Shipped history (short)
 
 | Commit | What |
 |---|---|
+| pre-SR commit | DLSS5 pre-SR denoise: optional `denoise_model` socket (UPSCALE_MODEL via ANTsUpscaleModelLoader) + `pre_denoise_strength`; 1x denoisers (SCUNet, PureScale2 1x_PureVision) through the comfy-core mirror; resolution invariant; OIDN + OptiX rejected (MC-noise domain / device-side ABI) |
 | GPU commit | DLSS5 GPU acceleration: `gpu_acceleration` widget (Auto def / Force / CPU); `dlss5nr_process_cuda_v6` device-pointer path (torch primary-context interop, zero PCIe when VRAM-resident); HDR bridge torch backend (on-GPU); host fallback optimized; defaults owner-tuned to 220 nits / 1.0 scale (neutral) |
 | `588f790` | DLSS5 hybrid: HDR Colour Bridge (Classic def / Anchored / Off), OreX-style temporal history (Auto/Continuous/Per-frame reset), `models/DLSS/dlssnr_<version>/` discovery with ANY filenames (export probing), stale `CATEGORY` fixes, credits, `docs/RESEARCH_dlss5_hybrid.md` |
 | `88305cb` | Face Restoration pre-pass (main/dedicated model, ACTIVE toggle); consolidation 20→18 nodes; full ANTs rebrand (version v1.1.0-alpha1, `[ANTs]` prefix); RU comment sweep; README rebrand |
@@ -55,7 +56,9 @@ Utilities: `ANTsImageDuplicator`, `ANTsImageRGBA2RGB`, `ANTsUnload`.
   capability probe `cuda_available()` via `dlss5nr_cuda_supported()`; engine located by
   probing `.dll`s for the `dlss5nr_init` export), `discovery.py`
   (models/DLSS/dlssnr_<version> → flat models/DLSS → legacy models/dlssnr → package dll/),
-  `hdr_bridge.py` (numpy AND torch backends behind op shims — one math path; Classic:
+  optional `denoise_model` UPSCALE_MODEL socket + `pre_denoise_strength` (1x denoisers
+  via `rfactor/upscaler.py`, pre-engine), `hdr_bridge.py` (numpy AND torch backends behind
+  op shims — one math path; Classic:
   sRGB→lin → paper-white gain → extended-Reinhard knee → chroma-around-luma; Anchored:
   index-percentile-luma white point + black_lever; defaults 220 nits / 1.0 scale = neutral;
   float32 [0,1] HWC), `node.py` (`gpu_acceleration` Auto/Force/CPU widget; GPU-resident
@@ -82,7 +85,7 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | test_facerestore_routing.py | 21 | restore routing incl. e2e loud-failure |
 | test_detection_state_dict.py | 7 | detector state dicts |
 | test_upres.py | 27 | upRes/upscale paths |
-| test_dlssnr_bridge.py | 26 | HDR bridge math + defaults neutrality + models/DLSS discovery + loud error + GPU decision |
+| test_dlssnr_bridge.py | 29 | HDR bridge math + defaults neutrality + models/DLSS discovery + loud error + GPU decision |
 | smoke_import.py | — | import + 18-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 

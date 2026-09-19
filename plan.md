@@ -23,6 +23,9 @@ stays a lean "what's next". Rules: `CLAUDE.md`. Facts: `memory.md`.
 - [ ] Optional cleanup when convenient: `model_paths._migrate_legacy_dirs` off-by-one.
 - [ ] Consider replacing the numpy thumbnail scene heuristic with the engine's native
       `dlss5nr_scene_score_v1` export for temporal Auto mode.
+- [ ] Pre-SR denoise shipped (denoise_model socket): owner to pick favorite 1x models
+      (SCUNet / PureScale2 1x_PureVision / others) and report behavior at 4K + nr_passes 4
+      in GPU mode (denoiser adds VRAM-resident inference before the engine).
 - [ ] README screenshots/usage examples for the DLSS5 section (owner-provided, when he has them).
 
 ## 🌱 Long-term ideas (discussed, not committed)

@@ -109,6 +109,15 @@ def main():
     ok, _ = decide_cuda_acceleration(GPU_FORCE, True, True)
     check("cuda decision: force gpu available -> CUDA", ok)
 
+    # ---- pre-SR denoise blend (pure) ----
+    from rfactor.dlssnr.node import blend_frames
+    orig = frame.copy()
+    denoised = np.clip(frame + 0.2, 0.0, 1.0)
+    check("blend: amount 1 == processed", np.allclose(blend_frames(orig, denoised, 1.0), denoised))
+    check("blend: amount 0 == original", np.allclose(blend_frames(orig, denoised, 0.0), orig))
+    check("blend: 0.5 sits halfway",
+          np.allclose(blend_frames(orig, denoised, 0.5), (orig + denoised) / 2, atol=1e-6))
+
     # ---- dispatch ----
     check("apply_bridge dispatch + off",
           np.allclose(apply_bridge(frame, "off"), frame)

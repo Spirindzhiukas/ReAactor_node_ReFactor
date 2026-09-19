@@ -87,6 +87,10 @@ by name) — then pick the set in the node's `dll_version` selector (`auto` pick
 `refresh` re-scans after you add DLLs). `nvngx_dlssnr.dll` must be procured by you (NVIDIA's license
 prohibits redistributing it) — sources and licenses in `rfactor/dlssnr/dll_README.md`.
 
+**Pre-SR denoise (optional):** connect a 1x denoising/restoration model — `ANTs Upscale Model Loader` →
+the node's `denoise_model` socket (SCUNet, PureScale2 `1x_PureVision`, …) — it runs through the
+comfy-native tiled pipeline *before* the DLSS-NR engine, with a `pre_denoise_strength` blend.
+
 **GPU acceleration (on by default):** frames are processed GPU-resident through the engine's CUDA
 entry point (`dlss5nr_process_cuda_v6`) — zero PCIe copies when the batch already lives in VRAM,
 orders of magnitude faster at 4K and with `nr_passes` > 1. `CPU (host staging)` stays as a compat

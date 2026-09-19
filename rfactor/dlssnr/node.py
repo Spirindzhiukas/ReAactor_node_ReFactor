@@ -32,6 +32,19 @@ GPU_FORCE = "Force GPU (CUDA)"
 GPU_OFF = "CPU (host staging)"
 
 
+def blend_frames(base, processed, amount: float):
+    """Lerp two same-layout frames: amount 0 -> base, 1 -> processed.
+
+    Numpy or torch, agnostic (used for the pre-SR denoise strength).
+    """
+    amount = float(amount)
+    if amount >= 1.0 - 1e-4:
+        return processed
+    if amount <= 1e-4:
+        return base
+    return base * (1.0 - amount) + processed * amount
+
+
 def decide_cuda_acceleration(mode: str, torch_cuda_available: bool, engine_cuda_ok: bool):
     """Pure decision: run the CUDA device-pointer path? (unit-testable)"""
     if mode == GPU_OFF:
@@ -99,9 +112,13 @@ class ReFactorDLSS5Enhancer:
                                                     "tooltip": "Chroma preservation around luma in the bridge (1 = unchanged)."}),
                 "black_lever": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
                                           "tooltip": "Anchored mode only: restores the black floor after the highlight-anchored gain."}),
+                "pre_denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                                                   "tooltip": "Strength of the optional pre-SR denoise model (0 = off). "
+                                                              "Only matters when a denoise_model is connected."}),
             },
             "optional": {
                 "mask": ("MASK",),
+                "denoise_model": ("UPSCALE_MODEL",),
             }
         }
 
@@ -115,6 +132,9 @@ class ReFactorDLSS5Enhancer:
         "(Classic / Anchored, after RenoDX's DLSS 5 colour work by clshortfuse,\n"
         "MIT) + OreX-inspired temporal history (github.com/orex2121/\n"
         "ComfyUI-DLSS5-orex).\n"
+        "Optional pre-SR denoise: connect a 1x denoising/restoration model from\n"
+        "ANTs Upscale Model Loader (SCUNet, PureScale2 1x_PureVision, ...) - it\n"
+        "runs through the comfy-native tiled pipeline before the engine.\n"
         "Requirements:\n"
         "- NVIDIA display driver >= 616.x, RTX 40/50-series GPU\n"
         "- DLLs into ComfyUI/models/DLSS/dlssnr_<version>/ - ANY .dll filenames\n"
@@ -138,12 +158,33 @@ class ReFactorDLSS5Enhancer:
             gpu = self.manager.gpu_name() or f"GPU {self._ordinal}"
             logger.status(f"DLSS-5 Bridge initialized on {gpu} using DLL set: {dll_dir}")
 
+    def _pre_denoise_frame(self, frame, model, strength):
+        """Run a comfy-style 1x denoise/restoration model on one [H,W,C] torch
+        frame (any device), then blend it with the original by `strength`.
+
+        Uses the comfy-core mirror (spandrel model, tiled, OOM-aware); output
+        is resized back to the input resolution, so 1x models are identity-size
+        and larger models degrade gracefully into denoisers.
+        """
+        from ..upscaler import upscale_image_with_model
+
+        import comfy.utils
+
+        height, width = int(frame.shape[0]), int(frame.shape[1])
+        out = upscale_image_with_model(model, frame.unsqueeze(0))  # [1,h,w,3]
+        if tuple(out.shape[1:3]) != (height, width):
+            out = comfy.utils.common_upscale(out.movedim(-1, 1), width, height,
+                                             "lanczos", "disabled").movedim(1, -1)
+        out = out[0].to(device=frame.device, dtype=torch.float32)
+        return blend_frames(frame, out, float(strength))
+
     def enhance(self, image, dll_version, gpu_acceleration, style, intensity, local_tone,
                 local_structure, skin_structure, color_strength, tone_preservation,
                 face_skin_protection, grain_preservation, nr_passes, auto_mask,
                 temporal_history, scene_change_threshold,
                 hdr_bridge_mode, diffuse_white_nits, scene_paper_white_scale,
-                hdr_transfer_strength, bridge_color_strength, black_lever, mask=None):
+                hdr_transfer_strength, bridge_color_strength, black_lever,
+                pre_denoise_strength, denoise_model=None, mask=None):
 
         if dll_version == "refresh":
             discovery.combo_choices()  # re-scan; user then re-selects the new entry
@@ -176,6 +217,15 @@ class ReFactorDLSS5Enhancer:
             if not src_gpu.is_contiguous():
                 src_gpu = src_gpu.contiguous()
             torch.cuda.synchronize(cuda_dev)
+
+        denoise_active = denoise_model is not None and float(pre_denoise_strength) > 1e-4
+        if denoise_active:
+            scale = getattr(denoise_model, "scale", 1)
+            logger.status(f"DLSS5 pre-SR denoise: {scale}x model from the Upscale-Model pipeline, "
+                          f"strength {float(pre_denoise_strength):.2f}")
+            if scale != 1:
+                logger.status("DLSS5 pre-SR denoise note: non-1x model connected - its output is "
+                              "resized back to the input resolution before the engine.")
 
         bridge_kwargs = dict(
             diffuse_white_nits=float(diffuse_white_nits),
@@ -228,6 +278,8 @@ class ReFactorDLSS5Enhancer:
 
             if use_cuda:
                 frame = src_gpu[i]
+                if denoise_active:
+                    frame = self._pre_denoise_frame(frame, denoise_model, pre_denoise_strength)
                 dest = torch.empty_like(frame)
                 self.manager.process_cuda(
                     frame.data_ptr(), dest.data_ptr(),
@@ -242,6 +294,11 @@ class ReFactorDLSS5Enhancer:
 
                 out_tensor = dest if dest.device == self.device else dest.to(self.device)
             else:
+                if denoise_active:
+                    frame_t = torch.from_numpy(src_np[i])
+                    frame_t = self._pre_denoise_frame(frame_t, denoise_model, pre_denoise_strength)
+                    src_np[i] = frame_t.numpy()
+
                 self.manager.process_host(
                     source=src_np[i],
                     destination=dest_np,

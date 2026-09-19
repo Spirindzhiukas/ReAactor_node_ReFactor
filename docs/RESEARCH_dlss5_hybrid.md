@@ -79,17 +79,36 @@ OptiScaler_DLSSNR's credited port for the modern form). Implemented in
   `dlssnr/design/multi-point-anchoring.md`). `black_lever` then restores the
   shadow floor the gain lifted.
 
-## 4. "Denoise before upscaling (pre-SR)" — investigated, not implementable
+## 4. "Denoise before upscaling (pre-SR)" — shipped via the comfy upscale-model pipeline
 
 There is **no separate NVIDIA pre-SR denoise DLL** in the DLSS5 NR stack:
 denoising is part of what `nvngx_dlssnr.dll` itself does (NR = neural
-rendering with temporal denoise, driven by motion vectors/history). The
-ReShade "Denoise before upscaling" UI entries belong to addon/shader stacks
-(ReShade denoise shaders or third-party denoisers feeding the NR input), not
-to the NGX runtime. In our single-image context temporal denoising is
-inherently limited (no motion vectors); the honest levers are the helper's
-`nr_passes` (already exposed) and, if ever wanted, an external CPU denoiser
-(e.g. OIDN) as a new dependency — not planned.
+rendering with temporal denoise, driven by motion vectors/history). The two
+"native" denoiser routes were evaluated and rejected:
+
+- **OIDN** — trained on Monte-Carlo path-tracing noise patterns, which
+  generated images usually lack; near-useless here (the owner runs OIDN
+  separately, with a noise injector that simulates path-tracing noise, for
+  the renders that actually need it).
+- **OptiX denoiser (driver-shipped)** — its guide buffers (albedo/normal)
+  are in fact optional since OptiX 7.x, so "needs render passes" is only
+  half-true; the real blockers are (a) invocation through the OptiX
+  device-side ABI — no ctypes-callable export, we would have to ship a
+  compiled CUDA/OptiX host program (the OreX-native-bridge class of effort),
+  and (b) the model is still MC-noise-domain, same mismatch as OIDN.
+
+Shipped instead (owner's idea): **reuse the comfy Upscale-Model pipeline as
+the pre-SR denoise stage** — `ANTsUpscaleModelLoader` → optional
+`denoise_model` socket on the DLSS5 node + `pre_denoise_strength` blend.
+1x pure-denoise/restoration models are a perfect fit: **SCUNet** (1x,
+`scunet_color_real_psnr/gan`) and **PureScale2 `1x_PureVision`**
+(limitlesslab, ESRGAN-pixel-unshuffle restoration model trained on
+compression artifacts + moderate noise, explicitly intended "as a
+preparatory step before upscaling"). The stage runs through our
+comfy-core-mirrored `rfactor/upscaler.py` (spandrel loading, tiled
+inference, OOM tile-halving), keeps the frame resolution invariant (non-1x
+model outputs are resized back), works on-GPU in the CUDA path, and blends
+by strength. Credit: limitlesslab (PureScale), Zhang et al. (SCUNet).
 
 ## 5. Credits
 
