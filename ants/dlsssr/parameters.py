@@ -123,8 +123,13 @@ class OwnParameterObject:
         self._vtable[SLOT_RESET] = ctypes.cast(self._reset_cb, _CVOID).value
 
         # The object's first field points at the vtable.
-        object_type = ctypes.c_void_p * 1
-        self._object = object_type(ctypes.cast(self._vtable, _CVOID))
+        # 64-byte object (first field -> vtable): some runtimes touch bytes
+        # beyond the pointer; a tight 8-byte allocation turns any stray
+        # access into heap corruption (observed as a crash inside the very
+        # first EvaluateFeature - rig run 15; DVT pads for the same reason)
+        object_type = ctypes.c_void_p * 8
+        self._object = object_type(ctypes.cast(self._vtable, _CVOID),
+                                   None, None, None, None, None, None, None)
 
     @property
     def ptr(self):

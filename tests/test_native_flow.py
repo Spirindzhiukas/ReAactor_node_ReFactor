@@ -535,7 +535,11 @@ def main():
           f"len={len(out)}")
     check("nr: engine consumed our param object",
           FakeNgxModule.own_store.get("DLSSNR.Style") == 1          # Natural
-          and FakeNgxModule.own_store.get("DLSSNR.Width") == W)
+          and FakeNgxModule.own_store.get("DLSSNR.Width") == W
+          and FakeNgxModule.own_store.get("DLSSNR.UICorrection") == 0)
+    import ctypes as _ct2
+    check("nr: parameter object is 64-byte padded (stray-read safe)",
+          _ct2.sizeof(sess.ngx.params._object) == 64)
 
     payload2 = bytes((i * 7 + 3) & 0xFF for i in range(W * H * 4))
     out2 = sess.evaluate(payload2, reset=False)

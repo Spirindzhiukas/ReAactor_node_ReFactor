@@ -313,6 +313,10 @@ class NgxSession:
                 f"(0x{code:08X} = {name}). The installed runtime may not "
                 "support this feature or parameter set.")
         self.handle = out.value
+        if not self.handle:
+            raise DlssSrError(
+                f"[ANTs] NGX CreateFeature(feature {feature_id}) reported "
+                "success but returned a NULL feature handle.")
         self.gpu.submit_and_wait()
         return self.handle
 

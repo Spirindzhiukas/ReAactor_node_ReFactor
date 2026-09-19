@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 284 checks + gates (details below, fixes after)
+- **Suite:** ALL GREEN — 286 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -167,6 +167,19 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - LEGACY engine: helper locates files by LITERAL 'nvngx_dlssnr.dll' name;
   owner's RenoDX-named build -> stage_legacy_runtime() copies the set to
   a writable dir under canonical names; manager gets the stage dir.
+- RIG run 15 (post-unwind-info): **Init(classic) hr=1 + CreateFeature(18)
+  hr=1 on the RenoDX runtime - the host handshake is ACCEPTED**; death is
+  INSIDE the first EvaluateFeature (server stuck/dies, frontend
+  reconnecting forever). Diffed every layer vs DVT: vtable layout IDENTICAL,
+  param names IDENTICAL (DLSSNR.*), PerfQuality DLAA=5 same, eval flow same.
+  Deltas fixed: our parameter OBJECT was 8 bytes (DVT pads 64 "so stray
+  reads stay inside our memory" - heap corruption on stray access = crash
+  inside first evaluate signature); added DLSSNR.UICorrection (DVT parity);
+  NULL-handle check after CreateFeature. PENDING DIAGNOSTICS from owner:
+  (a) NGX's own logs at %LOCALAPPDATA%/ANTs/appdata/logs (we set that as
+  appDataPath - the RUNTIME writes its view there), (b) Task Manager at
+  hang: python.exe alive (deadlock) or gone (AV), (c) Event Viewer
+  python.exe Application Error: faulting module + exception code.
 - RIG run 14 (first run with Claude's fix): HARD PROCESS CRASH, no
   traceback, right after load_bridge logs - the first time the REAL thunk
   machine code executed (the trampoline bug meant the thunk bytes were

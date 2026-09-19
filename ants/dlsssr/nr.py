@@ -61,6 +61,7 @@ class DlssNrSession:
         p.set_u32("CreationNodeMask", 1)
         p.set_u32("VisibilityNodeMask", 1)
         p.set_u32("DLSSNR.Enabled", 1)
+        p.set_u32("DLSSNR.UICorrection", 0)
         p.set_i32("DLSSNR.Hint.Render.Preset", int(nr_preset))
 
         self.ngx.create_feature(FEATURE_NR)
@@ -85,6 +86,7 @@ class DlssNrSession:
         p.set_f32("DLSSNR.SkinStructureStrength", s["skin_structure"])
         p.set_u32("DLSSNR.Style", s["style"])
         p.set_u32("DLSSNR.UseAutoMask", 1 if s["auto_mask"] else 0)
+        p.set_u32("DLSSNR.UICorrection", 0)
         # Best-effort extras (inert when this build lacks the parameter):
         p.set_f32("DLSSNR.GlobalToneStrength", s["tone_preservation"])
         p.set_f32("DLSSNR.ColorStrength", s["color_strength"])
