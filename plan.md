@@ -23,9 +23,18 @@ stays a lean "what's next". Rules: `CLAUDE.md`. Facts: `memory.md`.
 - [ ] Optional cleanup when convenient: `model_paths._migrate_legacy_dirs` off-by-one.
 - [ ] Consider replacing the numpy thumbnail scene heuristic with the engine's native
       `dlss5nr_scene_score_v1` export for temporal Auto mode.
-- [ ] Pre-SR denoise shipped (denoise_model socket): owner to pick favorite 1x models
-      (SCUNet / PureScale2 1x_PureVision / others) and report behavior at 4K + nr_passes 4
-      in GPU mode (denoiser adds VRAM-resident inference before the engine).
+- [x] Pre-SR denoise — owner-confirmed helping a lot (SCUNet favorites).
+- [ ] Owner tests NR Schedules: scheduler JS (dynamic rows, model-slot hiding), enhancer
+      widget greying while wired, schedule off/on parity, per-pass denoise fallback.
+- [ ] DLSS model preset widget — FLIP TO ACTIVE when a future nvngx_dlssnr/neuroframe build
+      exposes a preset parameter (names researched: J Crisp / K Stable / L Quality / M Fast;
+      see RESEARCH doc §8). Track Merserk engine releases + NVIDIA DLL updates.
+- [ ] Future DLSS styles/modes: add to schedule.STYLES (single registry) — UI/parser/enhancer
+      derive automatically.
+- [ ] Idea shortlist (owner asked "what else"): native dlss5nr_scene_score_v1 for temporal
+      Auto; per-pass optional preview outputs (pass 1 vs final); per-pass timing log lines
+      (helps tune schedules); VRAM headroom via dlss5nr_cuda_status; shareable schedule-preset
+      JSON strings.
 - [ ] README screenshots/usage examples for the DLSS5 section (owner-provided, when he has them).
 
 ## 🌱 Long-term ideas (discussed, not committed)

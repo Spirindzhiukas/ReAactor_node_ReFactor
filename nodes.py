@@ -37,7 +37,7 @@ from .rfactor.loaders import (
     ReFactorUpscaleModelLoader,
     detection_model_name,
 )
-from .rfactor.dlssnr import ReFactorDLSS5Enhancer
+from .rfactor.dlssnr import DLSSNRScheduler, ReFactorDLSS5Enhancer
 from .rfactor.torch_utils import normalize_ as normalize, stat_mode
 from .rfactor.upscaler import upscale_bgr_face
 from .rfactor.upres import (
@@ -1196,6 +1196,7 @@ NODE_CLASS_MAPPINGS = {
     "ANTsImageRGBA2RGB": ReFactorImageRGBA2RGB,
     "ANTsUnload": ReFactorUnload,
     "ANTsDLSS5Enhancer": ReFactorDLSS5Enhancer,
+    "ANTsDLSSNRScheduler": DLSSNRScheduler,
     # --- Model Loaders ---
     "ANTsFaceSwapModelLoader": ReFactorFaceSwapModelLoader,
     "ANTsFaceRestoreModelLoader": ReFactorFaceRestoreModelLoader,
@@ -1221,6 +1222,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ANTsImageRGBA2RGB": "ANTs⚡Convert RGBA to RGB",
     "ANTsUnload": "ANTs⚡Unload Models",
     "ANTsDLSS5Enhancer": "ANTs⚡DLSS5 Frame Enhancer",
+    "ANTsDLSSNRScheduler": "ANTs⚡DLSS NR Scheduler",
     # --- Model Loaders ---
     "ANTsFaceSwapModelLoader": "ANTs⚡FaceSwap Model Loader",
     "ANTsFaceRestoreModelLoader": "ANTs⚡FaceRestore Model Loader",

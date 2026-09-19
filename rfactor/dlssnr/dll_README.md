@@ -17,6 +17,21 @@ its exports at load time, not by name; OreX-style single-file sets work too).
 Legacy locations (`models/dlssnr/<version>/`, the package `dll/` folder) are
 still scanned as fallbacks.
 
+### Recommended folder naming — DLSS model presets as versions
+
+The current `nvngx_dlssnr` runtime exposes **no model-preset parameter**
+(verified by OreX against the DLL string table: 61 `DLSSNR.*` parameters,
+none for model selection), so a preset = which DLL build you install. Name
+your version folders after the preset, with the community/artist names:
+
+| Folder | Preset | Artist name |
+|---|---|---|
+| `dlssnr_J_Transformer1_Crisp` | J | Transformer I · Crisp (sharpest, a bit more flicker) |
+| `dlssnr_K_Transformer1_Stable` | K | Transformer I · Stable (DLSS 4 "Latest") |
+| `dlssnr_L_Transformer2_Quality` | L | Transformer II · Quality (heavy, Ultra-Perf default) |
+| `dlssnr_M_Transformer2_Fast` | M | Transformer II · Fast (Performance default) |
+| `dlssnr_Default` | — | whatever the installed build ships as default |
+
 <sub>* neuroframe helper author [Merserk](https://github.com/Merserk), [LICENSE](https://huggingface.co/datasets/Gourieff/ReActor/blob/main/DLSSNR/LICENSE-Merserk.txt)
 <br>
 ** Public distribution of this file is prohibited by NVIDIA, [LICENSE](https://huggingface.co/datasets/Gourieff/ReActor/blob/main/DLSSNR/LICENSE-NVIDIA-DLSS.txt)

@@ -12,7 +12,7 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
 - Lineage: fork/rework of Gourieff's ComfyUI-ReActor face-swap nodepack, rebranded to the
   **ANTs⚡** node family. **No backward workflow compatibility is required** — the owner
   explicitly authorized breaking old node names/workflows.
-- Node surface: **18 nodes**, all prefixed `ANTs` (census in `memory.md`).
+- Node surface: **19 nodes**, all prefixed `ANTs` (census in `memory.md`).
 
 ## Owner standing rules (do not violate; ask before changing any)
 

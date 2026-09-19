@@ -155,3 +155,66 @@ at runtime instead, which also covers older engine builds gracefully.
 
 Future option: the engine also exports `dlss5nr_scene_score_v1` — a native scene-change
 score that could replace our numpy thumbnail heuristic for temporal Auto mode.
+
+## 7. NR Schedules (owner design) — shipped, replacing nr_passes
+
+The engine's ``nr_passes`` repeats the SAME reconstruction N times. The
+owner chained node instances (Nature → Cinematic → Nature → Default, one
+pass each) and the results beat monolithic ``nr_passes = 4`` decisively.
+Schedules productize that: the ANTs⚡DLSS NR Scheduler node emits an
+``NR_SCHEDULE`` bundle the enhancer consumes (``use_nr_schedule`` toggle,
+default OFF):
+
+- pass count 1..8 (default 2); a **style per pass** — varied by default
+  (Nature/Cinematic cycle), which is the whole point;
+- ``use_per_pass_settings`` (default OFF): full per-pass control
+  (intensity, local tone/structure, skin structure, color strength, tone
+  preservation, face-skin/grain protection, auto-mask) that **completely
+  bypasses** the main node's matching widgets;
+- ``use_per_pass_denoise`` (default OFF): per-pass pre-SR denoise strength
+  + dedicated denoise-model slots (4 fixed optional inputs, shown/hidden by
+  the JS UI with the pass count); unselected passes inherit the main node's
+  ``denoise_model``/``pre_denoise_strength`` (owner-specified default);
+- passes CHAIN: each pass re-processes the previous pass's output (the
+  validated chaining pattern); temporal history is a main-node-only setting
+  applied to every pass; the HDR Colour Bridge stays global and is applied
+  once, after the final pass; GPU acceleration likewise;
+- JS UIs (``web/dlss5_nr_schedule.js``, served via ``WEB_DIRECTORY =
+  "./web"``): the scheduler renders the dynamic per-pass rows and
+  serializes them into the ``schedule_data`` widget; the enhancer greys out
+  (⛓ label) the widgets the schedule bypasses. Both sides talk through pure
+  graph state (properties + widget values) — no execution required.
+  Python is the source of truth: ``schedule.py`` re-validates everything,
+  pads short lists, clamps numbers, and raises loud ``[ANTs]`` errors on
+  structural garbage; empty ``schedule_data`` = synthesized default plan
+  (API/headless workflows work without the JS).
+- ``nr_passes`` is removed from the enhancer entirely; the engine always
+  receives ``nr_passes = 1`` per scheduled call.
+
+Future DLSS styles/modes: add to ``schedule.STYLES`` (single registry) —
+scheduler UI, parser validation and the enhancer all derive from it.
+
+## 8. DLSS model presets (J/K/L/M) — researched; no honest widget exists today
+
+Community/NVIDIA lore (r/nvidia DLSS 4.5 PSA, NVIDIA App notes):
+
+| Letter | Artist name (ours) | What it is |
+|---|---|---|
+| J | **Transformer I · Crisp** | first-gen transformer (DLSS 4); sharpest static detail, a bit more flicker; "Latest" for Ray Reconstruction |
+| K | **Transformer I · Stable** | refined first-gen; less ghosting/flicker; DLSS 4 "Latest" for Super Resolution; default for DLAA/Quality/Balanced |
+| L | **Transformer II · Quality** | second-gen (DLSS 4.5); sharper + more stable, heaviest; Ultra Performance default |
+| M | **Transformer II · Fast** | second-gen (DLSS 4.5); ~L quality at J/K speed; Performance default; peak-performant on RTX 40+ |
+
+Hard fact (OreX, verified against the nvngx_dlssnr.dll string table): the
+feature-18 runtime exposes **no model-preset parameter** — "61 DLSSNR.*
+parameters, none for model selection". His ``dlss_model_preset``
+(Default/J/K/L/M → 0/10/11/12/13) is shipped explicitly as *reserved —
+validated but does not change the output*; his earlier NR-preset combo
+(DLSSNR.Hint.Render.Preset 0..3) was removed in v0.9.22 as inert on
+current builds. Our neuroframe ABI v6 has no preset field either, so there
+is nowhere to send the value.
+
+Therefore: **preset selection today = which nvngx_dlssnr build you install**
+→ our ``dll_version`` selector with the recommended artist-named folder
+convention (see ``rfactor/dlssnr/dll_README.md``). Flip-to-widget trigger
+(kept in plan.md): a future engine/dll exposing a preset parameter.

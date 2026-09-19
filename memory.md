@@ -9,12 +9,13 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 181 checks + gates (details below)
+- **Suite:** ALL GREEN — 213 checks + gates (details below)
 
 ## Shipped history (short)
 
 | Commit | What |
 |---|---|
+| NR-schedule commit | NR Schedules: ANTs⚡DLSS NR Scheduler node (19 total) emits NR_SCHEDULE; style-per-pass (Nature/Cinematic cycle default), per-pass settings (bypass main widgets), per-pass denoise w/ 4 model slots (inherit main model); passes chain, bridge global post-final-pass; JS UIs in web/ (dynamic rows + live cross-node greying); schedule.py pure validated core; nr_passes removed. Preset verdict: nvngx_dlssnr has NO model-preset param (OreX string-table verify); presets = dll_version folders, artist names table in dll_README (J Crisp / K Stable / L Quality / M Fast) |
 | pre-SR commit | DLSS5 pre-SR denoise: optional `denoise_model` socket (UPSCALE_MODEL via ANTsUpscaleModelLoader) + `pre_denoise_strength`; 1x denoisers (SCUNet, PureScale2 1x_PureVision) through the comfy-core mirror; resolution invariant; OIDN + OptiX rejected (MC-noise domain / device-side ABI) |
 | GPU commit | DLSS5 GPU acceleration: `gpu_acceleration` widget (Auto def / Force / CPU); `dlss5nr_process_cuda_v6` device-pointer path (torch primary-context interop, zero PCIe when VRAM-resident); HDR bridge torch backend (on-GPU); host fallback optimized; defaults owner-tuned to 220 nits / 1.0 scale (neutral) |
 | `588f790` | DLSS5 hybrid: HDR Colour Bridge (Classic def / Anchored / Off), OreX-style temporal history (Auto/Continuous/Per-frame reset), `models/DLSS/dlssnr_<version>/` discovery with ANY filenames (export probing), stale `CATEGORY` fixes, credits, `docs/RESEARCH_dlss5_hybrid.md` |
@@ -27,6 +28,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
 Loaders (typed-socket pattern): `ANTsFaceSwapModelLoader` → FACE_SWAP_MODEL,
 `ANTsFaceRestoreModelLoader` → FACE_RESTORE_MODEL, `ANTsFaceDetectionModelLoader` → FACE_DETECT_MODEL,
 `ANTsUpscaleModelLoader` → UPSCALE_MODEL.
+Scheduler: `ANTsDLSSNRScheduler` → NR_SCHEDULE (consumed by the DLSS5 enhancer's nr_schedule socket; use_nr_schedule toggle).
 Pipeline: `ANTsFaceDancer` (main node: swap + optional restore + pre-pass + options socket),
 `ANTsOptions` (options bundle via OPTIONS socket), `ANTsFaceRestore`, `ANTsFaceSimilarity`,
 `ANTsMaskBuilder`, `ANTsDLSS5Enhancer` (class `ReFactorDLSS5Enhancer`, display
@@ -47,7 +49,7 @@ Utilities: `ANTsImageDuplicator`, `ANTsImageRGBA2RGB`, `ANTsUnload`.
   upscale models (stub seam for tests: `upscale_image_with_model`).
 - `rfactor/masking/` — Mask Builder (ultralytics-free: SAM3/SAM2/RMBG sockets + built-in
   feathered fallback).
-- `rfactor/dlssnr/` — DLSS5 node: `core.py` (ctypes ABI **v6** struct: style/intensity/tone/
+- `rfactor/dlssnr/` — DLSS5 nodes: `schedule.py` (pure NR-schedule core: parse/validate/clamp/pad, build_pass_plan bypass semantics, STYLES registry for future modes), `scheduler_node.py` (ANTsDLSSNRScheduler → NR_SCHEDULE + 4 denoise model slots, early loud slot validation), `web/dlss5_nr_schedule.js` via root WEB_DIRECTORY (scheduler dynamic per-pass rows → schedule_data JSON; enhancer greys bypassed widgets ⛓; pure graph-state sync), `core.py` (ctypes ABI **v6** struct: style/intensity/tone/
   structure/skin/automask/reset/color_strength/tone_preservation/mask/face_skin_protection/
   grain_preservation/nr_passes/shimmer_suppression/prefer_nvof; `dlss5nr_init(ordinal,
   dll_dir, err)` with 4096-char error buffer; HOST path `dlss5nr_process_v6` + CUDA path
@@ -86,10 +88,11 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | test_detection_state_dict.py | 7 | detector state dicts |
 | test_upres.py | 27 | upRes/upscale paths |
 | test_dlssnr_bridge.py | 29 | HDR bridge math + defaults neutrality + models/DLSS discovery + loud error + GPU decision |
+| test_nr_schedule.py | 32 | schedule parse/validate/pad, plan bypass + denoise fallback, loud slot errors, node surface (nr_passes gone) |
 | smoke_import.py | — | import + 18-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 178 checks, all green at the GPU commit.** Sandbox venv: numpy, opencv-python-headless,
+**Total: 213 checks, all green at the NR-schedule commit (19 nodes).** Sandbox venv: numpy, opencv-python-headless,
 pillow, pyflakes, pefile (NO torch — stub harness only). huggingface.co is TLS-blocked from the
 sandbox (DLL zips can't be downloaded there — verify engine versions on the owner rig).
 
@@ -112,7 +115,8 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 ## Awaiting owner feedback
 
 - Options-socket part of `88305cb` (ANTsOptions → ANTsFaceDancer) — not yet owner-tested.
-- DLSS5 hybrid of `588f790` + GPU acceleration commit: Classic/Anchored/Off bridge with
-  owner-tuned neutral defaults (220 nits / 1.0), temporal modes, GPU Acceleration Auto
-  (expect ~OreX-class speed at 4K/nr4), CPU fallback, DLL location `models/DLSS/dlssnr_<version>/`
-  with any filenames.
+- DONE (owner-confirmed): GPU acceleration ("speed on par with OreX"), pre-SR denoise via
+  upscale models ("helps a lot"; scunet_color_real_gan/psnr favorites).
+- DLSS5 bridge/temporal/discovery: owner has the speed result; bridge defaults 220/1.0 in place.
+- NR Schedules (new): scheduler JS dynamics + enhancer greying in a real browser, schedule
+  off/on parity, per-pass settings bypass, per-pass denoise slots, 4K multi-pass speed.

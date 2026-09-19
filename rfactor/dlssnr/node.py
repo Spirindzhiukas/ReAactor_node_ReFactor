@@ -19,6 +19,7 @@ from ..utils import (
     progress_bar_reset,
 )
 from . import discovery
+from . import schedule as nr_schedule_lib
 from .core import DLSSStandaloneManager
 from .hdr_bridge import (
     DIFFUSE_WHITE_NITS_DEFAULT,
@@ -79,6 +80,11 @@ class ReFactorDLSS5Enhancer:
                                                  "batch already lives in VRAM; orders of magnitude faster at 4K and "
                                                  "with nr_passes > 1. CPU: legacy host staging (compat fallback). "
                                                  "If the engine DLL is too old for CUDA, a clear error tells you."}),
+                "use_nr_schedule": ("BOOLEAN", {"default": False, "label_off": "OFF", "label_on": "ON",
+                                                "tooltip": "Replace the engine's single-pass reconstruction with a multi-pass "
+                                                           "NR Schedule from the ANTs DLSS NR Scheduler node (varied styles per "
+                                                           "pass - measurably better than the old nr_passes repeat). When the "
+                                                           "schedule carries per-pass settings, those bypass this node's widgets."}),
                 "style": (["Default", "Nature", "Cinematic"],),
                 "intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "0..2, def: 1.0"}),
                 "local_tone": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "0..2, def: 0.0"}),
@@ -88,7 +94,6 @@ class ReFactorDLSS5Enhancer:
                 "tone_preservation": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "0..1, def: 0.5"}),
                 "face_skin_protection": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "0..1, def: 0.0"}),
                 "grain_preservation": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "0..1, def: 0.0"}),
-                "nr_passes": ("INT", {"default": 1, "min": 1, "max": 4, "tooltip": "0..4, def: 1"}),
                 "auto_mask": ("BOOLEAN", {"default": False, "label_off": "OFF", "label_on": "ON", "tooltip": "Smart Protection Mask"}),
                 "temporal_history": (["Auto (scene-aware)", "Continuous", "Per-frame reset"],
                                      {"default": "Auto (scene-aware)",
@@ -119,6 +124,7 @@ class ReFactorDLSS5Enhancer:
             "optional": {
                 "mask": ("MASK",),
                 "denoise_model": ("UPSCALE_MODEL",),
+                "nr_schedule": ("NR_SCHEDULE",),
             }
         }
 
@@ -178,28 +184,49 @@ class ReFactorDLSS5Enhancer:
         out = out[0].to(device=frame.device, dtype=torch.float32)
         return blend_frames(frame, out, float(strength))
 
-    def enhance(self, image, dll_version, gpu_acceleration, style, intensity, local_tone,
-                local_structure, skin_structure, color_strength, tone_preservation,
-                face_skin_protection, grain_preservation, nr_passes, auto_mask,
-                temporal_history, scene_change_threshold,
+    def enhance(self, image, dll_version, gpu_acceleration, use_nr_schedule, style,
+                intensity, local_tone, local_structure, skin_structure,
+                color_strength, tone_preservation, face_skin_protection,
+                grain_preservation, auto_mask, temporal_history, scene_change_threshold,
                 hdr_bridge_mode, diffuse_white_nits, scene_paper_white_scale,
                 hdr_transfer_strength, bridge_color_strength, black_lever,
-                pre_denoise_strength, denoise_model=None, mask=None):
+                pre_denoise_strength, denoise_model=None, nr_schedule=None, mask=None):
 
         if dll_version == "refresh":
             discovery.combo_choices()  # re-scan; user then re-selects the new entry
 
         self.load_bridge(dll_version)
 
-        style_map = {"Default": 0, "Nature": 1, "Cinematic": 2}
         settings = {
-            "style": style_map[style], "intensity": intensity, "local_tone": local_tone,
-            "local_structure": local_structure, "skin_structure": skin_structure,
-            "color_strength": color_strength, "tone_preservation": tone_preservation,
-            "face_skin_protection": face_skin_protection, "grain_preservation": grain_preservation,
-            "nr_passes": nr_passes, "auto_mask": auto_mask,
+            "style": nr_schedule_lib.STYLES[style], "intensity": intensity,
+            "local_tone": local_tone, "local_structure": local_structure,
+            "skin_structure": skin_structure, "color_strength": color_strength,
+            "tone_preservation": tone_preservation,
+            "face_skin_protection": face_skin_protection,
+            "grain_preservation": grain_preservation, "auto_mask": auto_mask,
+            "nr_passes": 1,  # schedules replace the engine-side repeat counter
             "shimmer_suppression": 0.0, "prefer_nvof": False
         }
+
+        # ---- resolve the per-pass plan (schedules vs single pass) ----
+        if use_nr_schedule:
+            if not nr_schedule or not isinstance(nr_schedule, dict) or "schedule" not in nr_schedule:
+                raise RuntimeError(
+                    "[ANTs] Use NR Schedule is ON, but no NR_SCHEDULE is connected. "
+                    "Add an 'ANTs DLSS NR Scheduler' node and connect its nr_schedule "
+                    "output to this node's nr_schedule input.")
+            plan = nr_schedule_lib.build_pass_plan(
+                nr_schedule["schedule"], nr_schedule.get("denoise_models", ()),
+                main_settings=settings,
+                main_denoise_model=denoise_model,
+                main_denoise_strength=float(pre_denoise_strength))
+            logger.status(f"ANTs DLSS5 NR Schedule engaged: {nr_schedule_lib.describe(nr_schedule['schedule'])}")
+        else:
+            plan = [{
+                "style": settings["style"], "settings": settings,
+                "denoise_model": denoise_model,
+                "denoise_strength": float(pre_denoise_strength) if denoise_model is not None else 0.0,
+            }]
 
         enhanced_batch = []
 
@@ -218,11 +245,14 @@ class ReFactorDLSS5Enhancer:
                 src_gpu = src_gpu.contiguous()
             torch.cuda.synchronize(cuda_dev)
 
-        denoise_active = denoise_model is not None and float(pre_denoise_strength) > 1e-4
-        if denoise_active:
-            scale = getattr(denoise_model, "scale", 1)
-            logger.status(f"DLSS5 pre-SR denoise: {scale}x model from the Upscale-Model pipeline, "
-                          f"strength {float(pre_denoise_strength):.2f}")
+        denoise_passes = [i + 1 for i, spec in enumerate(plan)
+                          if spec["denoise_model"] is not None and spec["denoise_strength"] > 1e-4]
+        if denoise_passes:
+            first = next(spec["denoise_model"] for spec in plan
+                         if spec["denoise_model"] is not None)
+            scale = getattr(first, "scale", 1)
+            logger.status(f"DLSS5 pre-SR denoise on pass(es) {denoise_passes}: "
+                          f"{scale}x model from the Upscale-Model pipeline")
             if scale != 1:
                 logger.status("DLSS5 pre-SR denoise note: non-1x model connected - its output is "
                               "resized back to the input resolution before the engine.")
@@ -240,13 +270,15 @@ class ReFactorDLSS5Enhancer:
         _prev_thumb = None
 
         src_np = None
-        dest_np = None
+        cpu_bufs = None
         if not use_cuda:
-            # legacy host staging: convert the batch ONCE, reuse one
-            # destination buffer across frames (still correct: the engine
-            # writes every pixel of it per call)
+            # legacy host staging: convert the batch ONCE; multi-pass plans
+            # ping-pong between two destination buffers (the engine must
+            # never read and write the same memory in one call)
             src_np = np.ascontiguousarray(image.cpu().numpy().astype(np.float32))
-            dest_np = np.empty_like(src_np[0])
+            cpu_bufs = [np.empty_like(src_np[0])]
+            if len(plan) > 1:
+                cpu_bufs.append(np.empty_like(src_np[0]))
 
         for i in range(len(image)):
 
@@ -254,60 +286,79 @@ class ReFactorDLSS5Enhancer:
                 logger.status("Interrupted by User")
                 break
 
-            # temporal history: decide the reset for this frame (OreX-style
-            # scene-aware auto, at frame level)
-            do_reset = True
-            if temporal_history == "Continuous":
-                do_reset = _reset_next
-            elif temporal_history == "Auto (scene-aware)":
-                if use_cuda:
-                    thumb = src_gpu[i][::16, ::16].mean(axis=2).cpu().numpy()
-                else:
-                    thumb = src_np[i][::16, ::16].mean(axis=2)
-                if _prev_thumb is not None and _prev_thumb.shape == thumb.shape:
-                    diff = float(np.abs(thumb - _prev_thumb).mean())
-                    do_reset = diff > float(scene_change_threshold)
-                else:
-                    do_reset = True
-                _prev_thumb = thumb
-            _reset_next = False
+            if use_cuda:
+                frame = src_gpu[i]
+            else:
+                frame_np = src_np[i]
 
             mask_np = None
             if mask is not None:
                 mask_np = np.ascontiguousarray(mask[i].cpu().numpy().astype(np.float32))
 
+            # NR schedule: passes chain (each pass re-processes the previous
+            # pass output - the owner-validated pattern). Temporal history is
+            # a main-node-only setting applied to every pass.
+            for pass_idx, pass_spec in enumerate(plan):
+                pass_settings = {"style": pass_spec["style"],
+                                 **pass_spec["settings"],
+                                 "nr_passes": 1,
+                                 "shimmer_suppression": 0.0, "prefer_nvof": False}
+
+                # temporal history: decided per pass input (OreX-style
+                # scene-aware auto at frame level)
+                do_reset = True
+                if temporal_history == "Continuous":
+                    do_reset = _reset_next
+                elif temporal_history == "Auto (scene-aware)":
+                    if use_cuda:
+                        thumb = frame[::16, ::16].mean(axis=2).cpu().numpy()
+                    else:
+                        thumb = frame_np[::16, ::16].mean(axis=2)
+                    if _prev_thumb is not None and _prev_thumb.shape == thumb.shape:
+                        diff = float(np.abs(thumb - _prev_thumb).mean())
+                        do_reset = diff > float(scene_change_threshold)
+                    else:
+                        do_reset = True
+                    _prev_thumb = thumb
+                _reset_next = False
+
+                d_model = pass_spec["denoise_model"]
+                d_strength = pass_spec["denoise_strength"]
+                denoise_this = d_model is not None and d_strength > 1e-4
+
+                if use_cuda:
+                    if denoise_this:
+                        frame = self._pre_denoise_frame(frame, d_model, d_strength)
+                    dest = torch.empty_like(frame)
+                    self.manager.process_cuda(
+                        frame.data_ptr(), dest.data_ptr(),
+                        frame.shape[1], frame.shape[0],
+                        settings=pass_settings, reset=do_reset, mask=mask_np)
+                    # the engine's D3D12/NGX work runs on the shared primary
+                    # context - this makes the result visible to torch
+                    torch.cuda.synchronize(cuda_dev)
+                    frame = dest
+                else:
+                    if denoise_this:
+                        frame_np = self._pre_denoise_frame(
+                            torch.from_numpy(frame_np), d_model, d_strength).numpy()
+                    dest_np = cpu_bufs[pass_idx % len(cpu_bufs)]
+                    self.manager.process_host(
+                        source=frame_np,
+                        destination=dest_np,
+                        settings=pass_settings,
+                        reset=do_reset,
+                        mask=mask_np
+                    )
+                    frame_np = dest_np
+
+            # HDR Colour Bridge: global, applied once after the final pass
             if use_cuda:
-                frame = src_gpu[i]
-                if denoise_active:
-                    frame = self._pre_denoise_frame(frame, denoise_model, pre_denoise_strength)
-                dest = torch.empty_like(frame)
-                self.manager.process_cuda(
-                    frame.data_ptr(), dest.data_ptr(),
-                    frame.shape[1], frame.shape[0],
-                    settings=settings, reset=do_reset, mask=mask_np)
-                # the engine's D3D12/NGX work runs on the shared primary
-                # context - this makes the result visible to torch
-                torch.cuda.synchronize(cuda_dev)
-
                 if bridge_mode != "off":
-                    dest = apply_bridge(dest, bridge_mode, **bridge_kwargs)
-
-                out_tensor = dest if dest.device == self.device else dest.to(self.device)
+                    frame = apply_bridge(frame, bridge_mode, **bridge_kwargs)
+                out_tensor = frame if frame.device == self.device else frame.to(self.device)
             else:
-                if denoise_active:
-                    frame_t = torch.from_numpy(src_np[i])
-                    frame_t = self._pre_denoise_frame(frame_t, denoise_model, pre_denoise_strength)
-                    src_np[i] = frame_t.numpy()
-
-                self.manager.process_host(
-                    source=src_np[i],
-                    destination=dest_np,
-                    settings=settings,
-                    reset=do_reset,
-                    mask=mask_np
-                )
-
-                np_out = dest_np if bridge_mode == "off" else apply_bridge(dest_np, bridge_mode, **bridge_kwargs)
+                np_out = frame_np if bridge_mode == "off" else apply_bridge(frame_np, bridge_mode, **bridge_kwargs)
                 t = torch.from_numpy(np.ascontiguousarray(np_out))
                 out_tensor = t.to(self.device) if self.device.type != "cpu" else t.clone()
 

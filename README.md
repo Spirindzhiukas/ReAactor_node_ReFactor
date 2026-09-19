@@ -31,7 +31,7 @@ without asking.
 | `sys.path` injection + absolute imports | collision risk with other node packs | **zero** — proper package-relative imports |
 | NSFW (SFW) filter | transformers ViT checker | **removed** (uncensored build — use responsibly and obey your local laws) |
 | Masking helper | bundled ultralytics YOLO + SAM loader | **Mask Builder**: accepts `MASK` / `BOUNDING_BOX` from ComfyUI's own nodes (SAM3, SAM2, RMBG, …), plus built-in soft face-region masks; grow / morphology / feather / invert post-chain |
-| DLSS5 Frame Enhancer | single flat DLL folder | **manual-only policy** + `dll_version` switcher: drop user-supplied DLL sets (any filenames) into `models/DLSS/dlssnr_<version>/` and pick per workflow |
+| DLSS5 Frame Enhancer + NR Scheduler | single flat DLL folder | **manual-only policy** + `dll_version` switcher: drop user-supplied DLL sets (any filenames) into `models/DLSS/dlssnr_<version>/` and pick per workflow |
 | `torch.load` | no `weights_only` | `weights_only=True` everywhere |
 | Downloads | raw urllib, no timeout/resume | timeout + resume + atomic `.part` + size checks + `REFACTOR_NO_AUTO_DOWNLOAD=1` opt-out |
 | basicsr vendored copy | full training framework (~100 files) | trimmed to the tiny registry/logger subset actually used |
@@ -86,6 +86,12 @@ one folder per version, **any .dll filenames accepted** (the engine is identifie
 by name) — then pick the set in the node's `dll_version` selector (`auto` picks the first found set;
 `refresh` re-scans after you add DLLs). `nvngx_dlssnr.dll` must be procured by you (NVIDIA's license
 prohibits redistributing it) — sources and licenses in `rfactor/dlssnr/dll_README.md`.
+
+**NR Schedules** — replace the old ``nr_passes`` repeat with the **ANTs⚡DLSS NR Scheduler**: a style
+per pass (Nature/Cinematic cycling is the owner-validated default; varied passes beat monolithic
+`nr_passes = 4`), optional per-pass full settings (bypass the main node's widgets when on), per-pass
+pre-SR denoise with dedicated model slots. Dynamic JS UI on both nodes (pack's `web/` folder); the
+Python side validates everything and works headless without it.
 
 **Pre-SR denoise (optional):** connect a 1x denoising/restoration model — `ANTs Upscale Model Loader` →
 the node's `denoise_model` socket (SCUNet, PureScale2 `1x_PureVision`, …) — it runs through the
@@ -155,7 +161,7 @@ still applying face restoration to `original_image` — useful as a standalone r
 `ANTsSaveFaceModel` / `ANTsLoadFaceModel` / `ANTsBuildFaceModel` / `ANTsMakeFaceModelBatch`,
 `ANTsRestoreFace` / `ANTsRestoreFaceAdvanced` (both now take `FACE_RESTORE_MODEL` /
 `FACE_DETECT_MODEL` inputs), `ANTsFaceSimilarity`, `ANTsImageDuplicator`,
-`ANTsImageRGBA2RGB`, `ANTsUnload`, `ANTsDLSS5Enhancer`.
+`ANTsImageRGBA2RGB`, `ANTsUnload`, `ANTsDLSS5Enhancer`, `ANTsDLSSNRScheduler` → `NR_SCHEDULE`.
 
 Typical graph:
 

@@ -17,4 +17,8 @@ model_paths.register_folders()
 
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "__version__"]
+# Frontend (JS) companion for the DLSS5 node family - served from /web/
+# (ComfyUI's custom-node web dir convention; NOT a "js/" folder).
+WEB_DIRECTORY = "./web"
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "__version__",
+           "WEB_DIRECTORY"]
