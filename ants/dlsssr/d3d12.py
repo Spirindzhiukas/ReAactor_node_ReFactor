@@ -36,6 +36,10 @@ D3D12_RESOURCE_STATE_UNORDERED_ACCESS = 0x8
 D3D12_RESOURCE_STATE_COPY_DEST = 0x400
 D3D12_RESOURCE_STATE_COPY_SOURCE = 0x800
 D3D12_RESOURCE_STATE_GENERIC_READ = 0xAC3
+D3D12_RESOURCE_DIMENSION_BUFFER = 1
+D3D12_RESOURCE_DIMENSION_TEXTURE2D = 3  # (2 = TEXTURE1D - rig-proven trap)
+D3D12_TEXTURE_LAYOUT_UNKNOWN = 0
+D3D12_TEXTURE_LAYOUT_ROW_MAJOR = 1
 D3D12_TEXTURE_DATA_PITCH_ALIGNMENT = 256
 D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT = 512
 
@@ -108,13 +112,15 @@ def _resource_desc_texture(width, height, fmt, flags):
     # D3D12_RESOURCE_DESC: Dimension u32 (+4 pad), Alignment u64, Width u64,
     # Height u32, DepthOrArraySize u16, MipLevels u16, Format u32,
     # SampleDesc {Count u32, Quality u32}, Layout u32, Flags u64
-    desc = _pack(_RESOURCE_DESC_FMT, 2, 0, width, height, 1, 1, fmt, 1, 0, 0, flags)
+    desc = _pack(_RESOURCE_DESC_FMT, D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0,
+                 width, height, 1, 1, fmt, 1, 0, D3D12_TEXTURE_LAYOUT_UNKNOWN, flags)
     assert len(desc) == 56
     return desc
 
 
 def _resource_desc_buffer(size):
-    desc = _pack(_RESOURCE_DESC_FMT, 1, 0, size, 0, 1, 1, DXGI_FORMAT_UNKNOWN, 1, 0, 0, 0)
+    desc = _pack(_RESOURCE_DESC_FMT, D3D12_RESOURCE_DIMENSION_BUFFER, 0, size, 1,
+                 1, 1, DXGI_FORMAT_UNKNOWN, 1, 0, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, 0)
     assert len(desc) == 56
     return desc
 

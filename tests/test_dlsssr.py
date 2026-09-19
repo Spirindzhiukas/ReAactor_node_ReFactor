@@ -201,9 +201,12 @@ def main():
     tex = d12._resource_desc_texture(64, 48, d12.DXGI_FORMAT_R8G8B8A8_UNORM,
                                      d12.D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
     buf = d12._resource_desc_buffer(4096)
-    check("d3d12: RESOURCE_DESC is 56 bytes, texture2d + zero alignment",
+    check("d3d12: RESOURCE_DESC is 56 bytes, TEXTURE2D(3) + zero alignment",
           len(tex) == 56 and len(buf) == 56
-          and tex[0:4] == (2).to_bytes(4, "little") and tex[4:12] == b"\x00" * 8)
+          and tex[0:4] == (3).to_bytes(4, "little") and tex[4:12] == b"\x00" * 8)
+    check("d3d12: buffer desc is BUFFER(1) + ROW_MAJOR layout (driver rule)",
+          buf[0:4] == (1).to_bytes(4, "little")
+          and buf[44:48] == (1).to_bytes(4, "little"))
     check("d3d12: UAV resource flag is 0x8 (0x4 = render target)",
           d12.D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS == 0x8
           and tex[-8:] == (0x8).to_bytes(8, "little"))

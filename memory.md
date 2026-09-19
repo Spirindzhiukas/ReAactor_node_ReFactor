@@ -9,7 +9,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** GPU acceleration commit (on top of `588f790` DLSS5 hybrid,
   `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 277 checks + gates (details below, fixes after)
+- **Suite:** ALL GREEN — 278 checks + gates (details below, fixes after)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
   `nvmdsi.inf_amd64_05d1e242e80cf105`, core `_nvngx.dll` 32.0.16.1692 + loader
   `nvngx.dll` 30.0.14.9516) - SR hosting GO. `nvngx_dlss.dll` 310.9.1.0 (DLSS
@@ -151,6 +151,14 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   CreateCommandAllocator, CreateCommandList (slots + IIDs + call plumbing).
   Sandbox CANNOT verify: shim machine-thunk on Windows, real NGX runtime
   responses, remaining slot behavior under real drivers.
+- RIG run 9 = CreateCommittedResource E_INVALIDARG on the FIRST texture:
+  our RESOURCE_DESC passed Dimension=2 (TEXTURE1D!) - DVT constant table
+  says TEXTURE2D=3; and buffer descs had Layout=UNKNOWN(0) instead of
+  ROW_MAJOR(1) (buffers would have died at first upload). Both fixed vs
+  DVT constants; the FAKE COM layer now ENFORCES driver desc rules
+  (dim/layout/sample-count/height; UAV-flag+COMMON creation is LEGAL -
+  DVT rig-proven), so desc regressions fail the harness, not the rig.
+  Run 10 should hit Init_Ext for real.
 - RIG run 8 = **Init_Ext threshold reached** (shim exports resolved, module
   identity clean, GpuContext live on the 4090): new error was gpu=None at
   the init_ext CALL SITE - _sr_session_for built the SR pre-denoise session

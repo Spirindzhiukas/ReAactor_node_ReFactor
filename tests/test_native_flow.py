@@ -213,7 +213,23 @@ def build_device_graph():
         width = _u64_at(desc, 16)
         height = _u32_at(desc, 24)
         fmt = _u32_at(desc, 32)
-        size = int(width) if dim == 1 else int(width) * int(height) * bpp.get(fmt, 4)
+        sample_count = _u32_at(desc, 36)
+        layout = _u32_at(desc, 44)
+        flags = _u32_at(desc, 48)
+        # the driver's E_INVALIDARG rules, enforced so harness tests can
+        # never pass a desc the real device would reject
+        if dim == d3d12.D3D12_RESOURCE_DIMENSION_BUFFER:
+            if layout != d3d12.D3D12_TEXTURE_LAYOUT_ROW_MAJOR or height != 1:
+                return -2147024809  # E_INVALIDARG
+            size = int(width)
+        elif dim == d3d12.D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+            if layout != d3d12.D3D12_TEXTURE_LAYOUT_UNKNOWN or sample_count != 1 \
+                    or height < 1:
+                return -2147024809
+            del flags  # UAV-flagged textures are legal (DVT rig-proven)
+            size = int(width) * int(height) * bpp.get(fmt, 4)
+        else:
+            return -2147024809  # only buffers + texture2d are supported here
         obj = make_resource(size, fmt, f"res(dim={dim},fmt={fmt})",
                             width_px=int(width) if dim != 1 else 0)
         _write_ptr(out, obj.ptr)
