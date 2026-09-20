@@ -296,6 +296,17 @@ def main():
           and "\\x0f\\x05" in crashlog_src
           and "no syscall instruction" in crashlog_src
           and "jmp rax" in crashlog_src)
+    check("crashlog: int29 fast-fail trap ships (run 27c terminal verdict: "
+          "kill is kernel-direct __fastfail/int 29h - CD 29 rewritten to "
+          "breakpoints in executable sections so the VEH names the site)",
+          "install_int29_trap" in crashlog_src
+          and "install_int29_trap" in ngx_src
+          and "0x80000003" in crashlog_src
+          and "\\xcd\\x29" in crashlog_src
+          and "ANTS_NR_INT29_TRAP" in ngx_src)
+    check("ngx: E1 direct-bind gate ships (ANTS_NR_USE_SHIM=0 = no shim "
+          "module in process = Merserk host geometry; VERSION-gate test)",
+          "ANTS_NR_USE_SHIM" in ngx_src)
     check("crashlog: IAT termination tracer walks imports and patches the "
           "termination APIs (flat-PE fixture, fake kernel32)",
           _iat_tracer_fixture_check())

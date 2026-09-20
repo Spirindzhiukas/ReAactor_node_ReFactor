@@ -43,6 +43,29 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
     happened; keep it clean. Verify with a `[\u0400-\u04FF]` regex scan, not grep ranges —
     grep byte-ranges false-match the ⚡ in node names.)
 
+## Rig session rules (added 2026-09-20, owner-imperative)
+
+1. **Diagnostics always ship as ready-to-run `.bat` (or `.ps1`) files** — never
+   raw commands. One marked owner-editable block with baked paths, system-python
+   fallback, zero parens on executable lines, CRLF (`.gitattributes`), output
+   auto-copied to the clipboard. Pinned by a test (test_dlsssr).
+2. **The owner syncs via GitHub Desktop** after the agent pushes (waits ~1 min).
+   NEVER hand the owner git commands; pull-check helpers (findstr) may print
+   nothing before his scoop — the run itself is the proof. Working clone:
+   `I:\AI SHITE\CODING\GITHUB\ReAactor_node_ReFactor`, symlinked into
+   `C:\ComfyUI_PORTABLE\ComfyUI\custom_nodes\ReAactor_node_ReFactor`.
+3. **Merserk sources are license-local**: `RESEARCH/merserk_ve10/` is
+   gitignored (source-available proprietary license — inspection OK,
+   redistribution NOT; this repo is a public channel). Only our own analysis
+   (`RESEARCH/README.md`, `RESEARCH/NOTES.md`, memory entries) is committed.
+   Never copy his code; credit him; technique reference only.
+4. NGX on the owner rig lives at `C:\ProgramData\NVIDIA\NGX` (models, no logs
+   yet). NR debug env contract (defaults define the experiment): traps +
+   ntdll detour + int29 trap arm ALWAYS on the NR path; opt-outs only
+   (`ANTS_NR_TERMINATION_TRAP=0`, `ANTS_NR_INT29_TRAP=0`,
+   `ANTS_NR_USE_SHIM` toggles the E1 direct-bind experiment). Never nest
+   diagnostic arming inside env-gated experiment blocks again (run 27b lesson).
+
 ## Engineering conventions
 
 - **Tests:** `tests/test_*.py` are standalone scripts (exit 0 = pass). Run:

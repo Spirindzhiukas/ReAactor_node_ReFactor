@@ -253,6 +253,17 @@ class NgxSession:
     def __init__(self, gpu, module_path, app_id=APP_ID, search_paths=(),
                  use_own_parameters=False, app_data_path=None, use_shim=True):
         self.gpu = gpu
+        # E1 gate (runs 14-27c: deliberate kernel-direct kill surviving ALL
+        # user-mode nets). ANTS_NR_USE_SHIM=0 = direct bind, no shim module
+        # in the process - Merserk's host geometry: no module NAMED
+        # nvngx.dll exists, so the snippet's module/version probes fall
+        # through to System32's real driver dll (with a valid VERSION
+        # resource). If the death disappears without the shim, the
+        # VERSION-gate-vs-shim hypothesis is confirmed.
+        if os.environ.get("ANTS_NR_USE_SHIM", "1") == "0" and use_shim:
+            use_shim = False
+            _log().status("[ANTs] E1 EXPERIMENT: shim disabled (ANTS_NR_USE_SHIM=0) "
+                          "- direct bind, no nvngx.dll module in this process")
         self.module = NgxModule(module_path, use_shim=use_shim,
                                 forwarder_dir=writable_cache_dir("shim"))
         self._own_parameters = None
@@ -311,6 +322,14 @@ class NgxSession:
                 # by modules whose IATs we did not patch (run 26 proved
                 # the death avoids both NGX modules' patched thunks).
                 crashlog.install_ntdll_terminate_detour()
+                # And the LAST class: kernel-direct __fastfail (int 29h)
+                # bypasses every handler by design - convert those sites
+                # to breakpoints so the VEH names the check's address.
+                if os.environ.get("ANTS_NR_INT29_TRAP", "1") != "0":
+                    crashlog.install_int29_trap(
+                        [(self.module.handle,
+                          "snippet " + os.path.basename(str(self.module.path or ""))),
+                         (self._core_handle, "driver core")])
             if os.environ.get("ANTS_NR_RUNTIME_CALLBACKS"):
                 # EXPERIMENT (runs 22-24, env-gated): register callbacks on
                 # the snippet the way a snippet host would. Run 22/23 PROVED

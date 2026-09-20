@@ -30,6 +30,9 @@ _INTERESTING = {
     0xC0000094: "integer divide by zero",
     0xC00000FD: "stack overflow",
     0xC0000374: "heap corruption",
+    # raised by the int29 trap's CD29->CC90 rewrites: the break address IS
+    # the fast-fail site we could otherwise never see
+    0x80000003: "breakpoint (patched fast-fail site)",
 }
 
 # Deliberate-termination APIs. A death through any of these raises NO
@@ -390,3 +393,81 @@ def install_ntdll_terminate_detour():
               "ComfyUI shutdown is normal exit traffic, not a kill)\n")
     except Exception as exc:
         _emit(f"[ANTs] ntdll detour failed (diagnostic only): {exc}\n")
+
+
+def install_int29_trap(module_targets):
+    """Convert the snippet's fast-fail instructions into breakpoints.
+
+    Runs 14-27c terminal diagnosis: the deliberate kill survives the
+    patched IATs AND the ntdll detour => it is kernel-direct - CRT abort
+    compiles to __fastfail = 'int 29h' (opcode CD 29), which bypasses
+    vectored handlers, SEH, and every ntdll function BY DESIGN. The only
+    way to see the site is to rewrite CD 29 -> CC 90 (int3 + nop) in the
+    executable sections: the break raises STATUS_BREAKPOINT, which the
+    vectored handler DOES see, and the crash verdict then names the exact
+    module+offset of the fast-fail. Diagnostic-grade; the process was
+    dying at that instruction anyway - a logged site is strictly better.
+    """
+    k32 = _kernel32()
+    if k32 is None or _state.get("int29_done"):
+        return
+    _state["int29_done"] = True
+    for base, label in module_targets:
+        if not base:
+            continue
+        base = int(base)
+
+        def u32(off):
+            return ctypes.c_uint32.from_address(base + off).value
+
+        try:
+            e_lfanew = u32(0x3C)
+            if ctypes.c_uint32.from_address(base + e_lfanew).value != 0x00004550:
+                continue
+            n_sec = u32(e_lfanew + 6)
+            sec0 = (e_lfanew + 24) + u32(e_lfanew + 20)
+            patched = 0
+            old = ctypes.c_uint32(0)
+            protect = k32.VirtualProtect
+            protect.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                ctypes.c_uint32,
+                                ctypes.POINTER(ctypes.c_uint32)]
+            CHUNK = 4 << 20
+            for s in range(n_sec):
+                head = sec0 + s * 40
+                vsize, vaddr = u32(head + 8), u32(head + 12)
+                chars = ctypes.c_uint32.from_address(base + head + 36).value
+                if vsize == 0 or not chars & 0x20000000:  # not executable
+                    continue
+                done = 0
+                while done < vsize:
+                    n = min(CHUNK, vsize - done)
+                    try:
+                        chunk = ctypes.string_at(base + vaddr + done, n)
+                    except Exception:
+                        break
+                    at = 0
+                    while True:
+                        at = chunk.find(b"\xcd\x29", at)
+                        if at < 0:
+                            break
+                        site = base + vaddr + done + at
+                        if protect(ctypes.c_void_p(site),
+                                   ctypes.c_size_t(2), 0x40,
+                                   ctypes.byref(old)):
+                            ctypes.c_uint8.from_address(site).value = 0xCC
+                            ctypes.c_uint8.from_address(site + 1).value = 0x90
+                            protect(ctypes.c_void_p(site),
+                                    ctypes.c_size_t(2), old.value,
+                                    ctypes.byref(old))
+                            patched += 1
+                        at += 2
+                    done += n
+            if patched:
+                _emit(f"[ANTs] int29 trap: {patched} fast-fail site(s) "
+                      f"converted to breakpoints in {label} - the next "
+                      "fast-fail logs its exact address instead of dying "
+                      "silently\n")
+        except Exception as exc:
+            _emit(f"[ANTs] int29 trap failed for {label} (diagnostic only): "
+                  f"{exc}\n")
