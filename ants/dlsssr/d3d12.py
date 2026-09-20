@@ -354,6 +354,7 @@ class GpuContext:
         self.fence = device.create_fence()
         self.event = win32.create_event()
         self.fence_value = 0
+        self._pending_release = []
         self._closed = False
 
     def transition(self, resource, to):
@@ -384,6 +385,16 @@ class GpuContext:
         resource.state = to
 
     def upload_texture(self, texture, pixels, final_state):
+        """Record a staging-buffer copy into ``texture`` (caller submits).
+
+        The staging buffer is released only after the next ``submit_and_wait``:
+        D3D12 lets the application free a resource once the GPU is done with
+        it, and a command list that references a resource the application has
+        released is undefined behaviour (the debug layer calls it out as
+        "resource destroyed while still referenced by a command list"). The
+        obvious bug here is freeing before ExecuteCommandLists even ran - the
+        copy can then read whatever the allocator handed the next resource.
+        """
         row_bytes, row_pitch, total = linear_layout(texture.width, texture.height, texture.format)
         if len(pixels) != row_bytes * texture.height:
             raise DlssSrError(
@@ -413,7 +424,8 @@ class GpuContext:
                         _CVOID_P(), _CVOID_P()],
                        None, dst_loc, 0, 0, 0, src_loc, None)
         self.transition(texture, final_state)
-        staging.release()
+        # Keep the staging resource alive until the GPU has finished with it.
+        self._pending_release.append(staging)
 
     def readback_texture(self, texture, state):
         _, row_pitch, total = linear_layout(texture.width, texture.height, texture.format)
@@ -467,6 +479,7 @@ class GpuContext:
                 "stale, send this line with the rest of the log.", exc)
             self.list.call_hr(_LIST_RESET, [_CVOID_P(), _CVOID_P()],
                               self.allocator.ptr, None, what="Reset")
+            self._pending_release.clear()   # the recording never reached the GPU
             self.allocator.call_hr(_ALLOCATOR_RESET, [], what="Reset")
             return
         cell = (_CVOID_P() * 1)(self.list.ptr)
@@ -492,11 +505,24 @@ class GpuContext:
         self.allocator.call_hr(_ALLOCATOR_RESET, [], what="Reset")
         self.list.call_hr(_LIST_RESET, [_CVOID_P(), _CVOID_P()],
                           self.allocator.ptr, None, what="Reset")
+        # The GPU is idle here, so staging buffers from the recording we just
+        # executed can be freed (see upload_texture).
+        while self._pending_release:
+            try:
+                self._pending_release.pop().release()
+            except Exception:
+                pass
 
     def close(self):
         if self._closed:
             return
         self._closed = True
+        for staged in list(self._pending_release):
+            try:
+                staged.release()
+            except Exception:
+                pass
+        self._pending_release.clear()
         win32.close_handle(self.event)
         for obj in (self.list, self.allocator, self.queue, self.fence):
             try:

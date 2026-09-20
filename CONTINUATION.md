@@ -195,7 +195,8 @@ message now says so); the parameter backend on this driver is the vtable map
 (resource=0 pointer=2 int=3 float=6), the flat C API is absent.
 
 **Next run (30) needs no env lines** — or `set "NVSDK_NGX_LOG_LEVEL=1"` for a
-looser core log. Expected: build marker → runtime in use → int29 scan →
+looser core log. After the run, double-click
+`tools\collect_rig_evidence.bat` and send what it produces. Expected: build marker → runtime in use → int29 scan →
 `NGX init -> _nvngx.dll (bound directly)` → `Init_ProjectID` → capability
 params → snippet `Init_Ext via caller shim` → `CreateFeature` → `evaluate`.
 Send: console + `staged/ANTs/appdata/logs/nvngx.log` (+ the crash file if the
@@ -261,6 +262,17 @@ Run 28 is unchanged (E1 still tests the shim-is-the-poison question). New
    geometry that ever reached the evaluate callback).
 
 ## Tool inventory (all rig-proven or tested)
+
+**`tools\collect_rig_evidence.bat` - run this FIRST after any failed run.**
+Double-click it (the pack's `tools\` folder, either in the GitHub checkout or
+through the `custom_nodes` symlink). It finds the DEPLOYED build marker - the
+run is void if that does not match the console's `NR/SR host build ...` line -
+inventories `models\DLSS` (every staged runtime, size + hash), COPIES the NGX
+core log (`staged\ANTs\appdata\logs\nvngx.log`) and any crash file, records
+git HEAD, your `ANTS_`/`NVSDK_` variables, the GPU and torch state, leaves
+everything in `tools\rig_evidence\<date-time>\` and puts the report on the
+clipboard. READ-ONLY: nothing outside that folder is written, ever. Send the
+clipboard text plus the `files\` folder it opens.
 
 - `tools/resolve_offsets.bat` + `tools/resolve_crash_offset.py` (owner copies:
   `C:\ComfyUI_PORTABLE\`) — names `MODULE+0xRVA` via export table; owner

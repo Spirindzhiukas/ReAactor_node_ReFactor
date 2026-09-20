@@ -751,6 +751,27 @@ def main():
     close_failures["n"] = 0
     gpu.submit_and_wait()          # leave the shared list clean for the rest
 
+    # ---- staging lifetime: freed only after the GPU is done ----------------
+    recorded = []
+    real_submit = d3d12.GpuContext.submit_and_wait
+
+    def _spy(self, *a, **k):
+        recorded.append(("submit", len(self._pending_release)))
+        return real_submit(self, *a, **k)
+    d3d12.GpuContext.submit_and_wait = _spy
+    try:
+        gpu.upload_texture(upload_tex, bytes(W * H * 4),
+                           d3d12.D3D12_RESOURCE_STATE_COMMON)
+        check("d3d12: the staging buffer stays alive until the GPU is done "
+              "(it was released while a recorded copy still referenced it)",
+              len(gpu._pending_release) == 1)
+        gpu.submit_and_wait()
+        check("d3d12: staging buffers are freed on the next submit_and_wait",
+              not gpu._pending_release and recorded[-1][1] == 1)
+    finally:
+        d3d12.GpuContext.submit_and_wait = real_submit
+
+
     # ---- legacy snippet-direct route (ANTS_NR_USE_OWN_PARAMS=1 geometry) ----
     FakeNgxModule.own_store = {}
     legacy = DlssNrSession(gpu, W, H, str(nr_dll), style="Natural",

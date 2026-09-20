@@ -348,6 +348,83 @@ def _int29_partial_section_check():
             and unmapped_site == b"\xcd\x29")
 
 
+def _rig_evidence_check():
+    """Run the evidence collector over a synthetic rig tree.
+
+    The owner-facing tool is only useful if it finds the artefacts it claims
+    to find, so this builds a fake ComfyUI tree (staged runtime, NGX log,
+    crash file, a deployed ngx.py with a build marker) and asserts the
+    report names the build, the DLL sizes and copies the logs.
+    """
+    import contextlib
+    import importlib.util
+    import io
+    import tempfile
+
+    spec = importlib.util.spec_from_file_location(
+        "ants_collect_rig_evidence", REPO / "tools" / "collect_rig_evidence.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    root = Path(tempfile.mkdtemp(prefix="ants_rig_"))
+    try:
+        repo = root / "custom_nodes" / "ReAactor_node_ReFactor"
+        (repo / "ants" / "dlsssr").mkdir(parents=True)
+        (repo / "ants" / "dlsssr" / "ngx.py").write_text(
+            'HOST_BUILD = "2099-01-01.1"\n')
+        dlss = root / "models" / "DLSS"
+        staged = (dlss / "staged"
+                  / "nvngx_dlssnr_RenoDX_4000_series_friendly-165830144")
+        logs = dlss / "staged" / "ANTs" / "appdata" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "nvngx.log").write_text("NGXLoadFromPath failed: 0xBAD00000\n")
+        (logs / "native-crash.log").write_text("int29 site ...\n")
+        staged.mkdir()
+        (staged / "nvngx_dlssnr.dll").write_bytes(b"MZ" + b"\x00" * 8192)
+        out = root / "out"
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = module.main(["--repo", str(repo), "--dlss-root", str(dlss),
+                                "--out", str(out), "--comfy-root", str(root)])
+        report = (out / "rig_evidence.txt").read_text()
+        copied = sorted(p.name for p in (out / "files").iterdir())
+        return (code == 0
+                and "2099-01-01.1" in report          # deployment marker
+                and "nvngx_dlssnr.dll" in report      # runtime inventory
+                and "sha256(first 8)" in report
+                and "nvngx.log" in copied
+                and "native-crash.log" in copied
+                and "TORCH / CUDA" in report)
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _collector_bat_check():
+    """The collector bat follows the owner-facing conventions.
+
+    Paren rule: a paren block that OPENS on the same line as an ``if`` is the
+    classic cmd footgun (it breaks as soon as a path holds a space). ``for
+    %%I in (...)`` is the sanctioned form - the loop keyword precedes the
+    paren - so those lines pass.
+    """
+    bat = (REPO / "tools" / "collect_rig_evidence.bat")
+    raw = bat.read_bytes() if bat.is_file() else b""
+    risky = []
+    for line in raw_exec_lines(raw):
+        lowered = line.lower()
+        first = lowered.find(b" (")
+        if first == -1:
+            continue
+        if b"for " in lowered[:first]:
+            continue                    # for-loop enumeration form
+        risky.append(line)
+    return (raw.startswith(b"@echo off\r\n")
+            and b"clip <" in raw
+            and b"THE ONLY BLOCK YOU MAY EDIT" in raw
+            and b"READ-ONLY" in raw
+            and not risky)
+
+
 def _resolver_tolerance_check():
     """Build a minimal PE (one export at RVA 0x1020) and run the resolver
     over it with a junk token plus a real offset; the junk must be skipped
@@ -705,6 +782,13 @@ def main():
     check("tools: resolver tolerates junk tokens (rig: the bat's own name "
           "reached int() and tracebacked - now skipped with [skip])",
           _resolver_tolerance_check())
+    check("tools: rig evidence collector finds the deployment marker, the "
+          "staged runtime and the NGX log, and copies the logs out "
+          "(one folder for the owner to send)",
+          _rig_evidence_check())
+    check("tools: the collector bat is CRLF, clipboard-returning, marked "
+          "READ-ONLY and has no parens on executable lines",
+          _collector_bat_check())
     check("tools: import lister flags termination APIs + NGX backend "
           "bindings statically (engine-dll discriminator, no execution)",
           (REPO / "tools" / "list_imports.py").is_file()
@@ -884,6 +968,10 @@ def main():
           "ANTS_D3D12_STRICT_CLOSE" in d3d12_src
           and "not closable" in d3d12_src
           and "recorded since the last submit is LOST" in d3d12_src)
+    check("d3d12: staging buffers outlive the recording that references them "
+          "(freed after the GPU is done, not at record time)",
+          "_pending_release" in d3d12_src
+          and "staging.release()" not in d3d12_src)
     check("d3d12: heap props 20B, barrier 32B",
           len(d12._heap_properties(0)) == 20
           and len(d12._transition_barrier(0x1234, 0, 2)) == 32)

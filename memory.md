@@ -10,9 +10,9 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
 - **Head at last update:** run-28+ NR host layout (core-owned session + caller
   shim with the snippet Init_Ext swap; working tree, commit pending) on top of
   the GPU-acceleration commit (`588f790` DLSS5 hybrid, `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 344 checks + 2 scanners + smoke_import (20 nodes)
-  (`test_nr_schedule` 32, `test_dlssnr_bridge` 65, `test_dlsssr` 72,
-  `test_runtime_surface` 58, `test_native_flow` 31, `test_upres` 27,
+- **Suite:** ALL GREEN — 357 checks + 2 scanners + smoke_import (20 nodes)
+  (`test_nr_schedule` 32, `test_dlssnr_bridge` 65, `test_dlsssr` 75,
+  `test_runtime_surface` 58, `test_native_flow` 33, `test_upres` 27,
   `test_pure_helpers` 26, `test_facerestore_routing` 21, `test_swapper_state`
   13, `test_detection_state_dict` 7)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
@@ -545,3 +545,21 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - ALSO CONFIRMED BY THE LOG: our ProjectID route works (`MapProjectId: Found cms id 876232c for engine: custom engineVersion ANTs 1.1.0 projectID 53f803cc-a12f-4d69-90d5-19b7599cad19`); the core found the adapter through NVAPI itself (so our best-effort NvAPI pre-step is Wine-only; the message now says "harmless on Windows"); the parameter backend is the vtable map (resource=0 pointer=2 int=3 float=6) - the core exports no flat C API on this driver.
 - TESTS (all green): the fake COM graph now MODELS the D3D12 rules - staging heaps reject a non-canonical initial state with E_INVALIDARG, and a barrier referencing a staging resource poisons the list so the next Close returns E_INVALIDARG (the exact rig failure). New pins: staging buffers are created in their implicit state and tagged; a transition of a staging resource is refused and never recorded; the NR session records no copies/barriers at init; an unconclosable list is dropped + reset (and strict mode re-raises); the session owner is NOT routed through the shim while the snippet IS; the log callback decodes the message pointer. `test_native_flow` 31, `test_dlsssr` 72.
 - NEXT RUN (no env lines needed, or keep `NVSDK_NGX_LOG_LEVEL=1`): expected sequence - build marker -> runtime in use -> int29 scan -> `NGX init -> _nvngx.dll (bound directly)` -> Init_ProjectID -> capability params -> snippet Init_Ext -> CreateFeature -> evaluate. If it dies at evaluate, send BOTH the console and `models/DLSS/staged/ANTs/appdata/logs/nvngx.log` (the core/snippet log is the first instrument that survives the kill), plus the crash file if the int29 trap names a breakpoint site.
+
+### 2026-09-20 (later) — rig evidence collector + the staging-lifetime bug
+- NEW OWNER TOOL `tools/collect_rig_evidence.bat` (+ `.py`, tested against a
+  synthetic rig tree): one double-click produces ONE folder to send - the
+  deployed build marker + hashes of every `ngx.py` copy, the models\DLSS
+  inventory with sizes/hashes, COPIES of the NGX log + crash files, git HEAD,
+  ANTS_/NVSDK_ env, GPU and torch state - and puts the report on the
+  clipboard. READ-ONLY: it never writes outside `tools\rig_evidence\`
+  (gitignored). Three runs in a row needed a follow-up "and also send ...",
+  so this ends that round trip.
+- BUG FIXED while auditing the same hot path: `upload_texture` released the
+  staging buffer IMMEDIATELY after recording the copy, i.e. before the command
+  list was even executed - undefined behaviour in D3D12 (the debug layer calls
+  it "resource destroyed while still referenced by a command list"; the copy
+  can then read whatever the allocator hands the next resource). Staging
+  buffers now live on `GpuContext._pending_release` and are freed on the next
+  `submit_and_wait()` (or when a recording is dropped, or at close). Pinned in
+  `test_native_flow` with a spy on `submit_and_wait`.
