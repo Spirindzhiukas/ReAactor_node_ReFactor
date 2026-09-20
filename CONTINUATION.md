@@ -401,7 +401,20 @@ Rules now enforced in code:
 - `auto` in `dll_version` only ever picks an `nvngx_dlssnr*` runtime; if the
   folder holds nothing but the helper pair it raises a loud `[ANTs]` error
   naming `Merserk_DLLS`;
-- `staged/**` is disposable: delete it (ComfyUI closed) and it is rebuilt.
+- `staged/**` is disposable: delete it (ComfyUI closed) and it is rebuilt -
+  and it is also the only place the logs live, so the collector finds nothing
+  if it was deleted before the run (owner, 14:02 report: `files\` was empty
+  because the tree had just been nuked).
+- **A rename is not a different build.** The 14:02 audit proved the owner's
+  `NR\nvngx_dlssnr.dll` and `NR\nvngx_dlssnr_RenoDX_4000_series_friendly.dll`
+  are the same 165,830,144-byte build (identical SHA-256). `auto` now refuses
+  a candidate that is byte-identical to a force-terminator-listed sibling
+  (warning names the twin; an EXPLICIT widget pick still runs it), so the
+  "stock vs RenoDX" A/B cannot be confounded by a file rename again.
+- **The report is ONE file.** The raw logs (nvngx.log etc.) are inlined in
+  `rig_evidence.txt` (400 KB per file cap, `[truncated: last ...]` marker when
+  hit), on top of the already-inlined black box and resolved offsets. The
+  `files\` folder is only needed for the rare oversized log.
 
 ## Rig facts (owner environment)
 

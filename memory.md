@@ -719,5 +719,21 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   "MODELS/DLSS LAYOUT AUDIT" section (KEEP / SAFE TO DELETE / YOUR CALL),
   including same-size-same-folder pairs with a hash verdict, so the keep/delete
   answer is printed from the owner's own disk, not from a folder map.
-- Suite at this commit: **368 checks** (dlsssr 85, dlssnr_bridge 77,
+- **OWNER'S 14:02 RIG REPORT PROVED A CONFOUND**: his
+  `NR/nvngx_dlssnr.dll` and `NR/nvngx_dlssnr_RenoDX_4000_series_friendly.dll`
+  are the SAME 165,830,144-byte build (identical SHA-256, and both are the
+  RenoDX build). The force-terminator list matches NAMES, so `auto` would
+  have run the risky build under the safe-looking name. `auto` now compares
+  BYTES (`same_bytes`/`twin_of_known_bad`, size gate first, SHA-256
+  memoised): a candidate byte-identical to a listed sibling is refused with a
+  warning naming the twin, in both the flat-file and the set-directory passes;
+  an explicit widget pick is still honoured. The audit prints the same
+  verdict (`[!!] ... IS ...`).
+- **The evidence report is ONE self-contained file** (owner request): all
+  collected logs are inlined (400 KB per file, `[truncated: last ...]` when
+  clipped, crash box excluded because it has its own section), so the folder
+  is only needed for an oversized log. The empty `files/` in the 14:02 report
+  was expected - the owner deleted `staged/` right before collecting, and the
+  logs live there.
+- Suite at this commit: **373 checks** (dlsssr 85, dlssnr_bridge 82,
   native_flow 35) + pyflakes/scope/smoke green.

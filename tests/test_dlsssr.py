@@ -453,6 +453,14 @@ def _rig_evidence_check():
         (logs / "native-crash.log").write_text("int29 site ...\n")
         staged.mkdir()
         (staged / "nvngx_dlssnr.dll").write_bytes(b"MZ" + b"\x00" * 8192)
+        # rig 2026-09-20: the "stock"-named file is the RenoDX build renamed
+        nr = dlss / "NR"
+        nr.mkdir()
+        twins = b"same-build-bytes" * 1024
+        (nr / "nvngx_dlssnr.dll").write_bytes(twins)
+        (nr / "nvngx_dlssnr_RenoDX_4000_series_friendly.dll").write_bytes(twins)
+        (nr / "neuroframe_caller.dll").write_bytes(b"helper")
+        (nr / "neuroframe_engine.dll").write_bytes(b"helper")
         out = root / "out"
         with contextlib.redirect_stdout(io.StringIO()):
             code = module.main(["--repo", str(repo), "--dlss-root", str(dlss),
@@ -475,7 +483,18 @@ def _rig_evidence_check():
         offsets = _collector_offset_check(module, root)
         # the black box is inlined, so the pasted report carries the verdict
         inlined = "CRASH BLACK BOX" in report and "int29 site" in report
-        return (code == 0
+        # ... and so are the raw logs: one file to send (owner request)
+        self_contained = ("RAW LOGS (inlined" in report
+                          and "NGXLoadFromPath failed: 0xBAD00000" in report
+                          and "[truncated: last" not in report
+                          and "self-contained" in report)
+        # the audit names the rename trap AND the helper duplicates
+        audit = ("MODELS/DLSS LAYOUT AUDIT" in report
+                 and "the renaming does not change the build" in report
+                 and "IS" in report
+                 and "(helper duplicate" in report
+                 and "staging area - rebuilt on demand" in report)
+        return (code == 0 and self_contained and audit
                 and auto and guard and outside and offsets and inlined
                 and "2099-01-01.1" in report          # deployment marker
                 and "nvngx_dlssnr.dll" in report      # runtime inventory

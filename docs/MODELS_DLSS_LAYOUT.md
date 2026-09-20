@@ -87,6 +87,23 @@ it is rebuilt from the selection plus the helper pair on the next run.
 | `DLSS_Map.txt` | not read by this pack — keep as a reference or delete |
 | two same-size builds in one category (e.g. `nvngx_dlss.dll` and `nvngx_dlss_310.9.1.dll`) | compare: if identical, keep one |
 
+### A rename is not a different build
+
+The pack's "this build killed the process" list matches **file names**
+(`*renodx*`). A copy of such a build under a plain name is still the same
+build, and the rig audit proved exactly that case on the owner's disk
+(`nvngx_dlssnr.dll` and `nvngx_dlssnr_RenoDX_4000_series_friendly.dll`, both
+165,830,144 bytes, identical SHA-256). Therefore:
+
+- `auto` in `dll_version` compares **bytes**, not names: a candidate that is
+  byte-identical to a listed build is refused too, with a warning naming the
+  twin — otherwise "auto" would silently run the risky build while the widget
+  looked safe;
+- an **explicit** selection in the widget is always honoured (that is how you
+  run such a build deliberately, which is the current line of work);
+- the audit prints `[!!] ... IS ...` for exactly this combination, so the
+  report explains it without anyone having to hash files by hand.
+
 Deleting a DLL that ComfyUI currently has loaded fails with a sharing
 violation — that is Windows protecting the file, not a problem. Close
 ComfyUI and delete again.

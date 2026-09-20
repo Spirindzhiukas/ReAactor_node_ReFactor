@@ -288,6 +288,64 @@ def is_known_force_terminator(dll_path):
     return any(marker in name for marker in KNOWN_FORCE_TERMINATOR_MARKERS)
 
 
+_HASH_CACHE = {}
+
+
+def same_bytes(a, b):
+    """Byte-identity of two files (size gate first; SHA-256 memoised).
+
+    Rig 2026-09-20: the owner's `nvngx_dlssnr.dll` and
+    `nvngx_dlssnr_RenoDX_4000_series_friendly.dll` are the SAME 165.8 MB
+    build under two names. The force-terminator list matches NAMES, so the
+    "stock"-looking file was one rename away from the risk it exists to
+    avoid - auto selection must not treat a rename as a different build.
+    """
+    try:
+        sa, sb = os.path.getsize(a), os.path.getsize(b)
+    except OSError:
+        return False
+    if sa != sb:
+        return False
+    import hashlib
+
+    def digest(path):
+        key = None
+        try:
+            key = (path, os.path.getsize(path), os.path.getmtime(path))
+        except OSError:
+            pass
+        if key and key in _HASH_CACHE:
+            return _HASH_CACHE[key]
+        h = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                h.update(chunk)
+        value = h.hexdigest()
+        if key:
+            _HASH_CACHE[key] = value
+        return value
+
+    try:
+        return digest(a) == digest(b)
+    except OSError:
+        return False
+
+
+def twin_of_known_bad(dll_path):
+    """Name of a force-terminator-named sibling with IDENTICAL bytes, or "".
+
+    Called only when the candidate itself does not carry a known-bad name.
+    """
+    folder = os.path.dirname(os.path.abspath(str(dll_path)))
+    for name in dll_files(folder):
+        other = os.path.join(folder, name)
+        if os.path.normcase(other) == os.path.normcase(os.path.abspath(str(dll_path))):
+            continue
+        if is_known_force_terminator(other) and same_bytes(dll_path, other):
+            return name
+    return ""
+
+
 def resolve_nr_runtime_path(choice: str, skip_known_bad: bool = False):
     """The NR runtime .dll for the native host: a chosen flat dll directly,
     a chosen set's nvngx_dlssnr*.dll, or (auto/vanished) the first found.
@@ -309,13 +367,35 @@ def resolve_nr_runtime_path(choice: str, skip_known_bad: bool = False):
     # "neuroframe_caller-104960"). Runtimes are named nvngx_dlssnr* by every
     # producer; the export probe remains the final authority at load time.
     saw_bad = False
+    bad_twin = ""
     helpers, fallback, set_errors = [], [], []
+
+    def _rejectable(path):
+        """True when auto must NOT pick `path` (and say why)."""
+        nonlocal saw_bad, bad_twin
+        if not skip_known_bad:
+            return False
+        if is_known_force_terminator(path):
+            saw_bad = True
+            return True
+        twin = twin_of_known_bad(path)
+        if not twin:
+            return False
+        saw_bad = True
+        bad_twin = f"{os.path.basename(path)} (same bytes as {twin})"
+        logger.warning(
+            "[ANTs] '%s' is byte-identical to the RenoDX build '%s' in the "
+            "same folder - it is the same build under another name, so 'auto' "
+            "will not treat it as the safe pick. Select a build explicitly in "
+            "the node's dll_version widget to run it anyway.",
+            os.path.basename(path), twin)
+        return True
+
     for entry in category_entries("NR"):
         if entry["kind"] != "dll":
             continue
         if os.path.basename(entry["path"]).lower().startswith("nvngx_dlssnr"):
-            if skip_known_bad and is_known_force_terminator(entry["path"]):
-                saw_bad = True
+            if _rejectable(entry["path"]):
                 continue
             return entry["path"]
         if _is_helper_dll_name(entry["name"]):
@@ -328,19 +408,22 @@ def resolve_nr_runtime_path(choice: str, skip_known_bad: bool = False):
         except RuntimeError as exc:
             set_errors.append(str(exc))   # e.g. helper DLLs only - keep looking
             continue
-        if path and skip_known_bad and is_known_force_terminator(path):
-            saw_bad = True
-            continue
-        if path:
+        if path and not _rejectable(path):
             return path
     if saw_bad:
         raise RuntimeError(
-            "[ANTs] Every NR build in models/DLSS/NR matches the rig-proven "
-            "force-terminator list (RenoDX-derived builds that kill the whole "
-            "process at the first NGX evaluate on a plain D3D12 host - runs "
-            "14-19). Select one EXPLICITLY in the engine dropdown to accept "
-            "the risk, or add a stock nvngx_dlssnr build (e.g. from DLSS "
-            "Swapper) so 'auto' has a safe pick.")
+            "[ANTs] Every usable NR build in models/DLSS/NR is a rig-proven "
+            "force-terminator build (RenoDX-derived builds that killed the "
+            "whole process at the first NGX evaluate on a plain D3D12 host - "
+            "runs 14-19), or is byte-identical to one"
+            + (f": {bad_twin}" if bad_twin else "")
+            + ". A rename does not make a different build: 'auto' refuses to "
+            "pretend otherwise. Select a build EXPLICITLY in the node's "
+            "dll_version widget to accept the risk (this is a live line of "
+            "work, not a dead end - run 30 already reached evaluate and threw "
+            "a catchable exception instead of dying), or add a genuinely "
+            "stock nvngx_dlssnr build (e.g. from DLSS Swapper) so 'auto' has "
+            "a safe pick.")
     if fallback:
         logger.warning(
             "[ANTs] No nvngx_dlssnr* file in models/DLSS/NR - falling back to "

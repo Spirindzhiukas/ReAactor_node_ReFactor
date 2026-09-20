@@ -67,6 +67,11 @@ python and never registers callbacks.
       package dll; loud sibling-copy fallback only when no stash exists); auto
       selection refuses to treat a helper DLL as an NR runtime; the collector
       prints a keep/delete audit of the owner's own tree.
+- [x] **Owner 14:02 evidence**: the audit detected that both NR files are the
+      SAME RenoDX build under two names -> `auto` now refuses a renamed copy of
+      a force-terminator build (byte comparison, warning names the twin);
+      explicit selection in `dll_version` is the sanctioned way to run it.
+      The report is one self-contained file now (logs inlined).
 - [ ] **Run 31 (owner): plain re-run** (`set "NVSDK_NGX_LOG_LEVEL=1"`,
       no ANTS_ lines needed) — the first run that should reach CreateFeature +
       evaluate with the full host-parity contract. Console + nvngx.log + crash

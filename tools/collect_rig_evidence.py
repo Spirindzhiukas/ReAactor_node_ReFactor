@@ -475,6 +475,45 @@ HELPER_HINTS = ("merserk", "helpers", "hlp")
 HELPER_PAIR_HINTS = ("neuroframe", "caller", "engine")
 
 
+INLINE_LOG_CAP = 400 * 1024        # per log file; bigger ones stay in files/
+
+
+def inline_logs(paths, out_lines, cap=INLINE_LOG_CAP, skip=()):
+    """Embed the collected logs in the report itself.
+
+    The owner asked for one file to send. Everything the pack can read is
+    therefore printed inline (each capped, with a note pointing at the raw
+    copy in files/) - the folder is then only needed for the rare oversized
+    log.
+    """
+    if not paths:
+        return
+    truncated = []
+    for path in paths:
+        name = os.path.basename(path)
+        if any(token in name.lower() for token in skip):
+            continue          # already shown in full elsewhere (crash box)
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        out_lines.append(f"  --- {name} ({human(size)}) ---")
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError as exc:
+            out_lines.append(f"  (unreadable: {exc})")
+            continue
+        if len(text) > cap:
+            text = text[-cap:]
+            truncated.append(name)
+            out_lines.append(f"  [truncated: last {human(cap)} of {human(size)} "
+                             "- the full copy is in the files/ folder]")
+        for row in text.splitlines():
+            out_lines.append(f"  {row}")
+        out_lines.append("")
+
+
 def layout_audit(dlss_root, out_lines):
     """Read-only KEEP/DELETE audit of the models/DLSS tree.
 
@@ -541,11 +580,24 @@ def layout_audit(dlss_root, out_lines):
     for (folder, size), paths in sorted(by_size.items()):
         if len(paths) > 1:
             hashes = {sha256_head(p) for p in paths}
-            verdict = ("identical content" if len(hashes) == 1
+            same = len(hashes) == 1
+            verdict = ("identical content" if same
                        else "different content despite equal size")
-            review.append(f"{' and '.join(os.path.basename(p) for p in paths)}"
-                          f" in {folder} have the same size ({size} bytes): "
-                          f"{verdict} - keep one if you do not need both")
+            note = f"{' and '.join(os.path.basename(p) for p in paths)}" \
+                   f" in {folder} have the same size ({size} bytes): {verdict}"
+            if same:
+                note += " - keep one if you do not need both"
+                risky = [os.path.basename(p) for p in paths
+                         if "renodx" in os.path.basename(p).lower()]
+                clean = [os.path.basename(p) for p in paths
+                         if "renodx" not in os.path.basename(p).lower()]
+                if risky and clean:
+                    note += (" [!!] the renaming does not change the build: "
+                             + " and ".join(clean) + " IS "
+                             + " and ".join(risky)
+                             + " - the pack's force-terminator list matches"
+                               " names, so 'auto' will refuse BOTH")
+            review.append(note)
 
     lines_.append("  KEEP (the pack reads these):")
     for row in keep or ["    (nothing)"]:
@@ -737,7 +789,12 @@ def main(argv=None):
                    if "crash" in name.lower()]
     if not crash_files:
         lines.append("  (no crash file was collected - the black box writes to "
-                     "staged/ANTs/appdata/logs/native-crash.log)")
+                     + (os.path.join(dlss_root, "staged", "ANTs", "appdata",
+                                     "logs", "native-crash.log")
+                        if dlss_root else
+                        "<models>/DLSS/staged/ANTs/appdata/logs/native-crash.log")
+                     + "; it only exists after the node armed a native run, "
+                       "and deleting staged/ deletes it)")
     for path in crash_files:
         lines.append(f"  --- {os.path.basename(path)} ---")
         try:
@@ -756,6 +813,16 @@ def main(argv=None):
                          "older build; only the tail is shown")
         for row in session[-60:]:
             lines.append(f"  {row}")
+
+    lines.append("")
+    lines.append("--- RAW LOGS (inlined - this report is self-contained) " + "-" * 18)
+    inlined = [os.path.join(logs_dir, name)
+               for name in sorted(os.listdir(logs_dir))]
+    if inlined:
+        inline_logs(inlined, lines, skip=("crash",))
+    else:
+        lines.append("  (nothing to inline - no log was found where the pack "
+                     "writes them; see the LOGS section above)")
 
     lines.append("")
     lines.append("--- CRASH OFFSETS RESOLVED (module+0xrva -> export) " + "-" * 20)
@@ -784,9 +851,12 @@ def main(argv=None):
 
     lines.append("")
     lines.append("--- HOW TO SEND " + "-" * 58)
-    lines.append("  Send this whole text file. The 'files/' folder next to it")
-    lines.append("  holds the raw logs; nvngx.log is the NGX core's own log")
-    lines.append("  (the only instrument that survives a hard node kill).")
+    lines.append("  Send this whole text file - it is self-contained: the raw")
+    lines.append("  logs, the crash black box and the resolved offsets are all")
+    lines.append("  inlined above. Only if a log was marked [truncated] (the")
+    lines.append("  files/ folder holds the full copy) do you need to send the")
+    lines.append("  folder as well. nvngx.log is the NGX core's own log - the")
+    lines.append("  only instrument that survives a hard node kill.")
     lines.append("")
 
     report = os.path.join(out_dir, "rig_evidence.txt")

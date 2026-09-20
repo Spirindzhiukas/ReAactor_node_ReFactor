@@ -451,6 +451,52 @@ def main():
     finally:
         discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, \
             discovery.PACKAGE_DLL_DIR = saved
+
+    # ---- rig 2026-09-20 14:02: the "stock" file IS the RenoDX build ----
+    saved = (discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH,
+             discovery.PACKAGE_DLL_DIR)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            discovery.DLSS_ROOT = td
+            discovery.LEGACY_DLSSNR_PATH = os.path.join(td, "_nolegacy")
+            discovery.PACKAGE_DLL_DIR = os.path.join(td, "_nopkg")
+            nr_dir = os.path.join(td, "NR")
+            os.makedirs(nr_dir)
+            body = b"renodx-build" * 4096          # same bytes, two names
+            open(os.path.join(nr_dir, "nvngx_dlssnr_RenoDX_4000.dll"),
+                 "wb").write(body)
+            open(os.path.join(nr_dir, "nvngx_dlssnr.dll"), "wb").write(body)
+            check("rename: same_bytes() resolves identical files",
+                  discovery.same_bytes(
+                      os.path.join(nr_dir, "nvngx_dlssnr.dll"),
+                      os.path.join(nr_dir, "nvngx_dlssnr_RenoDX_4000.dll"))
+                  and not discovery.same_bytes(
+                      os.path.join(nr_dir, "nvngx_dlssnr.dll"),
+                      os.path.join(nr_dir, "nvngx_dlssnr_RenoDX_4000.dll")
+                      + ".missing"))
+            check("rename: the twin of a known-bad build is named",
+                  discovery.twin_of_known_bad(
+                      os.path.join(nr_dir, "nvngx_dlssnr.dll"))
+                  == "nvngx_dlssnr_RenoDX_4000.dll")
+            try:
+                discovery.resolve_nr_runtime_path("auto", skip_known_bad=True)
+                check("rename: auto refuses a renamed copy of the bad build",
+                      False)
+            except RuntimeError as exc:
+                check("rename: auto refuses a renamed copy of the bad build",
+                      "[ANTs]" in str(exc) and "byte-identical" in str(exc))
+            # a genuinely different build next to them is still usable
+            open(os.path.join(nr_dir, "nvngx_dlssnr_stock.dll"),
+                 "wb").write(b"stock-build")
+            check("rename: a genuinely stock build is still the auto pick",
+                  discovery.resolve_nr_runtime_path("auto", skip_known_bad=True)
+                  .endswith("nvngx_dlssnr_stock.dll"))
+            check("rename: the legacy route still takes what it is told",
+                  discovery.resolve_nr_runtime_path("auto")
+                  .endswith("nvngx_dlssnr.dll"))
+    finally:
+        discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, \
+            discovery.PACKAGE_DLL_DIR = saved
     check("native: the engine warns instead of refusing explicit picks",
           "is_known_force_terminator(dll_path)" in node_src
           and "force-terminator" in node_src
