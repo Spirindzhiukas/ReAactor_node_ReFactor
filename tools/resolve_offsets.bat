@@ -28,6 +28,8 @@ shift
 goto args
 :have_args
 if not defined OFFS set /p "OFFS=Type ONLY the offset, example 0x27799, and press ENTER: "
+if /i "%OFFS:~0,8%"=="KERNEL32" set "DLL=C:\Windows\System32\KERNEL32.DLL"
+if /i "%OFFS:~0,8%"=="KERNEL32" call set "OFFS=%%OFFS:~9%%"
 if not defined OFFS goto usage
 if not exist "%SCRIPT%" echo [X] resolver missing: "%SCRIPT%" - copy resolve_crash_offset.py there, or fix the SCRIPT line in this bat & goto fail
 if not exist "%DLL%" echo [X] dll missing: "%DLL%" - fix the DLL line in this bat & goto fail
