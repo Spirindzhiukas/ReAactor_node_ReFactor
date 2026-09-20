@@ -39,6 +39,7 @@ RECORD = []          # every faked D3D12/NGX call, in order
 RESOURCES = {}       # fake object ptr -> {"buf": bytearray, "bpp": int}
 PARAMS = {}          # fake core parameter dict (SR scenario)
 FAKE_HANDLE = 0xDEADBEEF
+close_failures = {"n": 0}   # how many upcoming Close() calls report failure
 
 
 def check(name, ok, extra=""):
@@ -126,7 +127,7 @@ def build_device_graph():
     fence = FakeFence()
     bpp = {0: 1, 10: 8, 28: 4, 34: 4, 41: 4}  # DXGI format -> bytes per pixel
 
-    def make_resource(size, fmt, label, width_px=0):
+    def make_resource(size, fmt, label, width_px=0, heap="default"):
         buf = (ctypes.c_char * max(size, 1))()  # addressable backing store
         impls = {
             2: (ctypes.c_uint64, [], lambda: 1),
@@ -137,7 +138,8 @@ def build_device_graph():
         obj = FakeObject(impls, label)
         # "w" = pixel width for textures (subresource copies), byte size for buffers
         RESOURCES[obj.ptr] = {"buf": buf, "bpp": bpp.get(fmt, 4),
-                              "w": width_px if width_px else size}
+                              "w": width_px if width_px else size,
+                              "heap": heap}
         return obj
 
     def copy_region(dst_loc, _x, _y, _z, src_loc, _box):
@@ -199,16 +201,40 @@ def build_device_graph():
         return 0
 
     def create_command_list(node_mask, ctype, allocator, initial, iid, out):
+        poisoned = {"yes": False}   # a barrier on a staging heap poisons it
+
         def barrier(count, ptr):
             subres = _u32_at(ptr, 16)
             assert subres == 0xFFFFFFFF, \
                 f"barrier subresources field is {subres}, not ALL_SUBRESOURCES"
-            RECORD.append(("Barrier", _u32_at(ptr, 20), _u32_at(ptr, 24)))
+            resource = _u64_at(ptr, 8)
+            heap = RESOURCES.get(resource, {}).get("heap")
+            if heap in ("upload", "readback"):
+                # real runtime: an invalid command puts the list in an error
+                # state and the NEXT Close() answers E_INVALIDARG
+                # (rig: 0x80070057 after the first staging upload)
+                poisoned["yes"] = True
+            RECORD.append(("Barrier", _u32_at(ptr, 20), _u32_at(ptr, 24),
+                           heap or "default"))
+
+        def close():
+            RECORD.append(("Close",))
+            if poisoned["yes"]:
+                poisoned["yes"] = False
+                return -2147024809      # E_INVALIDARG
+            if close_failures["n"] > 0:
+                close_failures["n"] -= 1
+                return -2147024809
+            return 0
+
+        def reset_list(alloc, initial_psi):
+            RECORD.append(("ResetList",))
+            return 0
 
         obj = FakeObject({
             2: (ctypes.c_uint64, [], lambda: 1),
-            9: (ctypes.c_int32, [], lambda: 0),
-            10: (ctypes.c_int32, [ctypes.c_void_p, ctypes.c_void_p], lambda a, b: 0),
+            9: (ctypes.c_int32, [], close),
+            10: (ctypes.c_int32, [ctypes.c_void_p, ctypes.c_void_p], reset_list),
             16: (None, [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
                         ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p], copy_region),
             26: (None, [ctypes.c_uint32, ctypes.c_void_p], barrier),
@@ -220,6 +246,14 @@ def build_device_graph():
     def create_committed(heap, heap_flags, desc, initial_state, clear, iid, out):
         heap_type = _u32_at(heap, 0)
         if heap_type not in (1, 2, 3):  # DEFAULT/UPLOAD/READBACK - 0 is UNKNOWN
+            return -2147024809
+        initial = int(initial_state)   # passed by value (c_uint32), not a pointer
+        # D3D12 rule: staging heaps have a FIXED implicit state (upload =
+        # GENERIC_READ 0xAC3, readback = COPY_DEST 0x400); anything else,
+        # COMMON included, is rejected with E_INVALIDARG.
+        if heap_type == 2 and initial != 0xAC3:
+            return -2147024809
+        if heap_type == 3 and initial != 0x400:
             return -2147024809
         dim = _u32_at(desc, 0)
         width = _u64_at(desc, 16)
@@ -243,7 +277,9 @@ def build_device_graph():
         else:
             return -2147024809  # only buffers + texture2d are supported here
         obj = make_resource(size, fmt, f"res(dim={dim},fmt={fmt})",
-                            width_px=int(width) if dim != 1 else 0)
+                            width_px=int(width) if dim != 1 else 0,
+                            heap={1: "default", 2: "upload",
+                                  3: "readback"}[heap_type])
         _write_ptr(out, obj.ptr)
         RECORD.append(("CreateCommittedResource", dim, int(width), int(height),
                        heap_type))
@@ -401,7 +437,9 @@ class FakeNgxModule:
                 return 1
             return get_caps
         if name == "fwd_set_slots":
-            return lambda target, a, b: None
+            def set_slots(target, a, b):
+                RECORD.append(("SetSlots", _as_int(target)))
+            return set_slots
         if name == "fwd_probe":
             def probe(a1, a2, a3, a4):
                 got = [_as_int(a) for a in (a1, a2, a3, a4)]
@@ -564,6 +602,20 @@ def main():
 
     device = D3D12Device.create()
     gpu = GpuContext(device, adapter_index=0)
+
+    # ---- staging-heap rules (the rig's 0x80070057 came from violating them)
+    staging_probe = device.create_buffer(256, d3d12.D3D12_HEAP_TYPE_UPLOAD,
+                                         "staging probe")
+    check("d3d12: staging buffers are created in their implicit state and "
+          "tagged with their heap",
+          staging_probe.state == d3d12.D3D12_RESOURCE_STATE_GENERIC_READ
+          and staging_probe.heap_type == d3d12.D3D12_HEAP_TYPE_UPLOAD)
+    barriers_before = sum(1 for e in RECORD if e[0] == "Barrier")
+    gpu.transition(staging_probe, d3d12.D3D12_RESOURCE_STATE_COPY_SOURCE)
+    check("d3d12: a state transition of a staging resource is refused and "
+          "never recorded (a barrier there is an invalid command - the "
+          "runtime poisons the list and Close answers E_INVALIDARG)",
+          sum(1 for e in RECORD if e[0] == "Barrier") == barriers_before)
     names = [entry[0] for entry in RECORD]
     check("flow: device, queue, allocator, list, fence, adapter created",
           names.count("CreateCommandQueue") == 1
@@ -589,6 +641,23 @@ def main():
           sess.ngx.feature_module is not None
           and os.path.basename(sess.ngx.feature_module.path) == "nvngx_dlssnr.dll"
           and sess.ngx.feature_module.path != str(nr_dll))
+    first_create_at = next(i for i, e in enumerate(RECORD)
+                           if e[0] == "CreateFeature")
+    check("nr: session init records no copies and no staging barriers "
+          "(the zeroed guides rely on D3D12's zero-init guarantee)",
+          not any(e[0] == "CopyTextureRegion"
+                  for e in RECORD[:first_create_at])
+          and not any(e[0] == "Barrier" and e[3] in ("upload", "readback")
+                      for e in RECORD))
+    core_exports = {ngx_fake.get_proc(None, n) for n in (
+        "NVSDK_NGX_D3D12_Init_ProjectID",
+        "NVSDK_NGX_D3D12_GetCapabilityParameters",
+        "NVSDK_NGX_D3D12_CreateFeature")}
+    routed_targets = {e[1] for e in RECORD if e[0] == "SetSlots"}
+    check("nr: the SESSION OWNER is bound directly (reference hosts route "
+          "only the snippet through their helper; the rig log showed the "
+          "core recording our shim as its caller)",
+          not (routed_targets & core_exports) and bool(routed_targets))
     check("nr: ProjectID session first, then the snippet Init_Ext",
           [e[0] for e in RECORD if e[0] in ("Init_ProjectID", "Init_Ext")][:2]
           == ["Init_ProjectID", "Init_Ext"])
@@ -652,6 +721,35 @@ def main():
           any(entry[0] == "SetEventOnCompletion" for entry in RECORD)
           and out3 == want)
     sess.close()
+
+    # ---- Close resilience: an unconclosable list is recovered loudly -------
+    # (rig signature: ID3D12GraphicsCommandList.Close -> 0x80070057, caused by
+    # an invalid barrier on an upload-heap staging buffer; the runtime's
+    # answer to an invalid recording is a poisoned list)
+    upload_tex = gpu.device.create_texture2d(
+        W, H, d3d12.DXGI_FORMAT_R8G8B8A8_UNORM, label="close-probe")
+    close_failures["n"] = 1
+    resets_before = sum(1 for e in RECORD if e[0] == "ResetList")
+    gpu.upload_texture(upload_tex, bytes(W * H * 4),
+                       d3d12.D3D12_RESOURCE_STATE_COMMON)
+    gpu.submit_and_wait()          # the failure surfaces here (Close)
+    check("d3d12: an unconclosable command list is dropped and reset "
+          "instead of failing the run (ANTS_D3D12_STRICT_CLOSE=1 opts out)",
+          sum(1 for e in RECORD if e[0] == "ResetList") > resets_before)
+    os.environ["ANTS_D3D12_STRICT_CLOSE"] = "1"
+    close_failures["n"] = 1
+    try:
+        gpu.upload_texture(upload_tex, bytes(W * H * 4),
+                           d3d12.D3D12_RESOURCE_STATE_COMMON)
+        gpu.submit_and_wait()
+        check("d3d12: strict-close mode re-raises", False)
+    except Exception as exc:
+        check("d3d12: strict-close mode re-raises",
+              "Close" in str(exc) and "80070057" in str(exc).upper())
+    finally:
+        os.environ.pop("ANTS_D3D12_STRICT_CLOSE", None)
+    close_failures["n"] = 0
+    gpu.submit_and_wait()          # leave the shared list clean for the rest
 
     # ---- legacy snippet-direct route (ANTS_NR_USE_OWN_PARAMS=1 geometry) ----
     FakeNgxModule.own_store = {}

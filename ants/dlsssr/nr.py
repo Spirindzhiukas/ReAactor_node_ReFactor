@@ -163,18 +163,16 @@ class DlssNrSession:
         self.output = dev.create_texture2d(
             self.w, self.h, d3d.DXGI_FORMAT_R16G16B16A16_FLOAT,
             label="nr output")
-        # Guides: a still frame has no motion and no depth. They are real
-        # resources (the contract requires them) and are zeroed once.
+        # Guides: a still frame has no motion and no depth, so they must read
+        # as zeros - and D3D12 guarantees that: a resource created with
+        # CreateCommittedResource is zero-initialized before any copy touches
+        # it. Uploading zeros would be a wasted submit (and was the first
+        # thing this session recorded, i.e. the first thing that could go
+        # wrong before the feature even exists).
         self.motion = dev.create_texture2d(
             self.w, self.h, d3d.DXGI_FORMAT_R16G16_FLOAT, label="nr motion")
         self.depth = dev.create_texture2d(
             self.w, self.h, d3d.DXGI_FORMAT_R32_FLOAT, label="nr depth")
-        zeros_motion = bytes(self.w * self.h * 4)
-        zeros_depth = bytes(self.w * self.h * 4)
-        uav = d3d.D3D12_RESOURCE_STATE_UNORDERED_ACCESS
-        self.gpu.upload_texture(self.motion, zeros_motion, uav)
-        self.gpu.upload_texture(self.depth, zeros_depth, uav)
-        self.gpu.submit_and_wait()
 
         self._scaling_cb = None
         self._apply_create_params(int(nr_preset))

@@ -555,6 +555,11 @@ def main():
           "where it expects a pointer)",
           'thunk="init_ext"' in ngx_src and "snippet ABI" in ngx_src
           and "fwd_init_ext" in (REPO / "ants" / "dlsssr" / "shim.py").read_text())
+    check("ngx: caller geometry - session owner direct, snippet through the "
+          "shim (ANTS_NR_CORE_VIA_SHIM=1 restores the old geometry)",
+          "route_through_shim" in ngx_src
+          and "ANTS_NR_CORE_VIA_SHIM" in ngx_src
+          and "self._owner_is_snippet or not core_direct" in ngx_src)
     check("ngx: feature 18 runs on the CORE's capability parameter map "
           "(GetCapabilityParameters first, AllocateParameters fallback)",
           "GetCapabilityParameters" in ngx_src
@@ -615,6 +620,12 @@ def main():
           "host's first step; ANTS_NR_NVAPI=0 opts out)",
           "_preload_nvapi" in ngx_src and "NvAPI_Initialize" in ngx_src
           and "ANTS_NR_NVAPI" in ngx_src)
+    check("ngx: the NGX log callback decodes the runtime's message pointer "
+          "(ctypes hands a CFUNCTYPE an int for c_void_p; the first "
+          "implementation logged '<unreadable>' for every line)",
+          "_read(message)" in ngx_src
+          and "read_some(int(ptr), 1024)" in ngx_src
+          and "message.decode(" not in ngx_src)
     check("ngx: NR sessions arm the trap + ntdll detour + int29 scan from a "
           "single instrumentation list",
           "_instrumented" in ngx_src
@@ -862,6 +873,17 @@ def main():
     check("d3d12: UAV resource flag is 0x8 (0x4 = render target)",
           d12.D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS == 0x8
           and tex[-8:] == (0x8).to_bytes(8, "little"))
+    d3d12_src = (REPO / "ants" / "dlsssr" / "d3d12.py").read_text()
+    check("d3d12: staging heaps are never transitioned (barriers on "
+          "UPLOAD/READBACK heaps are invalid commands - rig Close 0x80070057)",
+          "UPLOAD_READBACK_HEAPS" in d3d12_src
+          and "transition(staging" not in d3d12_src
+          and "Heap not closable" not in d3d12_src)
+    check("d3d12: any unconclosable command list is recovered loudly, with a "
+          "strict opt-out for A/B runs",
+          "ANTS_D3D12_STRICT_CLOSE" in d3d12_src
+          and "not closable" in d3d12_src
+          and "recorded since the last submit is LOST" in d3d12_src)
     check("d3d12: heap props 20B, barrier 32B",
           len(d12._heap_properties(0)) == 20
           and len(d12._transition_barrier(0x1234, 0, 2)) == 32)

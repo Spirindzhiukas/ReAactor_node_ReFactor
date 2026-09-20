@@ -201,10 +201,12 @@ _SHIM_LOGGED = set()   # shim paths already announced (console triage hygiene)
 class NgxModule:
     """A loaded NGX provider (driver core or snippet) + shim-routed calls."""
 
-    def __init__(self, module_path, use_shim=True, forwarder_dir=None):
+    def __init__(self, module_path, use_shim=True, forwarder_dir=None,
+                 route_through_shim=True):
         self.path = None
         self.handle = None
         self.forwarder = None
+        self._route = route_through_shim
         self._fwd_stub = None
         # The caller shim must be a module of its own whose code issues the
         # real `call` into the runtime (the return address has to point back
@@ -286,7 +288,14 @@ class NgxModule:
         snippet build receives ``(..., commonInfo, sdkVersion)``.
         """
         address = self.address(name)
-        if self._fwd_stub is None:
+        if self._fwd_stub is None or not self._route:
+            # Direct bind: the driver core is called straight from this
+            # process, exactly like any ordinary NGX application (the
+            # reference hosts only route the SNIPPET through their helper -
+            # the core's own Init/params entry points are bound directly
+            # there too). The rig's NGX log showed the core recording the
+            # caller module ("called from module nvngx.dll_ants.dll"), which
+            # is a geometry no working host exhibits.
             return win32.callable_at(address, argtypes, restype)
         # Bind the thunk ADDRESS with the caller's real prototype (a
         # CFUNCTYPE over a raw int is a native call; over a callable it
@@ -350,8 +359,16 @@ class NgxSession:
             use_shim = False
             _log().status("[ANTs] E1 EXPERIMENT: shim disabled (ANTS_NR_USE_SHIM=0) "
                           "- direct bind, no nvngx.dll module in this process")
-        self.module = NgxModule(module_path, use_shim=use_shim,
-                                forwarder_dir=writable_cache_dir("shim"))
+        # Caller geometry (reference-host parity): the SESSION OWNER is bound
+        # directly - only a snippet provider goes through the caller shim.
+        # ANTS_NR_CORE_VIA_SHIM=1 restores routing the core through the shim
+        # (the geometry every run up to 2026-09-20 used).
+        core_direct = os.environ.get("ANTS_NR_CORE_VIA_SHIM") != "1"
+        self._owner_is_snippet = bool(use_own_parameters)
+        self.module = NgxModule(
+            module_path, use_shim=use_shim,
+            forwarder_dir=writable_cache_dir("shim"),
+            route_through_shim=self._owner_is_snippet or not core_direct)
         self._own_parameters = None
         self.params = None
         self.handle = None
@@ -494,19 +511,36 @@ class NgxSession:
 
         The runtime keeps the pointer for the session, so it lives on the
         session. Message volume is capped - this is diagnostics, not a log
-        sink (ANTS_NR_NGX_LOG=0 turns it off)."""
+        sink (ANTS_NR_NGX_LOG=0 turns it off).
+
+        The message is a ``const char*``: ctypes hands a CFUNCTYPE callback a
+        plain int for it (not a bytes object), so the first implementations
+        printed ``<unreadable>`` for every line. It is read with the
+        VirtualQuery guard instead - a diagnostic callback must never fault
+        inside the runtime's logging path.
+        """
         limit = 400
         seen = {"n": 0}
+
+        def _read(ptr):
+            if not ptr:
+                return ""
+            try:
+                from .crashlog import _Mem, _kernel32
+                k32 = _kernel32()
+                if k32 is not None:
+                    raw = _Mem(k32).read_some(int(ptr), 1024)
+                else:
+                    raw = ctypes.string_at(int(ptr), 1024)
+            except Exception:
+                return ""
+            return raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
 
         def _cb(message, level, source):
             if seen["n"] >= limit:
                 return
             seen["n"] += 1
-            try:
-                text = message.decode("utf-8", "replace") if message else ""
-            except Exception:
-                text = "<unreadable>"
-            text = text.rstrip("\n")
+            text = _read(message).rstrip("\n")
             if ngx_log:
                 ngx_log(text, int(level or 0), int(source or 0))
             else:
@@ -527,7 +561,10 @@ class NgxSession:
         ``Init_Ext`` (public header order) -> classic 4-arg ``Init``.
         """
         owner = self.module
-        _log().status(f"NGX init -> {os.path.basename(str(owner.path or ''))}")
+        routed = "via the caller shim" if getattr(owner, "_route", True) \
+            else "bound directly"
+        _log().status(f"NGX init -> {os.path.basename(str(owner.path or ''))} "
+                      f"({routed})")
         last = 0
         if legacy:
             # Legacy snippet-direct route: the OWNER is the snippet build
@@ -602,8 +639,14 @@ class NgxSession:
         except Exception:
             address = None
         if not address:
+            # Harmless on Windows: the core reaches NVAPI itself (its log
+            # shows "Found matching adapter with NVAPI physical GPU handle").
+            # The pre-step exists for the Wine/vkd3d-NVAPI hosts, where the
+            # compatibility layer is lazy.
             _log().status(
-                "[ANTs] NvAPI pre-step: nvapi64.dll exposes no NvAPI_Initialize")
+                "[ANTs] NvAPI pre-step: nvapi64.dll exports no "
+                "NvAPI_Initialize here (harmless on Windows - the core "
+                "resolves NVAPI on its own)")
             win32.free_library(handle)
             return
         self._nvapi_handle = handle

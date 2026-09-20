@@ -7,6 +7,7 @@ d3d12.h / dxgi.h declarations.
 """
 
 import ctypes
+import os
 
 from .com import ComObject, guid, hresult_check
 from .errors import DlssSrError
@@ -167,14 +168,22 @@ def _transition_barrier(resource_ptr, before, after):
     return buf
 
 
+UPLOAD_READBACK_HEAPS = (D3D12_HEAP_TYPE_UPLOAD, D3D12_HEAP_TYPE_READBACK)
+
+
 class D3D12Resource(ComObject):
-    def __init__(self, ptr, label, width, height, fmt, byte_size, state):
+    def __init__(self, ptr, label, width, height, fmt, byte_size, state,
+                 heap_type=D3D12_HEAP_TYPE_DEFAULT):
         super().__init__(ptr, label)
         self.width = width
         self.height = height
         self.format = fmt
         self.byte_size = byte_size
         self.state = state
+        # Staging resources (UPLOAD/READBACK heaps) live in an IMPLICIT,
+        # permanent state and must never be listed in a barrier - see
+        # GpuContext.transition.
+        self.heap_type = heap_type
 
     def map(self):
         range_buf = _pack("<QQ", 0, 0)  # D3D12_RANGE {0, 0} = whole resource
@@ -303,7 +312,8 @@ class D3D12Device(ComObject):
                       D3D12_HEAP_TYPE_READBACK: "readback"}.get(heap_type),
                      D3D12_RESOURCE_STATE_COMMON)
         ptr = self._committed(heap_type, _resource_desc_buffer(size), state, label)
-        return D3D12Resource(ptr, label, size, 1, DXGI_FORMAT_UNKNOWN, size, state)
+        return D3D12Resource(ptr, label, size, 1, DXGI_FORMAT_UNKNOWN, size,
+                             state, heap_type=heap_type)
 
 
 def enumerate_adapters():
@@ -347,6 +357,25 @@ class GpuContext:
         self._closed = False
 
     def transition(self, resource, to):
+        if getattr(resource, "heap_type", D3D12_HEAP_TYPE_DEFAULT) in \
+                UPLOAD_READBACK_HEAPS:
+            # D3D12 rule: UPLOAD-heap resources are permanently in
+            # GENERIC_READ and READBACK-heap ones in COPY_DEST; they take no
+            # barriers, and COMMON is not even a legal state for them. A
+            # barrier here is an INVALID COMMAND - the runtime poisons the
+            # command list and the next Close() fails with E_INVALIDARG
+            # (rig: "[ANTs] ID3D12GraphicsCommandList.Close failed:
+            # 0x80070057" right after the first staging upload). Skip it,
+            # loudly once per process, and never record it.
+            if not getattr(self, "_staging_warned", False):
+                self._staging_warned = True
+                from ..log import dlss_logger
+                dlss_logger.warning(
+                    "[ANTs] ignored a resource-state transition of an "
+                    "upload/readback-heap staging resource (%s) - D3D12 "
+                    "keeps those heaps in a fixed implicit state and "
+                    "rejects barriers on them.", resource.label)
+            return
         if resource.state == to:
             return  # already there - a redundant barrier only warns the debug layer
         barrier = _transition_barrier(resource.ptr, resource.state, to)
@@ -372,7 +401,9 @@ class GpuContext:
         addr = staging.map()
         ctypes.memmove(addr, payload, len(payload))
         staging.unmap()
-        self.transition(staging, D3D12_RESOURCE_STATE_COPY_SOURCE)
+        # No barrier on the staging buffer: UPLOAD-heap resources are always
+        # readable by the copy engine (barriers on them are invalid and
+        # poison the list - see transition()).
         self.transition(texture, D3D12_RESOURCE_STATE_COPY_DEST)
         src_loc = _copy_location_footprint(staging.ptr, texture.format,
                                            texture.width, texture.height, row_pitch)
@@ -382,7 +413,6 @@ class GpuContext:
                         _CVOID_P(), _CVOID_P()],
                        None, dst_loc, 0, 0, 0, src_loc, None)
         self.transition(texture, final_state)
-        self.transition(staging, D3D12_RESOURCE_STATE_COMMON)
         staging.release()
 
     def readback_texture(self, texture, state):
@@ -413,17 +443,28 @@ class GpuContext:
         try:
             self.list.call_hr(_LIST_CLOSE, [], what="Close")
         except DlssSrError as exc:
-            if "0x80004005" not in str(exc):
+            if os.environ.get("ANTS_D3D12_STRICT_CLOSE") == "1":
                 raise
-            # The runtime mangled or closed the shared list (observed with
-            # the ReShade-oriented RenoDX NR build after CreateFeature).
-            # Recover: drop the recording, restore the list, and continue -
-            # loudly, because NGX-side GPU work may have been lost.
+            # Close refused: the command list is in a state we did not leave
+            # it in. Two known causes, both seen on the rig -
+            #  * 0x80070057 (E_INVALIDARG): the recording contained an
+            #    INVALID command (D3D12 poisons the list, e.g. a barrier on
+            #    an upload/readback-heap resource; fixed at the source) or
+            #    the runtime closed the list behind us;
+            #  * 0x80004005: the ReShade-oriented RenoDX build mangles the
+            #    shared list.
+            # Either way the recording is void and cannot be salvaged - drop
+            # it, restore the list, and continue LOUDLY, because GPU work may
+            # have been lost (a later upload/evaluate would then read stale
+            # memory, which is exactly the kind of silent wrongness we do not
+            # ship). ANTS_D3D12_STRICT_CLOSE=1 turns this into a hard error
+            # for A/B runs.
             from ..log import dlss_logger
             dlss_logger.warning(
-                "[ANTs] NGX runtime disturbed the command list (Close: %s) - "
-                "resetting it and continuing. If output looks wrong, the "
-                "runtime build needs a different submission style.", exc)
+                "[ANTs] D3D12 command list not closable (%s) - dropping the "
+                "recording, resetting the list and continuing. GPU work "
+                "recorded since the last submit is LOST; if the output looks "
+                "stale, send this line with the rest of the log.", exc)
             self.list.call_hr(_LIST_RESET, [_CVOID_P(), _CVOID_P()],
                               self.allocator.ptr, None, what="Reset")
             self.allocator.call_hr(_ALLOCATOR_RESET, [], what="Reset")

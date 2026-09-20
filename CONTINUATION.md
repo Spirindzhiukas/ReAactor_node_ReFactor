@@ -139,6 +139,70 @@ module(s) ...`, and then either `N fast-fail site(s) converted to breakpoints
 in <module>` or `no fast-fail site (...)`. The three outcomes below are
 unchanged.
 
+## Run 29 (2026-09-20, first guarded build) — what the NGX log proved
+
+**Deployment + diagnostics all verified in-console** (`NR/SR host build
+2026-09-20.3`, selected runtime staged with the sibling named in the warning,
+`ntdll detour ARMED`, int29 scan `10 sites in session owner _nvngx.dll`,
+`6 in snippet nvngx_dlssnr.dll`). No silent kill this time: the node failed
+with **our own** D3D12 bug (`ID3D12GraphicsCommandList.Close 0x80070057` from
+staging-heap barriers) — fixed, and the guide zero-fill uploads are gone (a
+committed D3D12 resource already reads as zeros, so the first submit
+disappeared entirely).
+
+**The new black box is the core's own log** (it survives any death and lands in
+OUR tree): `ComfyUI/models/DLSS/staged/ANTs/appdata/logs/nvngx.log`; the core
+says `Logging to requested file ... enabled successfully`. Always ask for it
+with the console.
+
+**The core refuses to host a community snippet as its own feature provider.**
+Quoted from that log, for every snippet it tries: `NGXSecureLoadFeature ->
+SnippetLocationInfo::load`, then for ours
+`nvLoadSignedLibraryW() failed on snippet '...nvngx_dlssnr.dll' missing or
+corrupted - last error Cannot find the requested object.` →
+`NGXLoadMetaDataViaGetFileVersionInfo: swscanf_s() failed` →
+`unable to load DLL metadata via FileVersionInfo for snippet` →
+`NGXLoadFromPath failed for <dir>: 0xBAD00000` →
+`ModuleName - nvngx_dlssnr.dll doesn't exist in any of the search paths!`
+The version/FV hypothesis is confirmed, but it applies to the SNIPPET inside
+the CORE's loader — not to our helper. A renamed community build cannot pass a
+signed-snippet gate, so **the core-owned FEATURE path is closed for community
+builds**; the snippet must be hosted by us (which our layout already does —
+the core only owns the session + capability parameters).
+
+**The caller helper is NOT signature- or version-gated** (offline pefile on the
+community helper that drives feature 18 in their hosts,
+`ext_research/nvngx.dll_comfy.dll`): security directory `0x0` (no Authenticode
+table), zero `VS_VERSION_INFO`/`FileVersion` strings, no resource directory at
+all — and it works there. Our own unsigned, versionless shim is the same
+geometry as the proven-working one; do not add a version resource looking for
+a cure.
+
+**Caller geometry fix (reference-host parity).** The log showed
+`NGXInitContext: ... called from module nvngx.dll_ants.dll` — i.e. the CORE was
+being called through our helper, a geometry no working host exhibits (their
+bridges call the core's entry points directly and route ONLY the snippet
+through the helper). The session OWNER is now bound directly; a snippet
+provider still goes through the shim; `ANTS_NR_CORE_VIA_SHIM=1` restores the
+old geometry, and the console announces which binding was used
+(`NGX init -> _nvngx.dll (bound directly)`).
+
+**Also confirmed by the log:** the ProjectID route works
+(`MapProjectId: Found cms id 876232c for engine: custom engineVersion
+ANTs 1.1.0 projectID 53f803cc-...`); the core resolved the adapter through
+NVAPI itself, so our `NvAPI_Initialize` pre-step is Wine/vkd3d-only (the
+message now says so); the parameter backend on this driver is the vtable map
+(resource=0 pointer=2 int=3 float=6), the flat C API is absent.
+
+**Next run (30) needs no env lines** — or `set "NVSDK_NGX_LOG_LEVEL=1"` for a
+looser core log. Expected: build marker → runtime in use → int29 scan →
+`NGX init -> _nvngx.dll (bound directly)` → `Init_ProjectID` → capability
+params → snippet `Init_Ext via caller shim` → `CreateFeature` → `evaluate`.
+Send: console + `staged/ANTs/appdata/logs/nvngx.log` (+ the crash file if the
+int29 trap names a breakpoint site). E1 (`ANTS_NR_USE_SHIM=0`) is still
+unexecuted and now matters only for "does the shim's PRESENCE change anything"
+— the helper's own signature/version is exonerated.
+
 ## Run 28+ host layout — IMPLEMENTED while run 28 is pending (2026-09-20)
 
 The whole NR host was rebuilt onto the layout the **working** hosts of this

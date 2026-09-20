@@ -29,11 +29,25 @@ python and never registers callbacks.
       (`crashlog._Mem`), PE header validation, per-module skip-with-reason, and
       the staging rule that had silently loaded a same-named sibling instead of
       the selected build. The launch bat needs no change.
-- [ ] **Run 28 (owner, RE-RUN — one run carries both gates):** `set "ANTS_NR_USE_SHIM=0"`
+- [x] **Run 29 (2026-09-20, first guarded build) — node failed on OUR D3D12 bug,
+      and the NGX log finally spoke**: staging-heap barriers are invalid commands
+      (Close -> 0x80070057); fixed + the guide zero-fill uploads are gone.
+      The core log shows it REJECTS the community snippet as a core-hosted
+      provider (`nvLoadSignedLibraryW` + FileVersionInfo -> 0xBAD00000), so the
+      core-owned FEATURE path is closed for community builds - the snippet is
+      hosted by us, as the working hosts do. Offline pefile: their working
+      caller helper is unsigned and versionless, so the "VERSION resource in
+      the shim" cure is dead. Re-run next; always send
+      `models/DLSS/staged/ANTs/appdata/logs/nvngx.log` with the console.
+- [ ] **Run 30 (owner): plain re-run of the fixed build** (`set "NVSDK_NGX_LOG_LEVEL=1"`,
+      no ANTS_ lines needed) — the first run that should reach CreateFeature +
+      evaluate with the full host-parity contract. Console + nvngx.log + crash
+      file if the int29 trap names a site.
+- [ ] **Run 31 (owner, E1):** `set "ANTS_NR_USE_SHIM=0"`
       in the launch bat (keep `NVSDK_NGX_LOG_LEVEL=1`), scoop, run once.
-      - Works → VERSION-gate-vs-shim confirmed → cure = ship a real
-        VS_VERSIONINFO resource inside our shim builder (keep the shim), or
-        simply keep the shim off the `nvngx.dll` name (run-29 candidate 1).
+      - Works → the shim's PRESENCE is implicated (its signature/version
+        cannot be: the proven-working community helper has neither) → keep
+        the shim off the `nvngx.dll` name / dig into module-table geometry.
       - Dies with `NATIVE CRASH: exception 0x80000003 (breakpoint (patched
         fast-fail site)) at MODULE+0xOFF` → resolve the offset
         (`resolve_offsets.bat`) → the gate's address is named → decide
