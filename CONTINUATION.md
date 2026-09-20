@@ -411,6 +411,20 @@ Rules now enforced in code:
   a candidate that is byte-identical to a force-terminator-listed sibling
   (warning names the twin; an EXPLICIT widget pick still runs it), so the
   "stock vs RenoDX" A/B cannot be confounded by a file rename again.
+- **THE BUILD NAMING RULE (owner directive, now a standing rule in CLAUDE.md 2b).**
+  `auto` loads the newest build of a category, and the version comes from the
+  file name: `nvngx_dlssnr_2026-09-14.dll` (date, preferred for the community
+  NR builds) or `nvngx_dlss_310.9.1.dll` / `nvngx_dlssg_310.9.1.dll` (NVIDIA
+  numbering). Priority: date > dotted version > bare number > no version
+  (unversioned sorts last and is ordered by file date). Free text after the
+  version is ignored; hardware tags (4000, 3090, series, friendly) are never
+  versions. The `dll_version` selector lists builds newest first and an
+  explicit pick always wins. Implementation: `ants/dlsssr/versions.py`.
+  The owner's rig (`nvngx_dlssnr.dll` + `nvngx_dlssnr_RenoDX_4000_series_friendly.dll`,
+  one build under two names, from Merserk's Visual.Enhancer.v10.0 bundle) is a
+  deliberate picker test - so `auto` must never refuse it: it prefers the
+  newest SAFE build when one exists, otherwise warns loudly and uses the
+  newest (the risk list is a queue-safety preference, not a veto).
 - **The report is ONE file.** The raw logs (nvngx.log etc.) are inlined in
   `rig_evidence.txt` (400 KB per file cap, `[truncated: last ...]` marker when
   hit), on top of the already-inlined black box and resolved offsets. The

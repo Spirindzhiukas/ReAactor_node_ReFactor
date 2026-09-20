@@ -737,3 +737,43 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   logs live there.
 - Suite at this commit: **373 checks** (dlsssr 85, dlssnr_bridge 82,
   native_flow 35) + pyflakes/scope/smoke green.
+
+### 2026-09-20 (owner Q&A #2) — THE BUILD NAMING RULE: names carry versions, auto loads the newest
+- **Owner context (important, previously unknown to us):** both NR files in his
+  tree are the SAME RenoDX build hacked for 3000/4000-series support, taken
+  from Merserk's `Visual.Enhancer.v10.0` bundle - the same bundle the
+  neuroframe pair comes from, which is why the pair is tied to those
+  non-standard runtimes; the build itself originates in RenoDX's ReShade
+  bundle. He keeps BOTH names **deliberately, to test our automatic picking
+  and manual selection**. One of them will later be replaced with a newer
+  build - the picker must work before that. (Also explains why the previous
+  session's per-folder helper copies existed: nobody had written the rule
+  down.)
+- **THE RULE (now in `CLAUDE.md` 2b, `README.md`, `docs/MODELS_DLSS_LAYOUT.md`
+  and implemented in the new `ants/dlsssr/versions.py`):** the FILE NAME
+  carries the version - `nvngx_dlssnr_<date>.dll` for the community NR
+  builds, `nvngx_dlss_<version>.dll` / `nvngx_dlssg_<version>.dll`
+  (NVIDIA numbering) for SR/FG. `auto` = newest by that rule; date > dotted
+  version > bare number > no version (unversioned sorts last, ordered by file
+  date); free text after the version is ignored; hardware tags (4000, 3090,
+  series, friendly) are never versions. The selector lists builds newest
+  first; an explicit pick always wins.
+- **Decision changed (my previous session's byte-twin refusal was too strict):**
+  `auto` NEVER refuses an NR folder whose builds are all on the rig-proven
+  risk list - his own folder is exactly that case. New policy: prefer the
+  newest SAFE build when one exists (loud note naming what was skipped and how
+  to override), otherwise use the newest risky build with a loud warning
+  (runs 14-19 lost the session; run 30 reached EvaluateFeature and threw a
+  catchable exception - these builds are the live line of work, not a dead
+  end). A rename still counts as the same risky build (byte-identity), and an
+  unversioned file newer ON DISK than the picked build is reported, so nobody
+  has to guess why it lost.
+- **SR side unified**: `_sr_set_dll` picks the newest inside a set folder, and
+  `resolve_sr_dll("auto")` ranks flat files and subfolders together by the same
+  rule (a stale widget selection falls back to the newest build, loudly).
+  `ants/dlsssr/discovery.py` got a fallback logger (importable without ComfyUI).
+- **Collector**: the audit now prints `AUTO would load in <category>/: <name>
+  (<version>)` for every category and annotates each KEEP line with the
+  version it parsed - the owner sees which build wins, in his own report.
+- Suite: **387 checks** (dlsssr 87, dlssnr_bridge 94, native_flow 35) +
+  pyflakes/scope/smoke green.

@@ -75,17 +75,41 @@ The engine validates execution providers against the installed build and logs wh
 | `reswapper_128/256.onnx` | `models/reswapper/` | manual |
 | `hyperswap_1x_256.onnx` | `models/hyperswap/` | manual (see [facefusion models](https://huggingface.co/facefusion/models-3.3.0/tree/main)) |
 | GFPGAN / CodeFormer / GPEN | `models/facerestore_models/` | downloaded when the FaceRestore Model Loader executes with a canonical entry |
-| DLSS-NR DLLs (3rd-party) | `models/DLSS/dlssnr_<version>/` (any filenames) | **manual only** — see `ants/dlssnr/dll_README.md` |
+| DLSS-NR DLLs (3rd-party) | `models/DLSS/NR/` (any filenames) | **manual only** — see `docs/MODELS_DLSS_LAYOUT.md` and `ants/dlssnr/dll_README.md` |
+| DLSS-SR / -FG DLLs | `models/DLSS/SR/`, `models/DLSS/FG/` | manual only |
+| Neuroframe helper pair | `models/DLSS/Merserk_DLLS/` | manual only, **one copy** (author: Merserk) |
 
 ## DLSS5 (ANTs⚡DLSS5 Frame Enhancer)
 
 Hybrid enhancer: our feature-rich DLSS-NR surface + OreX-inspired temporal history management + a RenoDX-inspired HDR Colour Bridge stage. Design notes, comparison and full credits: [docs/RESEARCH_dlss5_hybrid.md](docs/RESEARCH_dlss5_hybrid.md).
 
-This node never downloads DLLs. Place your DLL sets into `ComfyUI/models/DLSS/dlssnr_<version>/` —
-category folders (`NR/`, `SR/`, `FG/`) with one folder per version inside, **any .dll filenames accepted** (the engine is identified by its exports, not
-by name) — then pick the set in the node's `dll_version` selector (`auto` picks the first found set;
-`refresh` re-scans after you add DLLs). `nvngx_dlssnr.dll` must be procured by you (NVIDIA's license
-prohibits redistributing it) — sources and licenses in `ants/dlssnr/dll_README.md`.
+This node never downloads DLLs. Place your builds into `ComfyUI/models/DLSS/NR/` (and `SR/`, `FG/`),
+**any .dll filenames accepted** (the engine is identified by its exports, not by name), then pick one in
+the node's `dll_version` selector (`refresh` re-scans after you add DLLs). `nvngx_dlssnr.dll` must be
+procured by you (NVIDIA's license prohibits redistributing it) — sources and licenses in
+`ants/dlssnr/dll_README.md`, full path/keep-delete reference in `docs/MODELS_DLSS_LAYOUT.md`.
+
+### Which build gets loaded — the naming rule
+
+`dll_version = auto` loads the **newest** build it can find, and the version comes from the **file
+name**, so put it there:
+
+| scheme | example | use it for |
+|---|---|---|
+| date | `nvngx_dlssnr_2026-09-14.dll` | the community NR builds (no official numbering) |
+| NVIDIA version | `nvngx_dlss_310.9.1.dll`, `nvngx_dlssg_310.9.1.dll` | the driver-supplied SR/FG runtimes |
+| bare number | `nvngx_dlssnr_2.dll` | quick local A/B builds (lowest priority) |
+
+A date outranks a dotted version, which outranks a bare number, which outranks **no version at all**
+(an unversioned file is ordered by its file date and always sorts last — rename it if it should win).
+Free text after the version is ignored: `nvngx_dlssnr_2026-09-14_renodx4000.dll` and
+`nvngx_dlssnr_2026-09-14.dll` are the same version, and hardware tags (`4000`, `3090`, `series`,
+`friendly`) are never mistaken for a version. The selector lists builds **newest first**, and an
+**explicit pick always wins** — that is the way to run one specific build deliberately.
+
+The NR engine additionally avoids builds on the rig-proven risk list (see below) when a safe build
+exists, and tells you loudly when it does either. Names never decide *what a file is*: the runtime is
+identified by probing its exports, and anything that is not a runtime is refused by name and path.
 
 **NR Schedules** — replace the old ``nr_passes`` repeat with the **ANTs⚡DLSS NR Scheduler**: a style
 per pass (Natural/Cinematic cycling is the owner-validated default; varied passes beat monolithic

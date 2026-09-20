@@ -72,6 +72,14 @@ python and never registers callbacks.
       a force-terminator build (byte comparison, warning names the twin);
       explicit selection in `dll_version` is the sanctioned way to run it.
       The report is one self-contained file now (logs inlined).
+- [x] **THE BUILD NAMING RULE (owner directive 2026-09-20)** — `auto` loads the newest
+      build, version read from the FILE NAME (`nvngx_dlssnr_<date>.dll`,
+      `nvngx_dlss_<version>.dll`); date > dotted > bare number > unversioned; selector lists
+      newest first; explicit pick always wins. `ants/dlsssr/versions.py`, wired into the NR
+      and SR pickers, the widget tooltips, the status lines, the collector audit and the docs
+      (README + CLAUDE.md 2b + MODELS_DLSS_LAYOUT.md). The NR picker no longer refuses an
+      all-risky folder (the owner's own rig): it prefers the newest safe build, else warns and
+      uses the newest.
 - [ ] **Run 31 (owner): plain re-run** (`set "NVSDK_NGX_LOG_LEVEL=1"`,
       no ANTS_ lines needed) — the first run that should reach CreateFeature +
       evaluate with the full host-parity contract. Console + nvngx.log + crash

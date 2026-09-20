@@ -111,13 +111,19 @@ class ReFactorDLSS5Enhancer:
                 "nr_dll_version": (discovery.category_choices("NR"),
                                    {"tooltip": "NR runtime for the native engine - EVERY .dll directly "
                                                "inside models/DLSS/NR/ is listed individually (plus one "
-                                               "entry per version subfolder). 'auto' picks the first found. "
+                                               "entry per version subfolder), NEWEST FIRST. 'auto' loads "
+                                               "the newest build according to the naming rule: put a date "
+                                               "(nvngx_dlssnr_2026-09-14.dll) or a version "
+                                               "(nvngx_dlssnr_310.9.1.dll) in the file name - see "
+                                               "docs/MODELS_DLSS_LAYOUT.md. An explicit pick always wins. "
                                                "Use the refresh button after adding files."}),
                 "sr_dll_version": (discovery.category_choices("SR"),
                                    {"tooltip": "SR runtime (nvngx_dlss*.dll) - each .dll directly inside "
                                                "models/DLSS/SR/ is listed individually (e.g. nvngx_dlss.dll "
-                                               "AND nvngx_dlss_310.9.1.dll), plus version subfolders. Used by "
-                                               "the pre-denoise SR pass (and the SR node)."}),
+                                               "AND nvngx_dlss_310.9.1.dll), plus version subfolders, NEWEST "
+                                               "FIRST. 'auto' loads the newest build by the naming rule "
+                                               "(NVIDIA's own version numbers in the file name). Used by the "
+                                               "pre-denoise SR pass (and the SR node)."}),
                 "fg_dll_version": (discovery.category_choices("FG"),
                                    {"tooltip": "Frame Generation builds (models/DLSS/FG/). RESERVED for a "
                                                "future release - selecting a build has no effect yet."}),
@@ -264,8 +270,13 @@ class ReFactorDLSS5Enhancer:
             # (see _native_session_for); NGX providers must not be churned.
             self.native_key = None
             self.native_dll_path = dll_path
-            logger.status(f"DLSS-5 native NGX host engine selected (dll: {dll_path}); "
-                          "the session is created on the first frame.")
+            how = ("auto - newest by the naming rule"
+                   if (not nr_choice or nr_choice in ("auto", "refresh"))
+                   else "explicitly selected")
+            logger.status(
+                f"DLSS-5 native NGX host engine: "
+                f"{discovery.describe_runtime(dll_path)} [{how}]; the session "
+                "is created on the first frame.")
             return
         # Legacy helper engine
         self._close_native()
@@ -284,7 +295,9 @@ class ReFactorDLSS5Enhancer:
             self.manager.initialize(self._ordinal)
             self.manager_dll_dir = dll_dir
             gpu = self.manager.gpu_name() or f"GPU {self._ordinal}"
-            logger.status(f"DLSS-5 Bridge initialized on {gpu} using DLL set: {dll_dir}")
+            logger.status(f"DLSS-5 Bridge initialized on {gpu} using DLL set: "
+                          f"{dll_dir} "
+                          f"[nvngx_dlssnr: {discovery.describe_runtime(dll_path)}]")
 
     def _ensure_native_gpu(self):
         """The D3D12 GPU context is created once, on demand - whichever

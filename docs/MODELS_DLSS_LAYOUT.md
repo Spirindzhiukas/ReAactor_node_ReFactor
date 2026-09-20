@@ -108,6 +108,37 @@ Deleting a DLL that ComfyUI currently has loaded fails with a sharing
 violation — that is Windows protecting the file, not a problem. Close
 ComfyUI and delete again.
 
+## Which build `auto` loads — THE BUILD NAMING RULE
+
+`auto` loads the **newest** build of a category, and the version is read from the **file name**:
+
+| scheme | example | priority |
+|---|---|---|
+| date | `nvngx_dlssnr_2026-09-14.dll`, `nvngx_dlssnr_20260914.dll` | highest |
+| dotted version (NVIDIA numbering) | `nvngx_dlss_310.9.1.dll`, `nvngx_dlssnr_v10.0.dll` | middle |
+| bare number | `nvngx_dlssnr_2.dll` | low |
+| no version | `nvngx_dlssnr.dll`, `..._RenoDX_4000_series_friendly.dll` | lowest (ordered by file date) |
+
+Within one scheme the highest number wins; ties are broken by file date, then by name. Free text
+after the version never matters (`_renodx4000`, `_beta2`, `_merserk`), and hardware/vendor tags
+(`4000`, `3090`, `series`, `friendly`, `rtx`) are never mistaken for a version. The `dll_version`
+selector lists builds **newest first**, and an **explicit pick always wins** — that is how you run
+one specific build deliberately.
+
+The rule orders candidates; it never identifies them: a file is a runtime only if it exports the
+runtime entry points, and anything else is refused loudly with its path.
+
+### The NR safety net (why `auto` sometimes picks the second-newest)
+
+The NR engine keeps a short list of builds that were **rig-proven to kill the process** on an
+older host layout (RenoDX-derived builds, runs 14-19). `auto` on the native engine prefers the
+newest build that is NOT on that list, and says so loudly. When **every** candidate is on it —
+which is the owner's own folder, and deliberate: he keeps several names to test the picker — the
+newest is used with a loud warning rather than refusing, because those builds are the active line
+of work (run 30 reached `EvaluateFeature` and threw a catchable exception). A **rename is not a
+different build**: a file byte-identical to a listed build is treated as the same risky build, and
+the report calls that out.
+
 ## Legacy locations still scanned (graceful fallbacks)
 
 `models/DLSS/dlssnr_<version>/`, flat `models/DLSS/*.dll`,

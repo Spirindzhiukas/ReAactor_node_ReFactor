@@ -20,9 +20,26 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
    downloads anything. `nvngx_dlssnr.dll` stays 100% user-procured (NVIDIA's license
    prohibits redistribution). The neuroframe helper DLLs (author Merserk) may be linked,
    never silently bundled — license: `LICENSE-Merserk.txt` in Gourieff's HF dataset tree.
-2. **DLSS DLL location is enforced:** `ComfyUI/models/DLSS/dlssnr_<version_name>/`, and
-   **ANY .dll filenames are accepted** (the engine is identified by probing its exports,
-   never by filename). Legacy `models/dlssnr/` + package `dll/` remain graceful fallbacks.
+2. **DLSS DLL location is enforced:** `ComfyUI/models/DLSS/<NR|SR|FG>/` (flat builds and
+   `<version>/` subfolders), and **ANY .dll filenames are accepted** — the engine is
+   identified by probing its exports, never by filename. The neuroframe helper pair lives
+   **only** in `models/DLSS/Merserk_DLLS/`; `staged/` is a disposable working area the pack
+   creates. Paths + keep/delete: `docs/MODELS_DLSS_LAYOUT.md`. Legacy `models/dlssnr/` +
+   package `dll/` remain graceful fallbacks.
+2b. **THE BUILD NAMING RULE (owner directive 2026-09-20):** a build's **file name carries its
+   version** — `nvngx_dlssnr_<date>.dll` (community NR builds) / `nvngx_dlss_<version>.dll`,
+   `nvngx_dlssg_<version>.dll` (NVIDIA numbering). `auto` in `dll_version` loads the **newest**
+   build by that rule (date > dotted version > bare number > no version, then file date, then
+   name); the selector lists builds newest-first; an **explicit pick always wins**. Free text
+   after the version is ignored, hardware tags (`4000`, `3090`, `series`, `friendly`) are never
+   versions. Implementation + rationale: `ants/dlsssr/versions.py` (shared by NR and SR).
+   Consequences to keep: the NR picker **never refuses** a folder whose builds are all on the
+   rig-proven risk list — it warns loudly and uses the newest (the owner's own rig is exactly
+   that case and he keeps duplicate names on purpose to test the picker); a rename is not a
+   different build (byte-identical twins are treated as the same risky build); an unversioned
+   file that is newer on disk than the picked build is reported, never silently ignored.
+   The collector prints what `auto` would load per category. Do not "fix" any of this without
+   the owner's explicit instruction.
 3. **Loud-failure pattern** for missing dedicated models: raise a `RuntimeError` starting
    with `[ANTs]`, naming the exact expected path and the fix. The owner explicitly likes
    this style — never silently degrade to a fallback when a dedicated model is missing.

@@ -488,12 +488,15 @@ def _rig_evidence_check():
                           and "NGXLoadFromPath failed: 0xBAD00000" in report
                           and "[truncated: last" not in report
                           and "self-contained" in report)
-        # the audit names the rename trap AND the helper duplicates
+        # the audit names the rename trap AND the helper duplicates, and says
+        # which build 'auto' would load (the naming rule, in the owner's own
+        # report - so no one has to guess which file won)
         audit = ("MODELS/DLSS LAYOUT AUDIT" in report
                  and "the renaming does not change the build" in report
                  and "IS" in report
                  and "(helper duplicate" in report
-                 and "staging area - rebuilt on demand" in report)
+                 and "staging area - rebuilt on demand" in report
+                 and "AUTO would load in NR/:" in report)
         return (code == 0 and self_contained and audit
                 and auto and guard and outside and offsets and inlined
                 and "2099-01-01.1" in report          # deployment marker
@@ -1053,6 +1056,15 @@ def main():
             resolved = sr_disc.resolve_sr_dll("nvngx_dlss_310.9.1.dll".rsplit(".", 1)[0])
             check("sr discovery: resolve by set name hits the right dll",
                   resolved.endswith("nvngx_dlss_310.9.1.dll"))
+            # THE BUILD NAMING RULE: newest by version in the file name
+            open(os.path.join(sr_root, "nvngx_dlss_320.1.0.dll"),
+                 "wb").write(b"x" * 1_300_000)
+            check("sr: auto loads the NEWEST build by the naming rule "
+                  "(version in the file name, not list order)",
+                  sr_disc.resolve_sr_dll("auto").endswith("nvngx_dlss_320.1.0.dll"))
+            check("sr: an explicit pick beats the version rule",
+                  sr_disc.resolve_sr_dll("nvngx_dlss_310.9.1")
+                  .endswith("nvngx_dlss_310.9.1.dll"))
             try:
                 nr_disc.DLSS_ROOT = os.path.join(td, "empty")
                 sr_disc.resolve_sr_dll("auto")
@@ -1075,8 +1087,10 @@ def main():
             check("sr: masquerader guard rejects a small stub",
                   "under 1 MB" in str(exc) and "helper/caller stub" in str(exc))
         open(os.path.join(td, "SR", "nvngx_dlss_310.9.1.dll"), "wb").write(b"x" * 1_100_000)
-        check("sr: auto skips stubs and finds the real runtime",
-              sr_disc.resolve_sr_dll("auto").endswith("nvngx_dlss_310.9.1.dll"))
+        # the 1.1 MB stub above is unversioned AND small: auto must skip the
+        # stub and land on the newest real runtime in the folder
+        check("sr: auto skips stubs and finds the newest real runtime",
+              sr_disc.resolve_sr_dll("auto").endswith("nvngx_dlss_320.1.0.dll"))
 
         # NR runtime locator
         nr_dir = os.path.join(td, "NR", "v1")

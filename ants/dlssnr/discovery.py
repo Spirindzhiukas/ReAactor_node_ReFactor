@@ -256,6 +256,10 @@ def category_entries(category: str):
                     out.append({"name": entry, "path": candidate, "kind": "dir"})
             elif entry.lower().endswith(".dll"):
                 out.append({"name": entry, "path": candidate, "kind": "dll"})
+    # THE BUILD NAMING RULE: newest first, so the widget opens on the build
+    # 'auto' would load. See ants/dlsssr/versions.py and docs/MODELS_DLSS_LAYOUT.md.
+    from ..dlsssr import versions
+    out.sort(key=lambda e: versions.order_key(e["path"]), reverse=True)
     return out
 
 
@@ -346,14 +350,49 @@ def twin_of_known_bad(dll_path):
     return ""
 
 
-def resolve_nr_runtime_path(choice: str, skip_known_bad: bool = False):
-    """The NR runtime .dll for the native host: a chosen flat dll directly,
-    a chosen set's nvngx_dlssnr*.dll, or (auto/vanished) the first found.
+def risk_reason(dll_path):
+    """Why 'auto' should avoid this build, or "" when it is not a risk.
 
-    skip_known_bad=True (native engine, auto selection) passes over
-    rig-proven force-terminator builds so a queue run cannot lose the
-    session; an EXPLICIT choice is always honored (the caller warns).
+    Two ways onto the list: the name matches a rig-proven force-terminator,
+    or the file is byte-identical to such a build in the same folder (a
+    rename is not a different build - proven on the owner's own disk:
+    `nvngx_dlssnr.dll` and `nvngx_dlssnr_RenoDX_4000_series_friendly.dll`
+    are the same 165,830,144 bytes).
     """
+    if is_known_force_terminator(dll_path):
+        return "matches the rig-proven force-terminator list"
+    twin = twin_of_known_bad(dll_path)
+    if twin:
+        return f"is byte-identical to the force-terminator build '{twin}'"
+    return ""
+
+
+def describe_runtime(dll_path):
+    """`<name> (<version read from the name>)` - for status lines and logs."""
+    from ..dlsssr import versions
+    name = os.path.basename(str(dll_path))
+    return f"{name} ({versions.describe(name)})"
+
+
+def resolve_nr_runtime_path(choice: str, skip_known_bad: bool = False):
+    """The NR runtime .dll for the native host.
+
+    An EXPLICIT choice (a name in the node's dll_version widget) is always
+    honored exactly. `auto` follows THE BUILD NAMING RULE (see
+    `ants/dlsssr/versions.py`): the newest build in models/DLSS/NR - read
+    from a date or a version in the file name - across the flat files and
+    the version subfolders together.
+
+    skip_known_bad=True (the native engine) additionally prefers a build
+    that is NOT on the rig-proven force-terminator list when such a build
+    exists: a queue run must not lose the session to a build that was
+    already proven to kill it. When EVERY candidate is on that list - the
+    owner's own folder is exactly this case - the newest one is used with a
+    loud warning instead of refusing: these builds are the live line of work
+    (run 30 reached EvaluateFeature and threw a catchable exception), not a
+    dead end, and refusing would block the owner's own test rig.
+    """
+    from ..dlsssr import versions
     from ..dlsssr.discovery import find_nr_runtime_dll  # lazy: no import cycle
     for entry in category_entries("NR"):
         if choice and entry["name"] == choice:
@@ -366,64 +405,73 @@ def resolve_nr_runtime_path(choice: str, skip_known_bad: bool = False):
     # "runtime" (rig 2026-09-20 07:29: the stage was named
     # "neuroframe_caller-104960"). Runtimes are named nvngx_dlssnr* by every
     # producer; the export probe remains the final authority at load time.
-    saw_bad = False
-    bad_twin = ""
-    helpers, fallback, set_errors = [], [], []
-
-    def _rejectable(path):
-        """True when auto must NOT pick `path` (and say why)."""
-        nonlocal saw_bad, bad_twin
-        if not skip_known_bad:
-            return False
-        if is_known_force_terminator(path):
-            saw_bad = True
-            return True
-        twin = twin_of_known_bad(path)
-        if not twin:
-            return False
-        saw_bad = True
-        bad_twin = f"{os.path.basename(path)} (same bytes as {twin})"
-        logger.warning(
-            "[ANTs] '%s' is byte-identical to the RenoDX build '%s' in the "
-            "same folder - it is the same build under another name, so 'auto' "
-            "will not treat it as the safe pick. Select a build explicitly in "
-            "the node's dll_version widget to run it anyway.",
-            os.path.basename(path), twin)
-        return True
-
+    helpers, fallback, set_errors, candidates = [], [], [], []
     for entry in category_entries("NR"):
         if entry["kind"] != "dll":
             continue
         if os.path.basename(entry["path"]).lower().startswith("nvngx_dlssnr"):
-            if _rejectable(entry["path"]):
-                continue
-            return entry["path"]
-        if _is_helper_dll_name(entry["name"]):
+            candidates.append(entry["path"])
+        elif _is_helper_dll_name(entry["name"]):
             helpers.append(entry["name"])
         else:
             fallback.append(entry)
-    for candidate in discover_dll_sets("NR"):
+    for entry in discover_dll_sets("NR"):
         try:
-            path = find_nr_runtime_dll(candidate["path"])
+            candidates.append(find_nr_runtime_dll(entry["path"]))
         except RuntimeError as exc:
             set_errors.append(str(exc))   # e.g. helper DLLs only - keep looking
-            continue
-        if path and not _rejectable(path):
-            return path
-    if saw_bad:
-        raise RuntimeError(
-            "[ANTs] Every usable NR build in models/DLSS/NR is a rig-proven "
-            "force-terminator build (RenoDX-derived builds that killed the "
-            "whole process at the first NGX evaluate on a plain D3D12 host - "
-            "runs 14-19), or is byte-identical to one"
-            + (f": {bad_twin}" if bad_twin else "")
-            + ". A rename does not make a different build: 'auto' refuses to "
-            "pretend otherwise. Select a build EXPLICITLY in the node's "
-            "dll_version widget to accept the risk (this is a live line of "
-            "work, not a dead end - run 30 already reached evaluate and threw "
-            "a catchable exception instead of dying), or add a genuinely "
-            "stock nvngx_dlssnr build (e.g. from DLSS Swapper) so 'auto' has "
-            "a safe pick.")
+
+    if candidates:
+        ranked = versions.newest_first(candidates)
+        pick = ranked[0]
+        if skip_known_bad:
+            avoided = [p for p in ranked if risk_reason(p)]
+            safe = [p for p in ranked if not risk_reason(p)]
+            if safe:
+                pick = safe[0]
+                if avoided:
+                    logger.warning(
+                        "[ANTs] NR auto skipped %d build(s) on the rig-proven "
+                        "force-terminator list (%s) and picked the newest safe "
+                        "build instead. To run a skipped build deliberately, "
+                        "select it in the node's dll_version widget.",
+                        len(avoided),
+                        "; ".join(f"{os.path.basename(p)} - {risk_reason(p)}"
+                                  for p in avoided))
+            else:
+                logger.warning(
+                    "[ANTs] Every NR build found is on the rig-proven "
+                    "force-terminator list (%s) - using the NEWEST one "
+                    "(%s) because these builds are the current line of work "
+                    "and refusing would block your own test rig. Runs 14-19 "
+                    "lost the session on such a build; run 30 reached "
+                    "EvaluateFeature and threw a catchable exception. Pick a "
+                    "specific build in dll_version to override.",
+                    "; ".join(f"{os.path.basename(p)} - {risk_reason(p)}"
+                              for p in ranked),
+                    os.path.basename(pick))
+        elif risk_reason(pick):
+            logger.warning(
+                "[ANTs] NR auto picked '%s' (%s), which is on the rig-proven "
+                "force-terminator list (%s). The native engine passes "
+                "skip_known_bad=True and would avoid it; the legacy neuroframe "
+                "engine gets the newest build as usual. Select another build in "
+                "dll_version to change this.",
+                os.path.basename(pick),
+                versions.describe(os.path.basename(pick)), risk_reason(pick))
+        newer_unversioned = versions.unversioned_newer(candidates, pick)
+        if newer_unversioned:
+            logger.warning(
+                "[ANTs] NR auto picked '%s' (%s) by the naming rule, but "
+                "%s has a NEWER file date and no version in the name - a name "
+                "without a version always sorts last. Rename that file with "
+                "its date (nvngx_dlssnr_<YYYY-MM-DD>.dll) if you want auto to "
+                "load it.",
+                os.path.basename(pick),
+                versions.describe(os.path.basename(pick)),
+                ", ".join(newer_unversioned))
+        return pick
+
     if fallback:
         logger.warning(
             "[ANTs] No nvngx_dlssnr* file in models/DLSS/NR - falling back to "

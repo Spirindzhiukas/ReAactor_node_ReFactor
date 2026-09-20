@@ -514,7 +514,42 @@ def inline_logs(paths, out_lines, cap=INLINE_LOG_CAP, skip=()):
         out_lines.append("")
 
 
-def layout_audit(dlss_root, out_lines):
+def pick_newest(paths, versions=None):
+    """The newest build: the pack's naming rule when available, else mtime."""
+    if versions is not None:
+        try:
+            return versions.newest(paths)
+        except Exception:
+            pass
+    newest, newest_time = None, -1.0
+    for path in paths:
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime > newest_time:
+            newest, newest_time = path, mtime
+    return newest
+
+
+def load_pack_versions(repo):
+    """The pack's naming rule (ants/dlsssr/versions.py) without importing the
+    package: `versions.py` is standalone, and importing `ants.dlsssr` would
+    drag ComfyUI bootstrapping into a read-only diagnostic."""
+    import importlib.util
+    path = os.path.join(repo or "", "ants", "dlsssr", "versions.py")
+    if not os.path.isfile(path):
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("ants_pack_versions", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        return None
+
+
+def layout_audit(dlss_root, out_lines, versions=None):
     """Read-only KEEP/DELETE audit of the models/DLSS tree.
 
     The owner asked for one thing: know what the code actually needs, so the
@@ -527,6 +562,7 @@ def layout_audit(dlss_root, out_lines):
         return
     lines_ = out_lines
     keep, delete, review = [], [], []
+    by_category = {}
 
     def walk(folder, depth=0):
         for entry in sorted(os.listdir(folder)):
@@ -538,9 +574,12 @@ def layout_audit(dlss_root, out_lines):
                     continue
                 walk(path, depth + 1)
             elif entry.lower().endswith(".dll") and entry.lower() != "dlss_map.txt":
-                keep_or_flag(path, entry)
+                keep_or_flag(path, entry, os.path.basename(folder))
 
-    def keep_or_flag(path, name):
+    def version_note(name):
+        return f", {versions.describe(name)}" if versions else ""
+
+    def keep_or_flag(path, name, category=""):
         lower = name.lower()
         parent = os.path.basename(os.path.dirname(path))
         in_stash = any(h in parent.lower().replace("'", "") for h in HELPER_HINTS)
@@ -554,9 +593,11 @@ def layout_audit(dlss_root, out_lines):
                               "Merserk_DLLS only)")
             return
         if lower.startswith("nvngx_dlssnr"):
-            keep.append(f"{path}  (NR runtime)")
+            keep.append(f"{path}  (NR runtime{version_note(name)})")
+            by_category.setdefault("NR", []).append(path)
         elif lower.startswith("nvngx_dlss"):
-            keep.append(f"{path}  (SR/FG runtime)")
+            keep.append(f"{path}  (SR/FG runtime{version_note(name)})")
+            by_category.setdefault(category or "SR/FG", []).append(path)
         else:
             review.append(f"{path}  (unknown dll - not named like a runtime)")
 
@@ -598,6 +639,16 @@ def layout_audit(dlss_root, out_lines):
                              + " - the pack's force-terminator list matches"
                                " names, so 'auto' will refuse BOTH")
             review.append(note)
+
+    # what 'auto' would load in each category right now (the naming rule)
+    for category in sorted(by_category):
+        paths = by_category[category]
+        pick = pick_newest(paths, versions)
+        if pick:
+            lines_.append(f"  AUTO would load in {category}/: "
+                          f"{os.path.basename(pick)}"
+                          + (f"  ({versions.describe(os.path.basename(pick))})"
+                             if versions else ""))
 
     lines_.append("  KEEP (the pack reads these):")
     for row in keep or ["    (nothing)"]:
@@ -746,7 +797,7 @@ def main(argv=None):
 
     lines.append("")
     lines.append("--- MODELS/DLSS LAYOUT AUDIT (keep / delete) " + "-" * 32)
-    layout_audit(dlss_root, lines)
+    layout_audit(dlss_root, lines, load_pack_versions(args.repo))
 
     lines.append("")
     lines.append("--- LOGS (copied into ./files) " + "-" * 41)

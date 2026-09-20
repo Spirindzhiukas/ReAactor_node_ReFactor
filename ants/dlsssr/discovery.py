@@ -11,7 +11,37 @@ feature).
 
 import os
 
-from ..dlssnr import discovery as _nr_discovery
+from . import versions
+from ..dlssnr import discovery as _nr_discovery   # pack-local, lazy by design
+
+
+class _FallbackLogger:
+    """Plain output for runs without the pack's logging bootstrap (tests, the
+    rig tools)."""
+
+    def _emit(self, message, args):
+        try:
+            print((message % args) if args else message)
+        except Exception:
+            print(message)
+
+    def status(self, message, *args):
+        self._emit(message, args)
+
+    def warning(self, message, *args):
+        self._emit(message, args)
+
+
+def logger_for():
+    """The pack logger (ants.log), or a plain fallback - never fatal."""
+    try:
+        from ..log import dlss_logger
+        return dlss_logger
+    except Exception:
+        return _FallbackLogger()
+
+
+logger = logger_for()
 
 
 def _dlss_root():
@@ -58,12 +88,20 @@ def _is_sr_runtime(path):
 
 
 def _sr_set_dll(chosen):
+    """The NEWEST nvngx_dlss*.dll of a chosen set (the naming rule).
+
+    A set folder can hold several builds (that is the point of the version
+    subfolders); the version in the file name decides, not the list order -
+    see ants/dlsssr/versions.py.
+    """
     if chosen["kind"] == "dll":
         return chosen["path"]
     dlls = [d for d in _dll_files(chosen["path"]) if d.lower().startswith("nvngx_dlss")]
     if not dlls:
         dlls = _dll_files(chosen["path"])
-    return os.path.join(chosen["path"], dlls[0])
+    paths = [os.path.join(chosen["path"], d) for d in dlls]
+    pick = versions.newest(paths)
+    return pick if pick else paths[0]
 
 
 def resolve_sr_dll(choice):
@@ -77,10 +115,33 @@ def resolve_sr_dll(choice):
             "    The SR runtime (nvngx_dlss.dll) is user-procured - its redistribution\n"
             "    is prohibited by NVIDIA (DLSS Swapper / driver packages are sources).")
     if choice in ("auto", "refresh"):
-        for candidate in sets:
-            path = _sr_set_dll(candidate)
+        # THE BUILD NAMING RULE: newest by version in the file name, flat
+        # files and version subfolders ranked together (ants/dlsssr/versions.py).
+        ranked = versions.newest_first([_sr_set_dll(s) for s in sets])
+        stubs = []
+        for path in ranked:
             if _is_sr_runtime(path):
+                if stubs:
+                    logger.warning(
+                        "[ANTs] SR auto skipped %d stub(s) under 1 MB (%s) and "
+                        "picked %s (%s) - the pack never loads a helper/caller "
+                        "stub as an SR runtime.",
+                        len(stubs), ", ".join(os.path.basename(p) for p in stubs),
+                        os.path.basename(path), versions.describe(
+                            os.path.basename(path)))
+                newer_unversioned = versions.unversioned_newer(ranked, path)
+                if newer_unversioned:
+                    logger.warning(
+                        "[ANTs] SR auto picked '%s' (%s) by the naming rule, "
+                        "but %s has a NEWER file date and no version in the "
+                        "name - a name without a version always sorts last. "
+                        "Rename that file with its version "
+                        "(nvngx_dlss_<version>.dll) if you want auto to load it.",
+                        os.path.basename(path),
+                        versions.describe(os.path.basename(path)),
+                        ", ".join(newer_unversioned))
                 return path
+            stubs.append(path)
         raise RuntimeError(
             "[ANTs] No DLSS SR dll set found. Place nvngx_dlss*.dll builds into\n"
             f"    {os.path.join(_dlss_root(), 'SR')}\\\n"
@@ -88,7 +149,17 @@ def resolve_sr_dll(choice):
             "    NOT SR runtimes.)")
     chosen = next((s for s in sets if s["name"] == choice), None)
     if chosen is None:
-        chosen = sets[0]
+        # The widget is stale (files changed since the node was created):
+        # fall back to the NEWEST build per the naming rule, not to whichever
+        # entry happens to be first.
+        picked_path = versions.newest([_sr_set_dll(s) for s in sets])
+        chosen = next((s for s in sets
+                       if os.path.normcase(_sr_set_dll(s))
+                       == os.path.normcase(picked_path or "")), sets[0])
+        logger.warning(
+            "[ANTs] The selected SR build '%s' is gone from models/DLSS/SR - "
+            "using the newest build '%s' instead (press refresh after "
+            "changing DLL files).", choice, chosen["name"])
     path = _sr_set_dll(chosen)
     if not _is_sr_runtime(path):
         raise RuntimeError(
@@ -99,10 +170,15 @@ def resolve_sr_dll(choice):
 
 
 def find_nr_runtime_dll(nr_dir):
-    """The nvngx_dlssnr*.dll inside a chosen NR set (any filename suffix)."""
-    for f in _dll_files(nr_dir):
-        if f.lower().startswith("nvngx_dlssnr"):
-            return os.path.join(nr_dir, f)
+    """The NEWEST nvngx_dlssnr*.dll inside a chosen NR set (any suffix).
+
+    A set folder may hold several builds; the naming rule decides which one
+    is 'the' runtime of that set (ants/dlsssr/versions.py).
+    """
+    found = [os.path.join(nr_dir, f) for f in _dll_files(nr_dir)
+             if f.lower().startswith("nvngx_dlssnr")]
+    if found:
+        return versions.newest(found)
     raise RuntimeError(
         "[ANTs] The chosen NR set folder contains no nvngx_dlssnr*.dll:\n"
         f"    {nr_dir}\n"
