@@ -680,8 +680,44 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   a crash line is handled, and a non-PE file is reported, never fatal.
 - **The black box is INLINED in the report** (last 60 lines of
   `native-crash.log`), so the clipboard paste carries the verdict itself.
-- Also confirmed from the owner's inventory: `models/DLSS/NR` holds a file
-  LITERALLY named `nvngx_dlssnr.dll` that is actually the legacy CALLER DLL
-  (104960 bytes, same hash as `neuroframe_caller.dll`) - the legacy route
-  stages it under that name, which is exactly the sibling trap the staging
-  rule warns about.
+- **OWNER CORRECTION (this file had it wrong)**: `models/DLSS/NR/
+  nvngx_dlssnr.dll` is the FULL 158.15 MB RenoDX runtime, not a caller copy.
+  The 102.50 KB caller-named file lives in
+  `staged/neuroframe_caller-104960/nvngx_dlssnr.dll` (legacy staging output),
+  which is where the confusion came from. Never call the NR-folder file a
+  caller again.
+
+### 2026-09-20 (owner Q&A) — the helper pair gets ONE home; exact paths documented; the black box is session-scoped
+- **Owner request answered: `docs/MODELS_DLSS_LAYOUT.md`.** It lists every
+  path the code reads (NR/, SR/, FG/, Merserk_DLLS/, staged/), why `staged/`
+  must exist (the NGX core resolves the literal names `nvngx_dlssnr.dll` /
+  `nvngx_dlss.dll`, the snippet imports its dependencies from its own folder,
+  the legacy engine is handed a directory), and a keep/delete table for the
+  owner's tree (per-category helper copies = delete, `staged/**` = delete
+  while ComfyUI is closed).
+- **CODE CHANGED so the duplication is not needed** (owner preference:
+  pair stored/called from `models/DLSS/Merserk_DLLS` ONLY):
+  `stage_nr_runtime` no longer copies every sibling of the source folder into
+  the stage. It copies the chosen runtime under the canonical name plus the
+  helper pair from the ONE stash - `Merserk_DLLS` > `HELPERS`/`HLP*` > the
+  package `dll/` folder; a stash only counts when it actually contains .dll
+  files (the owner's `HELPERS/` is empty and must never win). No stash at all
+  -> the old sibling-copy behaviour stays as a loud compatibility fallback.
+- **Auto selection can no longer pick a helper DLL as "the runtime"**: auto
+  considers `nvngx_dlssnr*` files first; helper-named files are skipped and,
+  when nothing else exists, the failure is a loud `[ANTs]` error naming
+  `Merserk_DLLS`. Rig evidence for this: the 07:29 stage was named
+  `neuroframe_caller-104960` - the legacy route had been handed the caller as
+  the "runtime" by the old first-flat-dll rule.
+- **The crash black box is session-scoped**: `arm()` writes a
+  `=== ANTs crash black box: session <time> pid <pid> build <..> ===` header
+  every time (the file is append-only and outlives the process), the collector
+  shows only the newest session, and hardware-fault/termination chains now go
+  through `_caller_chain`, which drops libffi/_ctypes/python noise (run 30's
+  chain was eight FFI frames and named no native caller).
+- **The collector audits the models tree**: the report carries a
+  "MODELS/DLSS LAYOUT AUDIT" section (KEEP / SAFE TO DELETE / YOUR CALL),
+  including same-size-same-folder pairs with a hash verdict, so the keep/delete
+  answer is printed from the owner's own disk, not from a folder map.
+- Suite at this commit: **368 checks** (dlsssr 85, dlssnr_bridge 77,
+  native_flow 35) + pyflakes/scope/smoke green.

@@ -60,10 +60,19 @@ python and never registers callbacks.
       +0x27799, then a deliberate `NtTerminateProcess(status 2)`) is the
       recurring silent-kill signature - hardware fault lines now carry a
       caller chain to name the caller.
+- [x] **Owner Q&A: exact paths + keep/delete (2026-09-20)**: the helper pair
+      now has ONE home. `docs/MODELS_DLSS_LAYOUT.md` documents every path the
+      code reads/writes and what is safe to delete; `stage_nr_runtime` copies
+      only the chosen runtime + the pair from `Merserk_DLLS` (stash > HELPERS >
+      package dll; loud sibling-copy fallback only when no stash exists); auto
+      selection refuses to treat a helper DLL as an NR runtime; the collector
+      prints a keep/delete audit of the owner's own tree.
 - [ ] **Run 31 (owner): plain re-run** (`set "NVSDK_NGX_LOG_LEVEL=1"`,
       no ANTS_ lines needed) — the first run that should reach CreateFeature +
       evaluate with the full host-parity contract. Console + nvngx.log + crash
-      file if the int29 trap names a site.
+      file if the int29 trap names a site. The stage folder now also carries
+      the helper pair copied from `Merserk_DLLS`, so the per-category copies
+      are no longer part of the experiment.
 - [ ] **Run 31 (owner, E1):** `set "ANTS_NR_USE_SHIM=0"`
       in the launch bat (keep `NVSDK_NGX_LOG_LEVEL=1`), scoop, run once.
       - Works → the shim's PRESENCE is implicated (its signature/version

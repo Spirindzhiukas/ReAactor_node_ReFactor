@@ -926,11 +926,32 @@ def main():
           _resolver_tolerance_check())
     node_src = (REPO / "ants" / "dlssnr" / "node.py").read_text()
     nr_src = (REPO / "ants" / "dlsssr" / "nr.py").read_text()
-    check("crashlog: hardware faults are reported with the caller chain "
-          "(run 30's AV was INSIDE KERNEL32 - the chain says whether our "
-          "ctypes frame or the runtime called it)",
-          "_stack_chain(k32, 0, 12)" in crashlog_src
+    check("crashlog: hardware faults and terminations report a caller chain "
+          "with the FFI/interpreter frames dropped (run 30's chain was eight "
+          "libffi/_ctypes frames and hid the native caller)",
+          "_caller_chain(k32, 16, 8)" in crashlog_src
+          and "_caller_chain(k32)" in crashlog_src
+          and "def _caller_chain" in crashlog_src
           and "NATIVE CRASH: exception" in crashlog_src)
+    check("crashlog: every armed session writes a header (the black box is "
+          "APPEND-ONLY across runs; run 30's report opened on two stale "
+          "IsBadReadPtr lines from run 23)",
+          "_emit_session_header" in crashlog_src
+          and "crash black box: session" in crashlog_src)
+    evidence_src = (REPO / "tools" / "collect_rig_evidence.py").read_text()
+    check("tools: the report's black box starts at the newest session header",
+          "crash black box: session" in evidence_src
+          and "starts[-1]" in evidence_src)
+    check("tools: the report audits models/DLSS for keep/delete (the owner's "
+          "duplicate-pair question)",
+          "MODELS/DLSS LAYOUT AUDIT" in evidence_src
+          and "def layout_audit" in evidence_src
+          and "Merserk_DLLS only" in evidence_src)
+    check("docs: docs/MODELS_DLSS_LAYOUT.md documents the paths the code reads "
+          "and what is safe to delete",
+          (REPO / "docs" / "MODELS_DLSS_LAYOUT.md").is_file()
+          and "staged/" in (REPO / "docs" / "MODELS_DLSS_LAYOUT.md").read_text()
+          and "Merserk_DLLS" in (REPO / "docs" / "MODELS_DLSS_LAYOUT.md").read_text())
     check("crashlog: the C++ throw reporter is wired into the armed "
           "first-chance handler and still lets the exception unwind",
           "_report_cxx(k32, record)" in crashlog_src

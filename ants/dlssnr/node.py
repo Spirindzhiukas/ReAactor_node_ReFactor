@@ -213,9 +213,12 @@ class ReFactorDLSS5Enhancer:
         "runs through the comfy-native tiled pipeline before the engine.\n"
         "Requirements:\n"
         "- NVIDIA display driver >= 616.x, RTX 40/50-series GPU\n"
-        "- DLLs into ComfyUI/models/DLSS/dlssnr_<version>/ - ANY .dll filenames\n"
-        "accepted (the engine is identified by its exports, not by name);\n"
-        "nvngx_dlssnr.dll must be procured by you (redistribution prohibited)."
+        "- NR builds into ComfyUI/models/DLSS/NR/ - ANY .dll filenames accepted\n"
+        "(the engine is identified by its exports, not by name); the neuroframe\n"
+        "helper pair goes into ComfyUI/models/DLSS/Merserk_DLLS/ once (it is\n"
+        "copied into the staged working folder automatically).\n"
+        "nvngx_dlssnr.dll must be procured by you (redistribution prohibited).\n"
+        "Layout, and what is safe to delete: docs/MODELS_DLSS_LAYOUT.md"
     )
 
     def _close_native(self):

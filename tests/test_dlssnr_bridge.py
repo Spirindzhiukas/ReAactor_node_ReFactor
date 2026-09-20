@@ -219,6 +219,90 @@ def main():
         finally:
             discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, discovery.PACKAGE_DLL_DIR = saved
 
+    # ---- helper stash + staging: the pair lives in ONE folder ----
+    import shutil as _shutil
+    root = tempfile.mkdtemp()
+    saved = (discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH,
+             discovery.PACKAGE_DLL_DIR)
+    discovery.DLSS_ROOT = root
+    discovery.LEGACY_DLSSNR_PATH = os.path.join(root, "_nolegacy")
+    discovery.PACKAGE_DLL_DIR = os.path.join(root, "_nopkg")
+    try:
+        for cat in ("NR", "SR", "FG"):
+            os.makedirs(os.path.join(root, cat))
+            open(os.path.join(root, cat, "neuroframe_caller.dll"), "wb").write(b"c" * 8)
+            open(os.path.join(root, cat, "neuroframe_engine.dll"), "wb").write(b"e" * 8)
+        open(os.path.join(root, "NR", "nvngx_dlssnr.dll"), "wb").write(b"n" * 16)
+        open(os.path.join(root, "NR", "nvngx_dlssnr_alt.dll"), "wb").write(b"a" * 32)
+        os.makedirs(os.path.join(root, "HELPERS"))            # empty stash
+        os.makedirs(os.path.join(root, "Merserk_DLLS"))
+        for name in ("neuroframe_caller.dll", "neuroframe_engine.dll"):
+            open(os.path.join(root, "Merserk_DLLS", name), "wb").write(b"h" * 4)
+
+        check("stash: an EMPTY helper folder never wins over a populated one",
+              discovery.helper_dll_dirs()[0].endswith("Merserk_DLLS"))
+        # both populated: Merserk_DLLS still wins (owner's one-home ruling)
+        open(os.path.join(root, "HELPERS", "neuroframe_caller.dll"), "wb").write(b"x")
+        check("stash: Merserk_DLLS beats a populated HELPERS folder",
+              discovery.helper_dll_dirs()[0].endswith("Merserk_DLLS"))
+        check("stash: helper_stash_dir points at the populated stash",
+              (discovery.helper_stash_dir() or "").endswith("Merserk_DLLS"))
+        check("stash: helper-named files are recognised",
+              discovery._is_helper_dll_name("neuroframe_caller.dll")
+              and not discovery._is_helper_dll_name("nvngx_dlssnr.dll"))
+
+        stage = discovery.stage_legacy_runtime(
+            os.path.join(root, "NR", "nvngx_dlssnr.dll"))
+        staged_files = sorted(os.listdir(stage))
+        check("stage: canonical name keeps the folder IN PLACE",
+              os.path.normcase(stage) == os.path.normcase(os.path.join(root, "NR")))
+        stage2 = discovery.stage_legacy_runtime(
+            os.path.join(root, "NR", "nvngx_dlssnr_alt.dll"))
+        staged_files = sorted(os.listdir(stage2))
+        check("stage: only the runtime + the helper pair are copied",
+              staged_files == ["neuroframe_caller.dll", "neuroframe_engine.dll",
+                               "nvngx_dlssnr.dll"], )
+        check("stage: the aliased runtime is the selected BYTES",
+              open(os.path.join(stage2, "nvngx_dlssnr.dll"), "rb").read() == b"a" * 32)
+        check("stage: folder is content-addressed <stem>-<size>",
+              os.path.basename(stage2) == "nvngx_dlssnr_alt-32")
+
+        # no stash at all -> old behaviour, loudly
+        _shutil.rmtree(os.path.join(root, "Merserk_DLLS"))
+        os.remove(os.path.join(root, "HELPERS", "neuroframe_caller.dll"))
+        os.makedirs(os.path.join(root, "SR", "set"))
+        open(os.path.join(root, "SR", "set", "nvngx_dlssnr_b.dll"), "wb").write(b"b" * 4)
+        open(os.path.join(root, "SR", "set", "some_other.dll"), "wb").write(b"o" * 4)
+        stage3 = discovery.stage_legacy_runtime(
+            os.path.join(root, "SR", "set", "nvngx_dlssnr_b.dll"))
+        check("stage: no stash -> compat sibling copy (all siblings, loudly)",
+              sorted(os.listdir(stage3)) == ["nvngx_dlssnr.dll",
+                                             "nvngx_dlssnr_b.dll",
+                                             "some_other.dll"]
+              and open(os.path.join(stage3, "nvngx_dlssnr.dll"), "rb").read() == b"b" * 4)
+
+        # auto selection never returns a helper dll
+        check("auto: picks the nvngx_dlssnr* file, not the helper pair",
+              discovery.resolve_nr_runtime_path("auto")
+              .endswith(os.path.join("NR", "nvngx_dlssnr.dll")))
+        _shutil.rmtree(os.path.join(root, "Merserk_DLLS"), ignore_errors=True)
+        os.remove(os.path.join(root, "NR", "nvngx_dlssnr.dll"))
+        os.remove(os.path.join(root, "NR", "nvngx_dlssnr_alt.dll"))
+        try:
+            discovery.resolve_nr_runtime_path("auto")
+            check("auto: only helper dlls left -> loud [ANTs] error", False)
+        except RuntimeError as exc:
+            check("auto: only helper dlls left -> loud [ANTs] error",
+                  "[ANTs]" in str(exc) and "Merserk_DLLS" in str(exc))
+        # a non-canonical name that is not a helper is still usable (with a warning)
+        open(os.path.join(root, "NR", "dlssnr_custom.dll"), "wb").write(b"q" * 4)
+        check("auto: non-canonical non-helper dll is used by guess",
+              discovery.resolve_nr_runtime_path("auto")
+              .endswith("dlssnr_custom.dll"))
+    finally:
+        discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, \
+            discovery.PACKAGE_DLL_DIR = saved
+
     # ---- no sets at all -> the loud owner-specified error ----
     saved = (discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, discovery.PACKAGE_DLL_DIR)
     discovery.DLSS_ROOT = os.path.join(tempfile.gettempdir(), "definitely_missing_dlss")

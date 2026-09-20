@@ -471,6 +471,103 @@ def resolve_offsets(files, out_lines, extra_dirs=()):
             out_lines.append(f"      neighborhood: {near}")
 
 
+HELPER_HINTS = ("merserk", "helpers", "hlp")
+HELPER_PAIR_HINTS = ("neuroframe", "caller", "engine")
+
+
+def layout_audit(dlss_root, out_lines):
+    """Read-only KEEP/DELETE audit of the models/DLSS tree.
+
+    The owner asked for one thing: know what the code actually needs, so the
+    hand-made duplicates can go. This prints exactly that - which paths the
+    pack reads, which are duplicates of the helper pair, and which are the
+    staging leftovers that rebuild themselves.
+    """
+    if not dlss_root or not os.path.isdir(dlss_root):
+        out_lines.append("  (models/DLSS not found)")
+        return
+    lines_ = out_lines
+    keep, delete, review = [], [], []
+
+    def walk(folder, depth=0):
+        for entry in sorted(os.listdir(folder)):
+            path = os.path.join(folder, entry)
+            if os.path.isdir(path):
+                if entry.lower() == "staged":
+                    delete.append(f"{path}  (staging area - rebuilt on demand; "
+                                  "delete freely while ComfyUI is CLOSED)")
+                    continue
+                walk(path, depth + 1)
+            elif entry.lower().endswith(".dll") and entry.lower() != "dlss_map.txt":
+                keep_or_flag(path, entry)
+
+    def keep_or_flag(path, name):
+        lower = name.lower()
+        parent = os.path.basename(os.path.dirname(path))
+        in_stash = any(h in parent.lower().replace("'", "") for h in HELPER_HINTS)
+        looks_helper = any(h in lower for h in HELPER_PAIR_HINTS) and \
+            not lower.startswith("nvngx_")
+        if looks_helper:
+            if in_stash:
+                keep.append(f"{path}  (helper pair - the ONE home)")
+            else:
+                delete.append(f"{path}  (helper duplicate; the pair belongs in "
+                              "Merserk_DLLS only)")
+            return
+        if lower.startswith("nvngx_dlssnr"):
+            keep.append(f"{path}  (NR runtime)")
+        elif lower.startswith("nvngx_dlss"):
+            keep.append(f"{path}  (SR/FG runtime)")
+        else:
+            review.append(f"{path}  (unknown dll - not named like a runtime)")
+
+    walk(dlss_root)
+    for name in sorted(os.listdir(dlss_root)):
+        if name.lower().endswith(".txt"):
+            review.append(f"{os.path.join(dlss_root, name)}  (not read by this "
+                          "nodepack - keep as a reference or delete)")
+
+    # Same-size files inside one category are usually the same build under two
+    # names (the owner has nvngx_dlss.dll AND nvngx_dlss_310.9.1.dll). Only
+    # the size collision is cheap to detect; the hash settles it.
+    by_size = {}
+    for row in keep:
+        path = row.split("  (")[0]
+        folder = os.path.dirname(path)
+        try:
+            by_size.setdefault((folder, os.path.getsize(path)), []).append(path)
+        except OSError:
+            pass
+    for (folder, size), paths in sorted(by_size.items()):
+        if len(paths) > 1:
+            hashes = {sha256_head(p) for p in paths}
+            verdict = ("identical content" if len(hashes) == 1
+                       else "different content despite equal size")
+            review.append(f"{' and '.join(os.path.basename(p) for p in paths)}"
+                          f" in {folder} have the same size ({size} bytes): "
+                          f"{verdict} - keep one if you do not need both")
+
+    lines_.append("  KEEP (the pack reads these):")
+    for row in keep or ["    (nothing)"]:
+        lines_.append(f"    {row}")
+    lines_.append("  SAFE TO DELETE (duplicates / staging leftovers):")
+    for row in delete or ["    (nothing)"]:
+        lines_.append(f"    {row}")
+    if review:
+        lines_.append("  YOUR CALL:")
+        for row in review:
+            lines_.append(f"    {row}")
+    lines_.append("")
+    lines_.append("  Expected layout (see docs/MODELS_DLSS_LAYOUT.md):")
+    lines_.append("    models/DLSS/NR/            the NR builds you select")
+    lines_.append("    models/DLSS/SR/            nvngx_dlss.dll builds (SR node)")
+    lines_.append("    models/DLSS/FG/            nvngx_dlssg_*.dll (reserved)")
+    lines_.append("    models/DLSS/Merserk_DLLS/  neuroframe_caller.dll + "
+                  "neuroframe_engine.dll (ONLY here)")
+    lines_.append("    models/DLSS/staged/        working copies this pack "
+                  "creates (safe to delete when ComfyUI is closed)")
+
+
 def nvidia_smi(out_lines):
     try:
         out = subprocess.run(
@@ -596,6 +693,10 @@ def main(argv=None):
         lines.append("  (no staged/ folder - the run never staged a runtime)")
 
     lines.append("")
+    lines.append("--- MODELS/DLSS LAYOUT AUDIT (keep / delete) " + "-" * 32)
+    layout_audit(dlss_root, lines)
+
+    lines.append("")
     lines.append("--- LOGS (copied into ./files) " + "-" * 41)
     log_sources = []
     if dlss_root:
@@ -644,8 +745,16 @@ def main(argv=None):
         except OSError as exc:
             lines.append(f"  (unreadable: {exc})")
             continue
-        tail = text.splitlines()[-60:]
-        for row in tail:
+        rows = text.splitlines()
+        # The file appends across runs; the newest session header marks the
+        # run we care about (stale lines above it fooled us once already).
+        starts = [i for i, row in enumerate(rows)
+                  if "crash black box: session" in row]
+        session = rows[starts[-1]:] if starts else rows[-60:]
+        if not starts:
+            lines.append("  [!] no session header in the file - written by an "
+                         "older build; only the tail is shown")
+        for row in session[-60:]:
             lines.append(f"  {row}")
 
     lines.append("")

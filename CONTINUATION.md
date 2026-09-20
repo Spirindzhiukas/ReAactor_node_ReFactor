@@ -354,6 +354,14 @@ everything in `tools\rig_evidence\<date-time>\` and puts the report on the
 clipboard. READ-ONLY: nothing outside that folder is written, ever. Send the
 clipboard text plus the `files\` folder it opens.
 
+**Output location (changed 2026-09-20)**: the dump now goes to
+`C:\ComfyUI_PORTABLE\NODE_CODING\RIG_EVIDENCE\<date-time>\` - a sibling
+of the ComfyUI folder, NEVER inside the checkout (GitHub Desktop kept
+offering the dumps for the PR). `ANTS_EVIDENCE_OUT` overrides it. The report
+now inlines the crash black box, resolves every `MODULE+0xRVA` to an export
+name, and carries a **MODELS/DLSS LAYOUT AUDIT** (KEEP / SAFE TO DELETE /
+YOUR CALL) for the models tree.
+
 - `tools/resolve_offsets.bat` + `tools/resolve_crash_offset.py` (owner copies:
   `C:\ComfyUI_PORTABLE\`) — names `MODULE+0xRVA` via export table; owner
   verified `KERNEL32 0x27799 → IsBadReadPtr+0x29`.
@@ -365,6 +373,35 @@ clipboard text plus the `files\` folder it opens.
   = legacy experiment (exonerated, keep for A/Bs).
 - Crash black box: console stderr + `models/DLSS/staged/ANTs/appdata/logs/
   native-crash.log` (survives the death — prefer it when the console is lost).
+
+## Owner Q&A (2026-09-20): exact paths, and what to delete
+
+The owner asked which paths the current code expects, and which of his
+duplicated folders are redundant. The authority is
+**`docs/MODELS_DLSS_LAYOUT.md`**; the collector prints the audit for the tree
+that is actually on the disk. Summary:
+
+| path | who reads it |
+|---|---|
+| `models/DLSS/NR/nvngx_dlssnr*.dll` (any filename) | node `dll_version`, native host + legacy engine |
+| `models/DLSS/SR/nvngx_dlss*.dll` | SR node (staged as `nvngx_dlss.dll`) |
+| `models/DLSS/FG/nvngx_dlssg*.dll` | reserved; listed, no effect yet |
+| `models/DLSS/Merserk_DLLS/neuroframe_{caller,engine}.dll` | the ONE home of the helper pair (legacy neuroframe engine only) |
+| `models/DLSS/staged/**` | written by this pack: canonical-name copies, shim PE, NGX log, crash box |
+
+Rules now enforced in code:
+
+- the helper pair is copied **from the stash into the stage** - `NR/`, `SR/`,
+  `FG/` and the DLSS root no longer need their own copies (delete them);
+- a stash folder must actually contain `.dll` files, so the empty `HELPERS/`
+  can not win over `Merserk_DLLS/`, and `Merserk_DLLS` wins over `HELPERS/`
+  even when both are populated;
+- if NO stash exists the old "copy every sibling" behaviour runs and warns
+  loudly - that is compatibility only;
+- `auto` in `dll_version` only ever picks an `nvngx_dlssnr*` runtime; if the
+  folder holds nothing but the helper pair it raises a loud `[ANTs]` error
+  naming `Merserk_DLLS`;
+- `staged/**` is disposable: delete it (ComfyUI closed) and it is rebuilt.
 
 ## Rig facts (owner environment)
 

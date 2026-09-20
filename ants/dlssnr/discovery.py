@@ -51,15 +51,38 @@ def _has_nr_runtime(files) -> bool:
 
 
 def helper_dll_dirs():
-    """Folders that may hold the neuroframe helper pair (search order)."""
+    """Folders that hold the neuroframe helper pair, best candidate FIRST.
+
+    A folder only counts when it actually CONTAINS .dll files - the owner's
+    tree has an empty ``HELPERS/`` folder, and an empty stash must never win
+    over the populated ``Merserk_DLLS/`` (that would silently fall back to
+    the old "copy everything next to the runtime" behaviour).
+    """
     dirs = []
     if os.path.isdir(DLSS_ROOT):
         for entry in sorted(os.listdir(DLSS_ROOT)):
             candidate = os.path.join(DLSS_ROOT, entry)
-            if os.path.isdir(candidate) and _is_helper_dir(entry):
+            if os.path.isdir(candidate) and _is_helper_dir(entry) \
+                    and dll_files(candidate):
                 dirs.append(candidate)
-    dirs.append(PACKAGE_DLL_DIR)
+    # Merserk_DLLS wins over HELPERS/HLP* even when both are populated: the
+    # owner's ruling is that the pair has exactly ONE home.
+    dirs.sort(key=lambda d: (0 if "merserk" in os.path.basename(d).lower()
+                             else 1, os.path.basename(d).lower()))
+    if dll_files(PACKAGE_DLL_DIR):
+        dirs.append(PACKAGE_DLL_DIR)
     return dirs
+
+
+def helper_stash_dir():
+    """The one folder the helper pair is expected to live in (or None).
+
+    ``models/DLSS/Merserk_DLLS/`` in the owner's tree; any ``Merserk*`` /
+    ``HELPERS`` / ``HLP*`` folder works, and the package ``dll/`` folder is
+    the last resort. This is what makes the per-category copies unnecessary.
+    """
+    dirs = helper_dll_dirs()
+    return dirs[0] if dirs else None
 
 PACKAGE_DLL_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "dll")
 
@@ -209,6 +232,14 @@ def combo_choices(category: str = "NR"):
     return (["auto"] + names + ["refresh"]) if names else ["auto", "refresh"]
 
 
+def _is_helper_dll_name(name: str):
+    """True for the neuroframe helper pair and friends (never an NR runtime)."""
+    lower = name.lower()
+    if lower.startswith("nvngx"):
+        return False
+    return "neuroframe" in lower or "merserk" in lower
+
+
 def category_entries(category: str):
     """Selector entries for one category: **each flat .dll directly inside
     models/DLSS/<category>/ is its own entry** (named after the file - the
@@ -271,17 +302,32 @@ def resolve_nr_runtime_path(choice: str, skip_known_bad: bool = False):
             if entry["kind"] == "dll":
                 return entry["path"]
             return find_nr_runtime_dll(entry["path"])
+    # AUTO selection: only files that ARE an NR runtime count. The helper
+    # pair (neuroframe_caller/engine) may sit in the same folder, and picking
+    # "the first flat dll" used to hand the legacy engine a caller DLL as the
+    # "runtime" (rig 2026-09-20 07:29: the stage was named
+    # "neuroframe_caller-104960"). Runtimes are named nvngx_dlssnr* by every
+    # producer; the export probe remains the final authority at load time.
     saw_bad = False
+    helpers, fallback, set_errors = [], [], []
     for entry in category_entries("NR"):
         if entry["kind"] != "dll":
             continue
-        if skip_known_bad and is_known_force_terminator(entry["path"]):
-            saw_bad = True
+        if os.path.basename(entry["path"]).lower().startswith("nvngx_dlssnr"):
+            if skip_known_bad and is_known_force_terminator(entry["path"]):
+                saw_bad = True
+                continue
+            return entry["path"]
+        if _is_helper_dll_name(entry["name"]):
+            helpers.append(entry["name"])
+        else:
+            fallback.append(entry)
+    for candidate in discover_dll_sets("NR"):
+        try:
+            path = find_nr_runtime_dll(candidate["path"])
+        except RuntimeError as exc:
+            set_errors.append(str(exc))   # e.g. helper DLLs only - keep looking
             continue
-        return entry["path"]
-    sets = discover_dll_sets("NR")
-    for candidate in sets:
-        path = find_nr_runtime_dll(candidate["path"])
         if path and skip_known_bad and is_known_force_terminator(path):
             saw_bad = True
             continue
@@ -295,7 +341,33 @@ def resolve_nr_runtime_path(choice: str, skip_known_bad: bool = False):
             "14-19). Select one EXPLICITLY in the engine dropdown to accept "
             "the risk, or add a stock nvngx_dlssnr build (e.g. from DLSS "
             "Swapper) so 'auto' has a safe pick.")
-    return default_dll_dir()  # raises the loud "no DLSS-NR DLL set" error
+    if fallback:
+        logger.warning(
+            "[ANTs] No nvngx_dlssnr* file in models/DLSS/NR - falling back to "
+            "'%s' by guess: it is not named like an NR runtime, and the "
+            "export probe before load is the final authority. Helper DLLs in "
+            "that folder (found: %s) are never selected.",
+            fallback[0]["name"], ", ".join(helpers) or "none")
+        return fallback[0]["path"]
+    if helpers:
+        raise RuntimeError(
+            "[ANTs] models/DLSS/NR contains helper DLL(s) only ("
+            + ", ".join(helpers) + ")."
+            + ((" " + " ".join(e.strip() for e in set_errors)) if set_errors else "")
+            + " The neuroframe helper pair belongs in models/DLSS/Merserk_DLLS - "
+            "it is not an NR runtime and is never loaded as one. Install an "
+            f"nvngx_dlssnr build into {os.path.join(DLSS_ROOT, 'NR')} (any "
+            "filename; the pack never downloads it because NVIDIA's licence "
+            "makes it yours to procure).")
+    # Nothing in the category folder: legacy roots, then the loud set error.
+    dir_path = default_dll_dir()
+    path = find_nr_runtime_dll(dir_path)
+    if path:
+        return path
+    raise RuntimeError(
+        "[ANTs] No neural-rendering runtime (anything exporting the DLSS-NR "
+        f"entry points) found in '{dir_path}'. Install an nvngx_dlssnr build "
+        "there - the pack never downloads one for you.")
 
 
 def resolve_legacy_dir(choice: str):
@@ -330,6 +402,9 @@ def stage_nr_runtime(dll_path):
     that is not the selection is called out loudly.
     """
     dll_path = os.path.abspath(dll_path)
+    if os.path.isdir(dll_path):          # a set dir: canonicalise the runtime
+        from ..dlsssr.discovery import find_nr_runtime_dll   # lazy: no cycle
+        dll_path = find_nr_runtime_dll(dll_path)
     src_dir = os.path.dirname(dll_path)
     chosen = os.path.basename(dll_path)
     if chosen.lower() == "nvngx_dlssnr.dll":
@@ -351,14 +426,52 @@ def stage_nr_runtime(dll_path):
             os.path.getsize(canonical) != os.path.getsize(dll_path):
         import shutil
         shutil.copyfile(dll_path, canonical)
-    for f in dll_files(src_dir):
-        target = os.path.join(stage, f)
-        if not os.path.exists(target):
+
+    # Only the runtime plus the HELPER PAIR belongs in the stage folder.
+    #
+    # What used to happen: every .dll next to the selected build was copied
+    # in, so the stage of a legacy run ended up carrying a 158 MB NR build and
+    # vice versa, and each category folder needed its own copy of the helper
+    # pair to feed that loop. The pair has ONE home now
+    # (models/DLSS/Merserk_DLLS by default); the stage stays self-contained
+    # because the snippet loads its dependencies from its own directory.
+    import shutil
+    stash = helper_stash_dir()
+    copied, kept = [], []
+    if stash:
+        for name in dll_files(stash):
+            source = os.path.join(stash, name)
+            target = os.path.join(stage, name)
+            if os.path.exists(target):
+                kept.append(name)
+                continue
             try:
-                import shutil
-                shutil.copyfile(os.path.join(src_dir, f), target)
-            except PermissionError:
+                shutil.copyfile(source, target)
+                copied.append(name)
+            except (PermissionError, OSError):
                 pass  # a locked leftover from a previous run; not needed
+        logger.status(
+            "[ANTs] NR stage %s: runtime + helper pair from %s%s",
+            os.path.basename(stage), stash,
+            f" ({len(copied)} copied)" if copied else "")
+    else:
+        # Compat: no helper stash on disk, so the older layout (helpers next
+        # to the runtime) is honoured - copy the siblings as before. Loud,
+        # because that layout is what makes the models tree unmanageable.
+        logger.warning(
+            "[ANTs] No helper stash found (looked for models/DLSS/Merserk_DLLS, "
+            "HELPERS, HLP* and the package dll folder) - falling back to "
+            "copying every .dll next to the selected runtime into the stage. "
+            "Move the neuroframe pair into models/DLSS/Merserk_DLLS once and "
+            "that stops.")
+        for name in dll_files(src_dir):
+            target = os.path.join(stage, name)
+            if os.path.exists(target):
+                continue
+            try:
+                shutil.copyfile(os.path.join(src_dir, name), target)
+            except (PermissionError, OSError):
+                pass
     return stage
 
 

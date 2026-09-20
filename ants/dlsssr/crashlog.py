@@ -23,6 +23,7 @@ the verdict.
 """
 import ctypes
 import os
+import time
 
 _INTERESTING = {
     0xC0000005: "access violation",
@@ -207,6 +208,18 @@ def _module_for(k32, address):
     return None, 0
 
 
+def _emit_session_header():
+    """`=== ANTs crash black box: session <time> pid <pid> build <..> ===`"""
+    build = "?"
+    try:
+        from .ngx import HOST_BUILD as build     # noqa: F401 (lazy: import cycle)
+    except Exception:
+        pass
+    _emit("\n=== ANTs crash black box: session "
+          + time.strftime("%Y-%m-%d %H:%M:%S")
+          + f" pid {os.getpid()} build {build} ===\n")
+
+
 def _emit(text):
     raw = text.encode("utf-8", "replace")
     try:
@@ -222,9 +235,18 @@ def _emit(text):
 
 
 def arm(crash_file_path):
-    """Register the vectored handler and open the crash file. Idempotent."""
+    """Register the vectored handler and open the append-only crash file.
+
+    A session header is written every time we arm, because the file is
+    APPEND-ONLY and outlives the session: run 30's report showed two stale
+    ``IsBadReadPtr`` lines (the retired callback dumper of run 23) sitting
+    above a fresh termination pair, and there was no way to tell them apart
+    from the content alone. Now the newest header marks the newest session,
+    and the report reader only trusts what follows it.
+    """
     k32 = _kernel32()
     if _state["handler"] is not None:
+        _emit_session_header()
         return
     if k32 is None:
         return
@@ -238,6 +260,8 @@ def arm(crash_file_path):
                                | getattr(os, "O_BINARY", 0))
     except Exception:
         _state["fd"] = None
+
+    _emit_session_header()
 
     # LONG NTAPI VectoredHandler(PEXCEPTION_POINTERS): EXCEPTION_POINTERS is
     # { EXCEPTION_RECORD *record; CONTEXT *context; } and EXCEPTION_RECORD
@@ -271,7 +295,7 @@ def arm(crash_file_path):
                         chain = ""
                         if _state["count"] <= 8:
                             try:
-                                frames = _stack_chain(k32, 0, 12)[:8]
+                                frames = _caller_chain(k32, 16, 8)
                                 if frames:
                                     chain = " from " + " <- ".join(frames)
                             except Exception:
@@ -440,6 +464,20 @@ def _write_iat_ptr(k32, addr, value, mem=None):
     return True
 
 
+def _caller_chain(k32, count=16, limit=8):
+    """`_stack_chain` with the FFI/interpreter frames removed.
+
+    A termination or crash chain taken inside a ctypes call is dominated by
+    libffi's internal frames: run 30's chain was eight libffi/_ctypes/python
+    frames and nothing else, which hid the native code that actually called
+    it. Dropping those leaves the frames that answer the question.
+    """
+    frames = _stack_chain(k32, 0, count)
+    filtered = [f for f in frames
+                if not any(noise in f.lower() for noise in _CXX_NOISE)]
+    return (filtered or frames)[:limit]
+
+
 def _term_stub(k32, name, original, keep):
     """Log-first trampoline for one termination API; returns the raw
     function pointer to store in the IAT (trampoline pinned via `keep`)."""
@@ -452,7 +490,7 @@ def _term_stub(k32, name, original, keep):
 
     @proto
     def stub(*a):
-        chain = _stack_chain(k32)
+        chain = _caller_chain(k32)
         _emit(f"\n[ANTs] TERMINATION via {name}; call chain: "
               + (" <- ".join(chain) or "unresolved") + "\n")
         return real(*a)
@@ -614,7 +652,7 @@ def install_ntdll_terminate_detour():
         stolen_fn = proto(buf)
 
         def detour(handle, status):
-            chain = _stack_chain(k32)
+            chain = _caller_chain(k32)
             _emit("\n[ANTs] TERMINATION via ntdll!NtTerminateProcess"
                   f"(handle=0x{int(handle or 0) & 0xFFFFFFFFFFFFFFFF:X}, "
                   f"status=0x{status & 0xFFFFFFFF:08X}); call chain: "
