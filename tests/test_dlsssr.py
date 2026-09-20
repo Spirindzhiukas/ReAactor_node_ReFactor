@@ -19,6 +19,57 @@ PASS = 0
 FAIL = 0
 
 
+def _iat_tracer_fixture_check():
+    """Build a flat (identity-mapped) PE whose only import is KERNEL32!
+    {ExitProcess, abort}, run crashlog._patch_iat over it with a fake
+    kernel32, and verify the walker finds both thunks, records them as
+    seen, and rewrites each IAT slot to a fresh pinned trampoline."""
+    import ctypes
+    import struct
+
+    from ants.dlsssr import crashlog
+
+    buf = bytearray(0x2000)
+
+    def put(off, data):
+        buf[off:off + len(data)] = data
+
+    def w32(off, v):
+        put(off, struct.pack("<I", v))
+
+    def w64(off, v):
+        put(off, struct.pack("<Q", v))
+
+    w32(0x3C, 0x80)
+    put(0x80, b"PE\x00\x00")
+    w32(0x80 + 144, 0x400)          # import directory RVA (dir[1])
+    w32(0x400 + 0, 0x500)           # OriginalFirstThunk
+    w32(0x400 + 12, 0x4C0)          # dll name
+    w32(0x400 + 16, 0x5A0)          # FirstThunk (IAT)
+    put(0x4C0, b"KERNEL32.dll\x00")
+    names = ["ExitProcess", "abort"]
+    slot = 0x540
+    for k, n in enumerate(names):
+        w64(0x500 + k * 8, slot)    # INT entry -> hint/name
+        w64(0x5A0 + k * 8, 0xDEADBEEF + k)  # loader-'resolved' original
+        put(slot, struct.pack("<H", 0) + n.encode() + b"\x00")
+        slot += 2 + len(n) + 1
+    w64(0x500 + len(names) * 8, 0)  # terminator
+    w64(0x5A0 + len(names) * 8, 0)
+
+    image = ctypes.create_string_buffer(bytes(buf), len(buf))
+    base = ctypes.addressof(image)
+    keep = []
+    fake_k32 = type("K", (), {"VirtualProtect": staticmethod(lambda *a: 1)})()
+    patched, wanted = crashlog._patch_iat(fake_k32, base, keep)
+    slots = [ctypes.c_uint64.from_address(
+        base + 0x5A0 + i * 8).value for i in range(len(names))]
+    return (patched == [f"KERNEL32.dll!{n}" for n in names]
+            and wanted == set(names)
+            and all(slots[i] != 0xDEADBEEF + i for i in range(len(names)))
+            and len(keep) >= 2 * len(names))
+
+
 def check(name, cond):
     global PASS, FAIL
     if cond:
@@ -94,6 +145,7 @@ def main():
     check("ngx: API version 0x15 + feature ids 1/18",
           ngx.NGX_VERSION_API == 0x15 and ngx.FEATURE_SR == 1 and ngx.FEATURE_NR == 18)
     ngx_src = (REPO / "ants" / "dlsssr" / "ngx.py").read_text()
+    crashlog_src = (REPO / "ants" / "dlsssr" / "crashlog.py").read_text()
     # ---- run 21 countermeasures (Merserk host contract) ----
     check("ngx: NR preloads the driver core into the process (run 21)",
           "NGX core preloaded" in ngx_src and "locate_ngx_core()" in ngx_src)
@@ -111,6 +163,19 @@ def main():
           "IsBadReadPtr - run 23's AV was the dumper itself)",
           "VirtualQuery" in ngx_src and ".IsBadReadPtr(" not in ngx_src
           and "*([_CVOID] * 8)" in ngx_src)
+    check("crashlog: silent-kill tracer ships (run 24 = death with no "
+          "exception: deliberate terminate, so the trap patches NGX import "
+          "tables and logs the killer's call chain before forwarding)",
+          "install_termination_trap" in crashlog_src
+          and "ExitProcess" in crashlog_src
+          and "RaiseFailFastException" in crashlog_src
+          and "VirtualProtect" in crashlog_src
+          and "RtlCaptureStackBackTrace" in crashlog_src
+          and "install_termination_trap" in ngx_src
+          and "ANTS_NR_TERMINATION_TRAP" in ngx_src)
+    check("crashlog: IAT termination tracer walks imports and patches the "
+          "termination APIs (flat-PE fixture, fake kernel32)",
+          _iat_tracer_fixture_check())
     check("tools: crash-offset resolver ships (names MODULE+0xRVAs)",
           (REPO / "tools" / "resolve_crash_offset.py").is_file()
           and "bisect" in (REPO / "tools" / "resolve_crash_offset.py").read_text())

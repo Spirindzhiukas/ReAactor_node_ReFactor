@@ -380,6 +380,21 @@ class NgxSession:
                     _log().status(f"[ANTs] {name} <- callback registered "
                                   f"(returns {ret})")
 
+                # Termination tracer (run 25, see crashlog.py): run 24 still
+                # died SILENTLY after the params callback - no exception
+                # anywhere, crash file empty. That signature = a deliberate
+                # kill through a no-exception path (CRT abort/fastfail,
+                # ExitProcess family). Patch both NGX modules' import tables
+                # so the killer logs its call chain (module+offset each)
+                # before forwarding to the real function.
+                #   ANTS_NR_TERMINATION_TRAP=0 opts out.
+                if os.environ.get("ANTS_NR_TERMINATION_TRAP", "1") != "0":
+                    from . import crashlog
+                    crashlog.install_termination_trap(
+                        [(self.module.handle,
+                          "snippet " + os.path.basename(str(self.module.path or ""))),
+                         (self._core_handle, "driver core")])
+
         app_data = app_data_path or os.path.join(writable_cache_dir("appdata"), "logs")
         os.makedirs(app_data, exist_ok=True)
 
