@@ -868,3 +868,54 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - Docs updated to the same language: README, `CLAUDE.md` 2b,
   `docs/MODELS_DLSS_LAYOUT.md` ("Which NR builds exist, and why the community
   ones are the normal path").
+
+### 2026-09-20 (owner lead) — CUDA LUID adapter identity; the #15255 multi-GPU family
+- **Owner pointed at ComfyUI PR #15451** (OPEN, `mergeStateStatus: BEHIND`,
+  refs issue **#15255 / CORE-398**): on Windows, once a process touches more
+  than one GPU, host->device copies can fail with `CUDA_ERROR_OUT_OF_MEMORY`
+  (result=2) with plenty of VRAM free, and that CUDA context never recovers.
+  Maintainer rattus128 reproduced it with raw CUDA **only in the multi-GPU
+  shape** (`windows_cuda_host_memory_diagnostic.py` in the issue): clean
+  single-GPU probe = 1000 pinned transfers PASS (registration to 22.750 GiB);
+  all-GPU probe = registration fails after 12.000 GiB, then EVERY
+  `cuMemcpyHtoD_v2` fails, `free=0/total=0` after. Workaround today:
+  `--cuda-device 0` (or one UUID) and/or `--disable-pinned-memory`; PR #15451
+  makes the single current device the core default. Our 20:39/20:40
+  DEVICE_REMOVED + legacy "by LUID" report is the same family on the D3D12
+  side.
+- **NEW `ants/dlsssr/cuda_luid.py`**: CUDA identity via the driver API from
+  `nvcuda.dll` (`cuInit`, `cuDeviceGetCount/GetName/GetLuid`; the
+  `cudart64_*.dll` next to torch is the fallback). `device_luid(ordinal)`,
+  `view()`, `count()`, `format_luid()` (`hi:lo` hex, like aimdo /
+  nvidia-smi), `reset_cache()`. Identity queries only, one device at a time,
+  every failure is a reason string - never an exception in ComfyUI's process.
+- **Adapter pick fixed (`d3d12.py`)**: `AdapterInfo` (name/LUID/vendor/device
+  id/flags + `software`/`nvidia`/`describe()`), `enumerate_adapters()`,
+  `pick_adapter(adapters, ordinal)` (CUDA LUID -> DXGI adapter; fallback =
+  first hardware adapter, NVIDIA preferred, a software/WARP adapter can never
+  win) and **`make_gpu_context(ordinal)`** - the ONE way to build a
+  GpuContext, creating the device on the matched adapter via
+  `D3D12CreateDevice(adapter, ...)` instead of the default adapter. Both
+  paths (`dlsssr` SR, `dlssnr` native NR) use it. This also makes the
+  `--cuda-device N` workaround safe: it renumbers CUDA only, so DXGI index
+  != CUDA ordinal there.
+- **LUID offset was WRONG**: `DXGI_ADAPTER_DESC1` keeps its `LUID` as EIGHT
+  bytes at **0x128** (LowPart, HighPart); the old `desc + 0x12C` pair printed
+  `{HighPart, Flags}`. Vendor 0x100, DeviceId 0x104, Flags 0x130, desc 312 B.
+- **Loud lines**: one `[ANTs] D3D12 host adapter ... - CUDA ordinal N LUID
+  ... -> adapter ...` status line per context; a one-shot advisory when >1
+  CUDA device is visible (#15255 + the exact flags); the device-removal error
+  gains clause (3) with the same flags; the legacy "by LUID" error now names
+  cause (1) wedged process before (2) fresh-process multi-GPU.
+- **New owner tool `tools\check_cuda_multigpu.bat` (+ `.py`)**: fresh-process
+  A/B - a child with `CUDA_VISIBLE_DEVICES=0` registers a pinned host buffer
+  and round-trips it, then this process touches every GPU (primary contexts
+  retained) and repeats the copy. Exit 10 = `BUG REPRODUCED` (keep ComfyUI on
+  one GPU), 0 = not reproduced, 2 = could not run / single GPU. Writes
+  nothing; its own process on purpose (it may poison its CUDA context).
+- **Collector**: new `CUDA / MULTI-GPU VIEW` section - every device with its
+  LUID (from the pack's `cuda_luid.py`, loaded by file) + the launch flags
+  found in the collected logs, so the next report says whether #15255 even
+  applies.
+- Suite: **413 checks** (dlsssr 90, native_flow 51, dlssnr_bridge 101) +
+  pyflakes/scope/smoke green.

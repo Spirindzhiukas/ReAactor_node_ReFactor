@@ -30,6 +30,7 @@ install_stubs()
 
 from ants.dlsssr import d3d12, ngx, win32
 from ants.dlsssr.d3d12 import D3D12Device, GpuContext
+from ants.log import dlss_logger
 
 _w_callable_at = win32.callable_at  # real implementation, saved pre-fakes
 
@@ -38,6 +39,7 @@ FAIL = 0
 RECORD = []          # every faked D3D12/NGX call, in order
 RESOURCES = {}       # fake object ptr -> {"buf": bytearray, "bpp": int}
 PARAMS = {}          # fake core parameter dict (SR scenario)
+FAKE_ADAPTERS = {}   # "hw"/"sw": the DXGI adapters build_device_graph made
 FAKE_HANDLE = 0xDEADBEEF
 close_failures = {"n": 0}   # how many upcoming Close() calls report failure
 device_state = {"reason": 0}  # GetDeviceRemovedReason return value (0 = alive)
@@ -307,23 +309,49 @@ def build_device_graph():
 
     def device_create(adapter, level, iid, out):
         _write_ptr(out, device.ptr)
-        RECORD.append(("D3D12CreateDevice", level))
+        # which adapter we asked for matters: the engine matches the D3D12
+        # device against its CUDA device by LUID, so a NULL/default pick is
+        # only correct on a single-GPU rig
+        RECORD.append(("D3D12CreateDevice", adapter, level))
         return 0
 
-    adapter = FakeObject({
-        2: (ctypes.c_uint64, [], lambda: 1),
-        10: (ctypes.c_int32, [ctypes.c_void_p],
-             lambda desc: (ctypes.memmove(
-                 desc,
-                 "NVIDIA GeForce RTX 4090\0".encode(
-                     "utf-32-le" if ctypes.sizeof(ctypes.c_wchar) == 4 else "utf-16-le"),
-                 96), 0)[1]),
-    }, "IDXGIAdapter1")
+    def make_adapter(name, vendor, device_id, luid, flags=0):
+        wide = 4 if ctypes.sizeof(ctypes.c_wchar) == 4 else 2
+        encoded = name.encode("utf-32-le" if wide == 4 else "utf-16-le") \
+            + b"\x00" * wide
+
+        def get_desc(desc):
+            ctypes.memset(desc, 0, 312)
+            ctypes.memmove(desc, encoded, min(len(encoded), 128 * wide))
+            ctypes.memmove(desc + 0x100, vendor.to_bytes(4, "little"), 4)
+            ctypes.memmove(desc + 0x104, device_id.to_bytes(4, "little"), 4)
+            ctypes.memmove(desc + 0x128,
+                           (luid[0] | (luid[1] << 32)).to_bytes(8, "little"), 8)
+            ctypes.memmove(desc + 0x130, flags.to_bytes(4, "little"), 4)
+            return 0
+        return FakeObject({
+            2: (ctypes.c_uint64, [], lambda: 1),
+            10: (ctypes.c_int32, [ctypes.c_void_p], get_desc),
+        }, "IDXGIAdapter1")
+
+    # Adapter 0 is the real GPU, adapter 1 is a software one: the CUDA LUID
+    # decides between them, and a software adapter must never win a guess.
+    adapter = make_adapter("NVIDIA GeForce RTX 4090", 0x10DE, 0x2684,
+                           (0x0000B412, 0x00000000))
+    software_adapter = make_adapter("Microsoft Basic Render Driver", 0x1414,
+                                    0x008C, (0x00000000, 0x00000000), flags=2)
+
+    def enum_adapter(index, out):
+        if index == 0:
+            _write_ptr(out, adapter.ptr)
+            return 0
+        if index == 1:
+            _write_ptr(out, software_adapter.ptr)
+            return 0
+        return -2005270174          # DXGI_ERROR_NOT_FOUND
     factory = FakeObject({
         2: (ctypes.c_uint64, [], lambda: 1),
-        12: (ctypes.c_int32, [ctypes.c_uint32, ctypes.c_void_p],
-             lambda index, out: (_write_ptr(out, adapter.ptr), 0)[1]
-             if index == 0 else -2005270174),
+        12: (ctypes.c_int32, [ctypes.c_uint32, ctypes.c_void_p], enum_adapter),
     }, "IDXGIFactory1")
     factory_proto = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(ctypes.c_char * 16),
                                      ctypes.POINTER(ctypes.c_void_p))
@@ -332,6 +360,8 @@ def build_device_graph():
         _write_ptr(out, factory.ptr)
         return 0
 
+    FAKE_ADAPTERS["hw"] = adapter
+    FAKE_ADAPTERS["sw"] = software_adapter
     return device_proto(device_create), factory_proto(factory_create), fence
 
 
@@ -624,7 +654,8 @@ def main():
           and names.count("CreateCommandAllocator") == 1
           and names.count("CreateCommandList") == 1
           and names.count("CreateFence") == 1
-          and any(entry == ("D3D12CreateDevice", d3d12.D3D_FEATURE_LEVEL_11_0)
+          and any(entry[0] == "D3D12CreateDevice"
+                  and entry[2] == d3d12.D3D_FEATURE_LEVEL_11_0
                   for entry in RECORD))
 
     # ---- NR session, core-owned route (feature 18) ----
@@ -820,6 +851,82 @@ def main():
     check("d3d12: the host logs which adapter (and LUID) it bound - the "
           "reference when the engine's LUID matching fails",
           "RTX 4090" in (probe_ctx.adapter_name or ""))
+
+    # ---- adapter identity: the CUDA ordinal decides WHICH adapter ----------
+    # The engine matches the D3D12 device against its CUDA device BY LUID.
+    # DXGI order is a display order and CUDA order is a performance order, and
+    # --cuda-device N renumbers only the CUDA side, so "adapter index == CUDA
+    # ordinal" is wrong on every multi-GPU rig.
+    from ants.dlsssr import cuda_luid
+    check("cuda_luid: without nvcuda every query is a reason string, never an "
+          "exception (nothing may break on a host with no CUDA)",
+          (lambda luid, name, why: luid is None and why)(*cuda_luid.device_luid(0))
+          and cuda_luid.format_luid((0xB412, 0)) == "00000000:0000b412"
+          and (lambda total, why: total is None and bool(why))(*cuda_luid.count()))
+    _factory, adapters = d3d12.enumerate_adapters()
+    check("d3d12: DXGI_ADAPTER_DESC1 is read at the RIGHT offsets - LUID at "
+          "0x128 (LowPart first), vendor 0x100, flags 0x130",
+          len(adapters) == 2
+          and adapters[0].name == "NVIDIA GeForce RTX 4090"
+          and adapters[0].vendor_id == 0x10DE and adapters[0].device_id == 0x2684
+          and adapters[0].luid == (0x0000B412, 0x00000000)
+          and adapters[0].nvidia and not adapters[0].software
+          and adapters[1].software and adapters[1].vendor_id == 0x1414)
+    real_luid, real_count = cuda_luid.device_luid, cuda_luid.count
+    cuda_luid.device_luid = lambda ordinal=0: ((0x0000B412, 0), "", "")
+    info, reason = d3d12.pick_adapter(adapters, 0)
+    check("d3d12: a CUDA ordinal is matched to its adapter by LUID, and the "
+          "log line names both sides of the match",
+          info is not None and info.index == 0
+          and "CUDA ordinal 0 LUID 00000000:0000b412" in reason
+          and "RTX 4090" in reason)
+    cuda_luid.device_luid = lambda ordinal=0: ((0xDEAD0001, 0), "", "")
+    info, reason = d3d12.pick_adapter(adapters, 1)
+    check("d3d12: a CUDA LUID no DXGI adapter has is stated loudly (MIG, a "
+          "hidden device), and the software adapter is still not the guess",
+          info is not None and info.index == 0
+          and "no enumerated DXGI adapter has it" in reason)
+    cuda_luid.device_luid = lambda ordinal=0: (None, "", "driver too old")
+    info, reason = d3d12.pick_adapter(adapters, 1)
+    check("d3d12: an unavailable CUDA LUID falls back to a hardware adapter "
+          "and says why (the old silent index guess hid this)",
+          info is not None and info.index == 0
+          and "LUID unavailable" in reason and "driver too old" in reason)
+    cuda_luid.device_luid = lambda ordinal=0: ((0x0000B412, 0), "", "")
+    cuda_luid.count = lambda: (2, "")
+    d3d12._MULTI_GPU_SAID["done"] = False
+    said = []
+    real_status = dlss_logger.status
+    dlss_logger.status = lambda message, *a, **k: said.append(
+        message % a if a else message)
+    picks_before = sum(1 for e in RECORD if e[0] == "D3D12CreateDevice")
+    try:
+        ctx2 = d3d12.make_gpu_context(0)
+    finally:
+        dlss_logger.status = real_status
+    picks = [e for e in RECORD if e[0] == "D3D12CreateDevice"][picks_before:]
+    check("d3d12: the device is created ON the adapter whose LUID is the CUDA "
+          "ordinal's (not on the default adapter - the pick the engine "
+          "re-checks)", picks and picks[-1][1] == FAKE_ADAPTERS["hw"].ptr
+          and ctx2.adapter_name == "NVIDIA GeForce RTX 4090")
+    advisory = [msg for msg in said if "CUDA devices are visible" in msg]
+    check("d3d12: the multi-GPU CUDA advisory (ComfyUI #15255 / PR #15451) is "
+          "logged once, with the exact launch flags",
+          len(advisory) == 1 and "2 CUDA devices are visible" in advisory[0]
+          and "--cuda-device 0" in advisory[0]
+          and "--disable-pinned-memory" in advisory[0]
+          and any("CUDA ordinal 0 LUID 00000000:0000b412" in msg for msg in said))
+    check("d3d12: a removal on a multi-GPU process names that CUDA bug and the "
+          "flags as a possible cause",
+          "3) THIS PROCESS SEES 2 CUDA DEVICES" in ctx2._removal_text(
+              "testing", "DEVICE_REMOVED (device gone)")
+          and "--disable-pinned-memory" in ctx2._removal_text("t", "x"))
+    cuda_luid.count = lambda: (1, "")
+    check("d3d12: the multi-GPU clause stays away on a single-GPU rig",
+          "THIS PROCESS SEES" not in ctx2._removal_text("t", "x"))
+    cuda_luid.device_luid, cuda_luid.count = real_luid, real_count
+    ctx2.close()
+
     device_state["reason"] = 0x887A0006        # DEVICE_HUNG
     close_failures["n"] = 1
     probe_ctx.upload_texture(upload_tex, bytes(W * H * 4),

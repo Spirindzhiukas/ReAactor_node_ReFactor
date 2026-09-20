@@ -102,6 +102,27 @@ python and never registers callbacks.
       + GPU context for a clean rebuild, legacy init explains the restart
       rule, adapter name/LUID logged, `ANTS_D3D12_CHECKPOINT=1` names an
       invalid command if a Close fails on a healthy device.
+- [x] **RUN 20:39+ (owner lead) — CUDA LUID adapter identity + the #15255
+      multi-GPU CUDA family**: the owner's PR #15451 / issue #15255 link made
+      the failure family explicit (Windows CUDA poisons the process once more
+      than one GPU is touched; core enumerates every GPU at startup).
+      Code: `ants/dlsssr/cuda_luid.py` (driver-API LUID/name/count, reason
+      strings, never raises), `AdapterInfo` + `pick_adapter()` +
+      **`make_gpu_context(ordinal)`** so the D3D12 device is created ON the
+      adapter whose LUID is the CUDA ordinal's (this is also what makes
+      ComfyUI's `--cuda-device N` workaround safe: it renumbers CUDA, not
+      DXGI), the LUID read fixed to **0x128** (0x12C was the HighPart: the
+      old log printed `{HighPart, Flags}`), a one-shot multi-GPU advisory and
+      a removal-error clause naming the flags, `tools\check_cuda_multigpu.bat`
+      (fresh-process A/B: single-GPU child vs all-GPU copy), and the
+      collector's new **CUDA / MULTI-GPU VIEW** section (devices + LUIDs +
+      launch flags).
+- [ ] **Run 34 (owner, fresh process each time)**: as Run 33, plus the
+      multi-GPU A/B — one run with `--cuda-device 0` (and if needed
+      `--disable-pinned-memory`) in the launch bat. A run that starts working
+      there = the #15255 CUDA state, not the pack; the console already says
+      which flags to add. Also run `tools\check_cuda_multigpu.bat` once and
+      send its verdict (it needs ~10 s and does not touch ComfyUI).
 - [ ] **Run 33 (owner, fresh process each time)**:
       1. native engine + a SMALL frame (768x768, 1 pass) → proves the path
          end-to-end and cannot hit the 2 s TDR timeout;

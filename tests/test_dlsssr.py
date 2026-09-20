@@ -501,8 +501,18 @@ def _rig_evidence_check():
                  and "(helper duplicate" in report
                  and "staging area - rebuilt on demand" in report
                  and "AUTO would load in NR/:" in report)
+        # the report answers "does the ComfyUI #15255 multi-GPU CUDA bug even
+        # apply to this machine" (device list + LUIDs + how comfy was launched)
+        collector_src = (REPO / "tools" / "collect_rig_evidence.py").read_text()
+        cuda_view = ("CUDA / MULTI-GPU VIEW" in report
+                     and "15255" in report
+                     and "def cuda_device_view" in collector_src
+                     and "load_pack_cuda_luid" in collector_src
+                     and "CUDA_ERROR_OUT_OF_MEMORY" in collector_src
+                     and "--disable-pinned-memory" in collector_src)
         return (code == 0 and self_contained and audit and helper_section
                 and auto and guard and outside and offsets and inlined
+                and cuda_view
                 and "2099-01-01.1" in report          # deployment marker
                 and "nvngx_dlssnr.dll" in report      # runtime inventory
                 and "sha256(first 8)" in report
@@ -591,6 +601,41 @@ def _collector_bat_check():
             and b"THE ONLY BLOCK YOU MAY EDIT" in raw
             and b"READ-ONLY" in raw
             and not risky)
+
+
+def _cuda_multigpu_tool_check():
+    """The #15255 probe: runnable anywhere, soft-fails with a reason, and it
+    really does the A/B (one-GPU child vs all-GPUs-touched copy)."""
+    import subprocess
+    tool = REPO / "tools" / "check_cuda_multigpu.py"
+    bat = REPO / "tools" / "check_cuda_multigpu.bat"
+    if not tool.is_file() or not bat.is_file():
+        return False
+    src = tool.read_text()
+    raw = bat.read_bytes()
+    risky = []
+    for line in raw_exec_lines(raw):
+        lowered = line.lower()
+        first = lowered.find(b" (")
+        if first == -1 or b"for " in lowered[:first]:
+            continue
+        risky.append(line)
+    ok_bat = (raw.startswith(b"@echo off\r\n") and b"clip <" in raw
+              and b"READ-ONLY" in raw and not risky)
+    ok_src = ("CUDA_VISIBLE_DEVICES=0" in src
+              and "cuMemHostRegister_v2" in src
+              and "cuMemcpyHtoD_v2" in src
+              and "cuDevicePrimaryCtxRetain" in src
+              and "BUG REPRODUCED" in src
+              and "does NOT clear the machine" in src
+              and "15255" in src)
+    # in this sandbox there is no nvcuda: the tool must SAY so and exit 2,
+    # never traceback (the owner's rig is where it does real work)
+    out = subprocess.run([sys.executable, str(tool)], capture_output=True,
+                         text=True, timeout=120)
+    soft = (out.returncode == 2 and "Windows-only" in out.stdout
+            and "Traceback" not in out.stdout)
+    return ok_bat and ok_src and soft
 
 
 def _resolver_tolerance_check():
@@ -1016,6 +1061,10 @@ def main():
     check("tools: the collector bat is CRLF, clipboard-returning, marked "
           "READ-ONLY and has no parens on executable lines",
           _collector_bat_check())
+    check("tools: the CUDA multi-GPU probe (ComfyUI #15255) ships with its "
+          "bat - fresh-process A/B, a pinned host copy round-trip, the "
+          "single-GPU child, and a verdict the owner can act on",
+          _cuda_multigpu_tool_check())
     check("tools: import lister flags termination APIs + NGX backend "
           "bindings statically (engine-dll discriminator, no execution)",
           (REPO / "tools" / "list_imports.py").is_file()

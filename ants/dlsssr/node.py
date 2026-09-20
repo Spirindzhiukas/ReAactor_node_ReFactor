@@ -91,9 +91,10 @@ class DLSSSRUpscaler:
         if getattr(device, "index", None) is not None:
             ordinal = device.index
         if self.gpu is None:
-            from .d3d12 import D3D12Device, GpuContext
-            gpu_device = D3D12Device.create()
-            self.gpu = GpuContext(gpu_device, adapter_index=ordinal)
+            # The device must live on the adapter that belongs to the CUDA
+            # ordinal we advertise: the NGX core matches the two by LUID.
+            from .d3d12 import make_gpu_context
+            self.gpu = make_gpu_context(ordinal)
 
         if self.session is None or self._session_key != key:
             if self.session is not None:

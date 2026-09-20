@@ -306,16 +306,27 @@ class ReFactorDLSS5Enhancer:
                     raise RuntimeError(
                         f"[ANTs] The neuroframe engine could not create a "
                         f"D3D12 device for CUDA device {self._ordinal}: {text}\n"
-                        "    Most common cause: an earlier run in THIS ComfyUI "
-                        "process lost its D3D12 device (removed/GPU timeout), "
-                        "after which the driver refuses new devices until the "
-                        "process restarts.\n"
-                        "    Fix: restart ComfyUI and run again.\n"
-                        "    If it still fails in a fresh process, the helper "
-                        "pair in models/DLSS/Merserk_DLLS is not the one this "
-                        "GPU needs - run tools\\collect_rig_evidence.bat and "
-                        "send the HELPER / ENGINE INVENTORY section (it lists "
-                        "every helper DLL with its size, hash and exports).\n"
+                        "    The engine matches its CUDA device to the D3D12 "
+                        "device by adapter LUID. Two causes, in order of "
+                        "likelihood:\n"
+                        "      (1) an earlier run in THIS ComfyUI process lost "
+                        "its D3D12 device (removed / GPU timeout) - after that "
+                        "the driver refuses new devices until the process "
+                        "restarts. Restart ComfyUI and run again.\n"
+                        "      (2) a FRESH process on a machine with more than "
+                        "one GPU: launch ComfyUI with --cuda-device <the one "
+                        "id> (a single GPU) and/or --disable-pinned-memory - a "
+                        "Windows CUDA driver bug can poison the process once "
+                        "more than one GPU is touched (ComfyUI issue #15255).\n"
+                        "    Compare the '[ANTs] D3D12 host adapter' line above "
+                        "(our pick, matched to this CUDA ordinal by LUID) with "
+                        "the engine's own CUDA device.\n"
+                        "    If it still fails in a fresh single-GPU process, "
+                        "the helper pair in models/DLSS/Merserk_DLLS is not "
+                        "the one this GPU needs - run "
+                        "tools\\collect_rig_evidence.bat and send the "
+                        "HELPER / ENGINE INVENTORY section (it lists every "
+                        "helper DLL with its size, hash and exports).\n"
                         f"    Engine set in use: {dll_dir}") from exc
                 raise
 
@@ -329,8 +340,10 @@ class ReFactorDLSS5Enhancer:
         """The D3D12 GPU context is created once, on demand - whichever
         session type (NR or the SR pre-denoise) needs it first."""
         if self.native_gpu is None:
-            from ..dlsssr.d3d12 import D3D12Device, GpuContext
-            self.native_gpu = GpuContext(D3D12Device.create(), adapter_index=self._ordinal)
+            # The engine matches its CUDA device by LUID, so the D3D12 device
+            # must be created on the adapter that belongs to self._ordinal.
+            from ..dlsssr.d3d12 import make_gpu_context
+            self.native_gpu = make_gpu_context(self._ordinal)
         return self.native_gpu
 
     def _native_session_for(self, width, height, pass_settings):

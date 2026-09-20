@@ -643,10 +643,15 @@ def main():
         discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, \
             discovery.PACKAGE_DLL_DIR = saved
     check("node: the legacy engine's LUID failure is explained (wedged device "
-          "after a removal -> restart; otherwise the helper pair, plus the "
+          "after a removal -> restart; on a fresh process the multi-GPU CUDA "
+          "bug + the launch flags; otherwise the helper pair, plus the "
           "collector inventory as the next step)",
           "by LUID" in node_src and "restart ComfyUI" in node_src
-          and "HELPER / ENGINE INVENTORY" in node_src)
+          and "HELPER / ENGINE INVENTORY" in node_src
+          and "--cuda-device" in node_src
+          and "--disable-pinned-memory" in node_src
+          and "15255" in node_src
+          and "D3D12 host adapter" in node_src)
     check("node: a removed device drops the GPU context AND the session (the "
           "next frame rebuilds both), instead of cascading on a dead device",
           "REMOVED" in node_src and "_close_native()" in node_src

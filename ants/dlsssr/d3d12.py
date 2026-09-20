@@ -368,8 +368,54 @@ class D3D12Device(ComObject):
                              state, heap_type=heap_type)
 
 
+VENDOR_NVIDIA = 0x10DE
+VENDOR_MICROSOFT = 0x1414          # WARP / Basic Render Driver
+DXGI_ADAPTER_FLAG_SOFTWARE = 0x2
+# DXGI_ADAPTER_DESC1: Description[128] WCHAR, VendorId, DeviceId, SubSysId,
+# Revision, three SIZE_T, LUID, Flags. The LUID is EIGHT bytes at 0x128
+# (LowPart, then HighPart) - 0x12C is its HighPart, and reading the pair from
+# there returned {HighPart, Flags}: a wrong reference value for the engine's
+# own "cannot match CUDA ordinal by LUID" message.
+_ADAPTER_DESC_SIZE = 312
+_ADAPTER_NAME_CHARS = 64
+_ADAPTER_VENDOR_OFFSET = 0x100
+_ADAPTER_DEVICE_OFFSET = 0x104
+_ADAPTER_LUID_OFFSET = 0x128
+_ADAPTER_FLAGS_OFFSET = 0x130
+
+
+class AdapterInfo:
+    """One DXGI adapter: the pointer to create a device on, plus its identity."""
+
+    def __init__(self, com, index, name, luid, vendor_id, device_id, flags):
+        self.com = com                       # keeps the IDXGIAdapter1 alive
+        self.ptr = com.ptr                   # the raw pointer CreateDevice wants
+        self.index = index
+        self.name = name
+        self.luid = luid                     # (LowPart, HighPart) or None
+        self.vendor_id = vendor_id
+        self.device_id = device_id
+        self.flags = flags
+
+    @property
+    def software(self):
+        """WARP / Basic Render Driver - never the GPU we want."""
+        return bool(self.flags & DXGI_ADAPTER_FLAG_SOFTWARE) \
+            or self.vendor_id == VENDOR_MICROSOFT
+
+    @property
+    def nvidia(self):
+        return self.vendor_id == VENDOR_NVIDIA
+
+    def describe(self):
+        from . import cuda_luid
+        return (f"#{self.index} '{self.name}' "
+                f"(vendor 0x{self.vendor_id:04x}, LUID "
+                f"{cuda_luid.format_luid(self.luid)})")
+
+
 def enumerate_adapters():
-    """List (adapter_ptr, description) — call release() on the ones not used."""
+    """(factory, [AdapterInfo]) - call release() on the adapters not used."""
     create = win32.create_dxgi_factory1_symbol()
     create.argtypes = [ctypes.POINTER(ctypes.c_char * 16), ctypes.POINTER(ctypes.c_void_p)]
     create.restype = ctypes.c_int32
@@ -385,38 +431,142 @@ def enumerate_adapters():
         if hr < 0:
             break
         adapter = ComObject(adapter_out.value, "IDXGIAdapter1")
-        desc = ctypes.create_string_buffer(312)  # DXGI_ADAPTER_DESC1
+        desc = ctypes.create_string_buffer(_ADAPTER_DESC_SIZE)  # DXGI_ADAPTER_DESC1
         adapter.call_hr(10, [_CVOID_P()], desc, what="GetDesc1")  # GetDesc1 = 10
-        wide_part = ctypes.wstring_at(ctypes.addressof(desc), 64)
-        # LUID lives at 0x12C in DXGI_ADAPTER_DESC1 (LowPart, HighPart). NGX
-        # and the neuroframe engine both match their CUDA device by this value,
-        # so printing it is what makes "cannot match CUDA ordinal by LUID"
-        # comparable across the two hosts.
-        luid = ctypes.cast(ctypes.addressof(desc) + 0x12C,
-                           ctypes.POINTER(ctypes.c_uint32 * 2)).contents
-        adapters.append((adapter, wide_part.split("\x00")[0],
-                         (luid[0], luid[1])))
+        base = ctypes.addressof(desc)
+        wide_part = ctypes.wstring_at(base, _ADAPTER_NAME_CHARS)
+        luid_pair = ctypes.cast(base + _ADAPTER_LUID_OFFSET,
+                                ctypes.POINTER(ctypes.c_uint32 * 2)).contents
+        adapters.append(AdapterInfo(
+            adapter, index, wide_part.split("\x00")[0],
+            (luid_pair[0], luid_pair[1]),
+            int.from_bytes(desc.raw[_ADAPTER_VENDOR_OFFSET:
+                                    _ADAPTER_VENDOR_OFFSET + 4], "little"),
+            int.from_bytes(desc.raw[_ADAPTER_DEVICE_OFFSET:
+                                    _ADAPTER_DEVICE_OFFSET + 4], "little"),
+            int.from_bytes(desc.raw[_ADAPTER_FLAGS_OFFSET:
+                                    _ADAPTER_FLAGS_OFFSET + 4], "little")))
         index += 1
     return factory, adapters
+
+
+def pick_adapter(adapters, ordinal=0):
+    """(AdapterInfo, reason): the adapter that belongs to CUDA ``ordinal``.
+
+    The reference host matches CUDA to DXGI **by LUID**, and so must we: the
+    neuroframe engine is handed a D3D12 device and then matches it against its
+    own CUDA device by LUID, so a device created on the wrong adapter fails
+    with "Could not create a D3D12 device matching CUDA ordinal N by LUID".
+    DXGI enumeration order (a display order) and CUDA order (a performance
+    order) need not agree, and ``--cuda-device N`` / CUDA_VISIBLE_DEVICES
+    renumber the CUDA side only.
+
+    Never raises: when the LUID is unavailable the best hardware adapter is
+    used and the reason says so, so the caller can log it loudly.
+    """
+    from . import cuda_luid
+    if not adapters:
+        return None, "no DXGI adapter was enumerated"
+    luid, _name, why = cuda_luid.device_luid(ordinal)
+    if luid is not None:
+        for info in adapters:
+            if info.luid == luid:
+                return info, (f"CUDA ordinal {ordinal} LUID "
+                              f"{cuda_luid.format_luid(luid)} -> adapter "
+                              f"{info.describe()}")
+        return _best_guess(adapters), (
+            f"CUDA ordinal {ordinal} is LUID {cuda_luid.format_luid(luid)} but "
+            f"no enumerated DXGI adapter has it - using the best guess")
+    return _best_guess(adapters), (
+        f"CUDA ordinal {ordinal} LUID unavailable ({why}) - using the best guess")
+
+
+def _best_guess(adapters):
+    """The first hardware adapter, NVIDIA preferred (never a software one)."""
+    hardware = [info for info in adapters if not info.software]
+    for info in hardware:
+        if info.nvidia:
+            return info
+    if hardware:
+        return hardware[0]
+    return adapters[0]
+
+
+def make_gpu_context(ordinal=0):
+    """The one way to build a GpuContext: the device lives on the adapter that
+    belongs to CUDA ``ordinal`` (see :func:`pick_adapter`)."""
+    _factory, adapters = enumerate_adapters()
+    info, reason = pick_adapter(adapters, ordinal)
+    device = D3D12Device.create(info.ptr if info else None)
+    context = GpuContext(device, adapter_index=info.index if info else 0,
+                         adapter=info, ordinal=ordinal, pick_reason=reason)
+    _multi_gpu_advisory(ordinal, reason)
+    return context
+
+
+def _multi_gpu_advisory(ordinal, pick_reason):
+    """Say it once, when a second CUDA device is visible.
+
+    ComfyUI issue #15255 (CORE-398) / PR #15451: on Windows a CUDA bug can
+    poison the CUDA context as soon as the process touches more than one GPU -
+    host->device copies then fail with CUDA_ERROR_OUT_OF_MEMORY and nothing in
+    that process recovers. ComfyUI core enumerates every visible GPU at
+    startup, so on a multi-GPU rig the process is already in the risky shape
+    before any node runs; the fix upstream is to stop doing that, the
+    workaround today is to restrict the visible devices.
+    """
+    from . import cuda_luid
+    from ..log import dlss_logger
+    if _MULTI_GPU_SAID["done"]:
+        return
+    total, _why = cuda_luid.count()
+    if total is None or total <= 1:
+        return
+    _MULTI_GPU_SAID["done"] = True
+    dlss_logger.status(
+        "[ANTs] %d CUDA devices are visible to this process, and this run uses "
+        "ordinal %d (%s). On Windows a CUDA driver bug can poison the CUDA "
+        "context once a process touches more than one GPU - host->device copies "
+        "then fail with CUDA_ERROR_OUT_OF_MEMORY and nothing in that process "
+        "recovers (ComfyUI issue #15255 / PR #15451). If a run dies like that, "
+        "restart ComfyUI and launch it with --cuda-device %d (single GPU) "
+        "and/or --disable-pinned-memory.",
+        total, ordinal, pick_reason, ordinal)
+
+
+_MULTI_GPU_SAID = {"done": False}
 
 
 class GpuContext:
     """One queue/allocator/list/fence; record, submit, wait (synchronous)."""
 
-    def __init__(self, device, adapter_index=0):
+    def __init__(self, device, adapter_index=0, adapter=None, ordinal=None,
+                 pick_reason=""):
         self.device = device
-        self.factory, adapters = enumerate_adapters()
-        self.adapter = adapters[adapter_index][0] if adapters else None
-        self.adapter_name = adapters[adapter_index][1] if adapters else "?"
-        self.adapter_luid = adapters[adapter_index][2] if adapters else None
+        if adapter is None:
+            self.factory, adapters = enumerate_adapters()
+            adapter = adapters[adapter_index] if adapter_index < len(adapters) \
+                else None
+        else:
+            self.factory = None
+        self.adapter_info = adapter
+        self.adapter = adapter.ptr if adapter else None
+        self.adapter_name = adapter.name if adapter else "?"
+        self.adapter_luid = adapter.luid if adapter else None
+        self.ordinal = ordinal
+        self.pick_reason = pick_reason
         # Which adapter we bound matters: the neuroframe engine matches its
         # CUDA device by LUID, so this line is the reference when it reports
         # "cannot match CUDA ordinal by LUID".
         from ..log import dlss_logger
-        dlss_logger.status(
-            "[ANTs] D3D12 host adapter %s (index %d, LUID %s)",
-            self.adapter_name, adapter_index,
-            "{%s, %s}" % self.adapter_luid if self.adapter_luid else "?")
+        if pick_reason:
+            dlss_logger.status("[ANTs] D3D12 host adapter %s - %s",
+                               adapter.describe() if adapter else "?", pick_reason)
+        else:
+            dlss_logger.status(
+                "[ANTs] D3D12 host adapter %s (index %d, LUID %s)",
+                self.adapter_name, adapter_index,
+                "{%s, %s}" % self.adapter_luid if self.adapter_luid else "?")
         self.queue = device.create_command_queue()
         self.allocator = device.create_command_allocator()
         self.list = device.create_command_list(self.allocator)
@@ -603,7 +753,26 @@ class GpuContext:
     def device_removed_error(self, where):
         """The one loud error for a removed device."""
         _removed, hr, text = self.device_status()
-        return DlssSrError(
+        return DlssSrError(self._removal_text(where, text))
+
+    def _removal_text(self, where, text):
+        multi = ""
+        try:
+            from . import cuda_luid
+            total, _why = cuda_luid.count()
+        except Exception:
+            total = None
+        if total is not None and total > 1:
+            multi = (
+                " (3) THIS PROCESS SEES %d CUDA DEVICES: on Windows a CUDA "
+                "driver bug can poison the CUDA context as soon as more than "
+                "one GPU is touched, and the driver then reports the D3D12 "
+                "device as REMOVED (ComfyUI issue #15255 / PR #15451). Restart "
+                "ComfyUI and launch it with --cuda-device %d (single GPU) "
+                "and/or --disable-pinned-memory, then try the same frame "
+                "again." % (total, self.ordinal if self.ordinal is not None
+                            else 0))
+        return (
             f"[ANTs] The D3D12 device was REMOVED while {where}: {text}. "
             "Everything queued or recorded on it is void, so this frame "
             "cannot be produced. The pack drops the native session and the "
@@ -617,7 +786,7 @@ class GpuContext:
             "next run - after a removal the driver can refuse new devices in "
             "the same process (the legacy engine then reports 'Could not "
             "create a D3D12 device matching CUDA ordinal ... by LUID', which "
-            "is the same wedged state, not a second bug).")
+            "is the same wedged state, not a second bug).") + multi
 
     def _submit_pair(self, command_list, allocator, timeout_ms, tag):
         if self.dead is not None:

@@ -568,6 +568,98 @@ def load_pack_peexports(repo):
         return None
 
 
+def load_pack_cuda_luid(repo):
+    """The pack's CUDA identity reader (ants/dlsssr/cuda_luid.py).
+
+    Loaded straight from the file like versions.py / peexports.py: it is
+    stdlib-only, and importing the package would drag ComfyUI bootstrapping
+    into a read-only diagnostic.
+    """
+    import importlib.util
+    path = os.path.join(repo or "", "ants", "dlsssr", "cuda_luid.py")
+    if not os.path.isfile(path):
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("ants_pack_cuda_luid", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        return None
+
+
+CUDA_MULTIGPU_NOTE = (
+    "MORE THAN ONE CUDA device: if a run failed with CUDA_ERROR_OUT_OF_MEMORY "
+    "(host->device copies), a D3D12 device REMOVED, or 'cannot match CUDA "
+    "ordinal by LUID', this is ComfyUI issue #15255 (CORE-398) - a Windows "
+    "CUDA driver bug that poisons the process once it touches more than one "
+    "GPU. Launch ComfyUI with a single id (--cuda-device 0) and/or "
+    "--disable-pinned-memory, then try again; ComfyUI PR #15451 makes the "
+    "single device the default.")
+
+
+def cuda_device_view(out_lines, repo, comfy_root="", logs_dir=""):
+    """Every CUDA device with its LUID, plus how ComfyUI was launched.
+
+    The list comes from THIS process (the collector's own python), because
+    ComfyUI's ``--cuda-device`` sets CUDA_VISIBLE_DEVICES inside ComfyUI only -
+    so the flags found in the collected logs are what say how the run was
+    actually launched.
+    """
+    module = load_pack_cuda_luid(repo)
+    devices, why = [], "cuda_luid.py not found in the pack checkout"
+    if module is not None:
+        try:
+            devices, why = module.view()
+        except Exception as exc:
+            why = f"{exc.__class__.__name__}: {exc}"
+    if devices:
+        out_lines.append(f"  {len(devices)} CUDA device(s) visible to this "
+                         "python:")
+        for ordinal, name, luid in devices:
+            out_lines.append(f"    {ordinal}: {name or '<no name>'} "
+                             f"(LUID {module.format_luid(luid)})")
+        if len(devices) > 1:
+            out_lines.append(f"  [!] {CUDA_MULTIGPU_NOTE}")
+        else:
+            out_lines.append("  single CUDA device: the multi-GPU CUDA bug "
+                             "(#15255) cannot apply to this machine as it is "
+                             "right now")
+    else:
+        out_lines.append(f"  CUDA device list unavailable ({why})")
+        out_lines.append("  (the NVIDIA driver's nvcuda.dll is the only "
+                         "source; run this bat with ComfyUI's own python)")
+
+    needles = ("cuda-device", "disable-pinned-memory", "disable-dynamic-vram")
+    hits = []
+    if logs_dir and os.path.isdir(logs_dir):
+        for name in sorted(os.listdir(logs_dir)):
+            path = os.path.join(logs_dir, name)
+            if not os.path.isfile(path):
+                continue
+            try:
+                text = open(path, "r", encoding="utf-8",
+                            errors="replace").read(400000)
+            except OSError:
+                continue
+            for row in text.splitlines():
+                low = row.lower()
+                # our own advice lines mention these flags too - only the
+                # launcher's own line is evidence
+                if any(n in low for n in needles) and "[ANTs]" not in row \
+                        and len(row) < 300:
+                    hits.append(f"{name}: {row.strip()}")
+    if hits:
+        out_lines.append("  launch flags seen in the collected logs:")
+        for row in hits[:8]:
+            out_lines.append(f"    {row}")
+    else:
+        out_lines.append("  launch flags: none found in the collected logs - "
+                         "tell us the exact comfy launch line (or the .bat "
+                         "that starts ComfyUI) if the run failed with a CUDA / "
+                         "device-removed error")
+
+
 HELPER_INVENTORY_HINTS = ("neuroframe", "merserk", "caller", "engine")
 
 
@@ -992,6 +1084,10 @@ def main(argv=None):
     lines.append("")
     lines.append("--- GPU " + "-" * 65)
     nvidia_smi(lines)
+
+    lines.append("")
+    lines.append("--- CUDA / MULTI-GPU VIEW (ComfyUI #15255) " + "-" * 29)
+    cuda_device_view(lines, repo, comfy_root, logs_dir)
 
     lines.append("")
     lines.append("--- TORCH / CUDA " + "-" * 56)

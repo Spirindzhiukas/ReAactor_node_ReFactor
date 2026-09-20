@@ -140,6 +140,17 @@ entry point (`dlss5nr_process_cuda_v6`) — zero PCIe copies when the batch alre
 orders of magnitude faster at 4K and with `nr_passes` > 1. `CPU (host staging)` stays as a compat
 fallback (and for engine builds too old for CUDA — you get a clear error).
 
+**Multi-GPU machines (Windows).** ComfyUI core enumerates every visible GPU at startup, and on
+Windows a CUDA driver bug ([ComfyUI issue #15255 / CORE-398](https://github.com/Comfy-Org/ComfyUI/issues/15255))
+can then poison the process: host→device copies start failing with `CUDA_ERROR_OUT_OF_MEMORY` even
+with free VRAM, and the same process can end in a `D3D12 device REMOVED` here. If a run dies that
+way, restart ComfyUI and launch it with a single device (`--cuda-device 0`, or one GPU's UUID) and/or
+`--disable-pinned-memory`. `tools\check_cuda_multigpu.bat` tests whether your machine reproduces the
+bug (its own process, ~10 s, writes nothing), and the evidence collector's *CUDA / MULTI-GPU VIEW*
+section lists every GPU with its LUID together with the launch flags it found. The node itself always
+creates its D3D12 device on the adapter matching its CUDA device **by LUID**, so `--cuda-device N`
+(or a hidden/renumbered device list) cannot make it pick the wrong GPU.
+
 HDR Colour Bridge: **Classic** (paper-white gain; Diffuse white 220 nits, Scene Paper-White Scale
 1.0 — neutral by default — plus HDR Transfer Strength 1.0, Color Strength 1.0) or **Anchored**
 (auto white point anchored to the frame's highlights + black-floor lever) — after RenoDX's DLSS 5

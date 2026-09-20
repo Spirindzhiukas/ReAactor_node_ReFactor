@@ -511,6 +511,73 @@ carries the count.
 * The native host logs the adapter name and LUID it bound (the reference for
   any "by LUID" failure from the engine).
 
+## Run 20:39+ (2026-09-20) — the owner's PR link: this is ONE Windows multi-GPU CUDA family
+
+The owner pointed at **ComfyUI PR #15451** ("Limit default GPU management to
+current device", still OPEN, `mergeStateStatus: BEHIND`; it refs **issue
+#15255 / CORE-398**). Read together with our own log, the two are the same
+family of failure:
+
+* **#15255** is a Windows CUDA driver bug: once a process has touched more
+  than one GPU, host->device copies start failing with
+  `CUDA_ERROR_OUT_OF_MEMORY` (result=2) *with plenty of VRAM free*, and the
+  CUDA context never recovers in that process. ComfyUI's maintainer
+  (rattus128) reproduced it with raw CUDA only in the **multi-GPU** shape
+  (`windows_cuda_host_memory_diagnostic.py`, posted in the issue): the clean
+  single-GPU probe passed 1000 pinned transfers; the all-GPU probe failed the
+  host registration after 12.000 GiB and then **every** `cuMemcpyHtoD_v2`,
+  with `free=0, total=0` afterwards.
+* **ComfyUI core enumerates every visible GPU at startup** (system_stats /
+  `get_all_torch_devices()` for the model-management path), so on a multi-GPU
+  machine the process is already in the risky shape *before* our node runs.
+  The workaround today is to restrict the device list (`--cuda-device 0`, or
+  `--cuda-device <one UUID>`) and/or `--disable-pinned-memory`; PR #15451
+  makes the single current device the default (core), while other GPUs stay
+  visible to custom nodes.
+* Our 20:39/20:40 report is the same story on the D3D12 side: a poisoned /
+  reset GPU state, a `Close` that answers `0x80070057`, and then
+  `CreateCommandAllocator 0x887A0005` (DEVICE_REMOVED); the legacy "cannot
+  match CUDA ordinal 0 by LUID" right after is the wedged process.
+
+**What this commit changes** (adapter identity — and the `--cuda-device`
+workaround only works once this is right):
+
+* `ants/dlsssr/cuda_luid.py` (new): the CUDA side of "which adapter is this?"
+  via the CUDA **driver** API (`nvcuda.dll` - `cuInit`, `cuDeviceGetCount`,
+  `cuDeviceGetName`, `cuDeviceGetLuid`), with the CUDA runtime
+  (`cudart64_*.dll` next to torch) as a fallback. Identity queries only,
+  one device at a time, and every failure is a reason string - never an
+  exception inside ComfyUI's process. `format_luid()` prints `hi:lo` the way
+  aimdo/nvidia-smi do.
+* `d3d12.py`: **the LUID is read at 0x128**, not 0x12C. `DXGI_ADAPTER_DESC1`
+  is `Description[128] WCHAR; VendorId; DeviceId; SubSysId; Revision; three
+  SIZE_T; LUID; Flags`, so the old `desc + 0x12C` pair returned
+  `{HighPart, Flags}` - a wrong reference value in exactly the message the
+  engine prints.
+* `AdapterInfo` + `enumerate_adapters()` now carry name, LUID, vendor, device
+  id and flags; `pick_adapter(adapters, ordinal)` matches the CUDA ordinal's
+  LUID to the DXGI adapter, and **`make_gpu_context(ordinal)` creates the
+  D3D12 device on that adapter** (`D3D12CreateDevice` with an explicit
+  adapter, not NULL/default). Both engine paths (`dlsssr` SR and `dlssnr`
+  native NR) go through it.
+* The pick is logged as one line: `[ANTs] D3D12 host adapter #0 'NVIDIA
+  GeForce RTX 4090' (vendor 0x10de, LUID 00000000:0000b412) - CUDA ordinal 0
+  LUID 00000000:0000b412 -> adapter #0 ...`. If the LUID cannot be read the
+  fallback picks the first hardware adapter (NVIDIA preferred, a software /
+  WARP adapter can never win) **and says why** - the old code silently
+  guessed by index.
+* When more than one CUDA device is visible, one advisory line names the
+  #15255 bug and the exact flags; a device-removal error gains clause (3)
+  with the same flags. On a single-GPU rig nothing extra is printed.
+* `tools\check_cuda_multigpu.bat` (+ `.py`): the owner-facing test of the
+  bug itself, in its own process (a child with `CUDA_VISIBLE_DEVICES=0` does
+  the pinned host copy first, then this process touches every GPU and repeats
+  the copy). Verdict: `BUG REPRODUCED` (exit 10) => keep ComfyUI on one GPU;
+  `not reproduced` (exit 0) => this is not the bug we are chasing.
+* Collector: new **CUDA / MULTI-GPU VIEW** section (every device with its
+  LUID + the launch flags found in the logs), so the next report answers
+  "does #15255 even apply here".
+
 **Next runs, in order** (each in a FRESH ComfyUI process):
 
 1. **Small frame first, native engine** (e.g. 768x768, 1 pass): proves the
@@ -524,7 +591,16 @@ carries the count.
    If it *still* says "by LUID", send the collector report - the HELPER /
    ENGINE INVENTORY section will show whether the pair on disk is the one
    that worked earlier.
-4. If a `Close 0x80070057` appears while the device reports healthy, re-run
+4. **A/B the multi-GPU variable** (one run each, fresh process): launch with
+   the same workflow but add `--cuda-device 0` to the launch bat, and if it
+   still fails try `--disable-pinned-memory` as well. If the run suddenly
+   works, the failure was the #15255 CUDA state, not our code - and the log
+   will already say so (the advisory line + the removal clause).
+   `tools\check_cuda_multigpu.bat` answers the same question in ~10 seconds
+   without touching ComfyUI, and the collector's new
+   `CUDA / MULTI-GPU VIEW` section lists every GPU with its LUID plus the
+   launch flags it found.
+5. If a `Close 0x80070057` appears while the device reports healthy, re-run
    once with `set ANTS_D3D12_CHECKPOINT=1` - the log will name the invalid
    command.
 
