@@ -397,12 +397,13 @@ class FakeNgxModule:
         if name == "NVSDK_NGX_D3D12_CreateFeature":
             def create_feature(list_ptr, feature_id, params_ptr, out):
                 _write_ptr(out, FAKE_HANDLE)
-                RECORD.append(("CreateFeature", _as_int(feature_id)))
+                RECORD.append(("CreateFeature", _as_int(feature_id),
+                               _as_int(list_ptr)))
                 return 1
             return create_feature
         if name == "NVSDK_NGX_D3D12_EvaluateFeature":
             def evaluate(list_ptr, handle, params_ptr, user):
-                RECORD.append(("EvaluateFeature",))
+                RECORD.append(("EvaluateFeature", _as_int(list_ptr)))
                 self.simulate_engine()
                 return 1
             return evaluate
@@ -746,13 +747,17 @@ def main():
     upload_tex = gpu.device.create_texture2d(
         W, H, d3d12.DXGI_FORMAT_R8G8B8A8_UNORM, label="close-probe")
     close_failures["n"] = 1
-    resets_before = sum(1 for e in RECORD if e[0] == "ResetList")
+    lists_before = sum(1 for e in RECORD if e[0] == "CreateCommandList")
+    old_list_ptr = gpu.list.ptr
     gpu.upload_texture(upload_tex, bytes(W * H * 4),
                        d3d12.D3D12_RESOURCE_STATE_COMMON)
     gpu.submit_and_wait()          # the failure surfaces here (Close)
-    check("d3d12: an unconclosable command list is dropped and reset "
-          "instead of failing the run (ANTS_D3D12_STRICT_CLOSE=1 opts out)",
-          sum(1 for e in RECORD if e[0] == "ResetList") > resets_before)
+    check("d3d12: an unconclosable command list is REPLACED by a fresh one "
+          "instead of failing the run (a poisoned list is never reused; "
+          "ANTS_D3D12_STRICT_CLOSE=1 opts out)",
+          sum(1 for e in RECORD if e[0] == "CreateCommandList") > lists_before
+          and gpu.list.ptr != old_list_ptr
+          and not gpu._pending_release)
     os.environ["ANTS_D3D12_STRICT_CLOSE"] = "1"
     close_failures["n"] = 1
     try:
@@ -767,6 +772,38 @@ def main():
         os.environ.pop("ANTS_D3D12_STRICT_CLOSE", None)
     close_failures["n"] = 0
     gpu.submit_and_wait()          # leave the shared list clean for the rest
+
+    # ---- the runtime gets its OWN command list -----------------------------
+    runtime_list = gpu.command_list()
+    check("d3d12: the NGX runtime gets a DEDICATED command list (its recording "
+          "cannot poison the list that carries our frame copies)",
+          runtime_list is not gpu.list
+          and gpu.runtime_allocator is not None
+          and gpu.command_list() is runtime_list)      # created once, reused
+    fingerprinted = [e for e in RECORD if e[0] in ("CreateFeature",
+                                                   "EvaluateFeature")]
+    def _ptr(value):
+        """Normalise a fake/real COM pointer (int, c_void_p, c_char_p, bytes)."""
+        if isinstance(value, int):
+            return value
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return int.from_bytes(bytes(value), "little")
+
+    check("ngx: Create/Evaluate were handed the dedicated runtime list",
+          bool(fingerprinted)
+          and all(e[-1] == _ptr(runtime_list.ptr) for e in fingerprinted)
+          and all(e[-1] != _ptr(gpu.list.ptr) for e in fingerprinted))
+
+    # recoveries are counted and never fatal
+    close_failures["n"] = 1
+    gpu.runtime_submit_and_wait()
+    check("d3d12: a runtime recording that cannot be closed is dropped, the "
+          "runtime list is replaced and the count is kept for the evidence",
+          gpu.runtime_recoveries == 1
+          and gpu.runtime_list is not runtime_list
+          and gpu.command_list() is gpu.runtime_list)
 
     # ---- staging lifetime: freed only after the GPU is done ----------------
     recorded = []

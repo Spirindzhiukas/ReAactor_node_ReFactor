@@ -340,10 +340,12 @@ class DlssNrSession:
                   "the snippet means it ran and rejected the frame or the\n"
                   "    parameter contract; the type and throw site above name "
                   "the check that refused.") from exc
-        # The runtime records its work into OUR command list (the same list it
-        # was handed), so it has to be closed, executed and waited on before
-        # the output means anything - the proven hosts do exactly this.
-        self.gpu.submit_and_wait()
+        # The runtime records its work into the dedicated list it was handed
+        # (GpuContext.command_list()), so THAT list has to be closed, executed
+        # and waited on before the output means anything - the proven hosts do
+        # exactly this. Our own copies/barriers live in the other list, so a
+        # runtime that poisons its list cannot take the frame upload with it.
+        self.gpu.runtime_submit_and_wait()
         return _fp16_to_rgba8(self.gpu.readback_texture(self.output, uav),
                               self.w, self.h)
 

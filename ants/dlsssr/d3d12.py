@@ -355,7 +355,28 @@ class GpuContext:
         self.event = win32.create_event()
         self.fence_value = 0
         self._pending_release = []
+        self._parked = []              # objects a poisoned list replaced
+        self.runtime_allocator = None  # the pair NGX records into (lazy)
+        self.runtime_list = None
+        self.runtime_recoveries = 0
         self._closed = False
+
+    def command_list(self):
+        """The command list handed to the NGX runtime (Create/EvaluateFeature).
+
+        Deliberately a SEPARATE pair from ``self.list``: the runtime records
+        into whatever it is handed, and the rig proved it does more than
+        record - after the first EvaluateFeature our list answered
+        E_INVALIDARG on Close (18:25 run), which took the whole node down.
+        Keeping the runtime's recording in its own list means a poisoned
+        runtime list can never carry our frame uploads with it, and the
+        recovery (see ``_rebuild_pair``) has a much smaller blast radius.
+        """
+        if self.runtime_list is None:
+            self.runtime_allocator = self.device.create_command_allocator()
+            self.runtime_list = self.device.create_command_list(
+                self.runtime_allocator)
+        return self.runtime_list
 
     def transition(self, resource, to):
         if getattr(resource, "heap_type", D3D12_HEAP_TYPE_DEFAULT) in \
@@ -452,37 +473,26 @@ class GpuContext:
         return bytes(out)
 
     def submit_and_wait(self, timeout_ms=30000):
+        """Close, execute and wait on OUR list (copies, barriers, readbacks)."""
+        self._submit_pair(self.list, self.allocator, timeout_ms, "copy")
+
+    def runtime_submit_and_wait(self, timeout_ms=30000):
+        """Close, execute and wait on the RUNTIME's list.
+
+        The runtime recorded its work into this list during the feature call;
+        until it is closed, executed and waited on, the output means nothing
+        (the proven hosts do exactly this after every feature call).
+        """
+        self._submit_pair(self.command_list(), self.runtime_allocator,
+                          timeout_ms, "runtime")
+
+    def _submit_pair(self, command_list, allocator, timeout_ms, tag):
         try:
-            self.list.call_hr(_LIST_CLOSE, [], what="Close")
+            command_list.call_hr(_LIST_CLOSE, [], what="Close")
         except DlssSrError as exc:
-            if os.environ.get("ANTS_D3D12_STRICT_CLOSE") == "1":
-                raise
-            # Close refused: the command list is in a state we did not leave
-            # it in. Two known causes, both seen on the rig -
-            #  * 0x80070057 (E_INVALIDARG): the recording contained an
-            #    INVALID command (D3D12 poisons the list, e.g. a barrier on
-            #    an upload/readback-heap resource; fixed at the source) or
-            #    the runtime closed the list behind us;
-            #  * 0x80004005: the ReShade-oriented RenoDX build mangles the
-            #    shared list.
-            # Either way the recording is void and cannot be salvaged - drop
-            # it, restore the list, and continue LOUDLY, because GPU work may
-            # have been lost (a later upload/evaluate would then read stale
-            # memory, which is exactly the kind of silent wrongness we do not
-            # ship). ANTS_D3D12_STRICT_CLOSE=1 turns this into a hard error
-            # for A/B runs.
-            from ..log import dlss_logger
-            dlss_logger.warning(
-                "[ANTs] D3D12 command list not closable (%s) - dropping the "
-                "recording, resetting the list and continuing. GPU work "
-                "recorded since the last submit is LOST; if the output looks "
-                "stale, send this line with the rest of the log.", exc)
-            self.list.call_hr(_LIST_RESET, [_CVOID_P(), _CVOID_P()],
-                              self.allocator.ptr, None, what="Reset")
-            self._pending_release.clear()   # the recording never reached the GPU
-            self.allocator.call_hr(_ALLOCATOR_RESET, [], what="Reset")
+            self._drop_recording(tag, exc)
             return
-        cell = (_CVOID_P() * 1)(self.list.ptr)
+        cell = (_CVOID_P() * 1)(command_list.ptr)
         self.queue.call(_QUEUE_EXECUTE_COMMAND_LISTS, [_CVOID_U32(), _CVOID_P()], None,
                         ctypes.c_uint32(1), cell)
         self.fence_value += 1
@@ -502,9 +512,9 @@ class GpuContext:
         if removed < 0:
             raise DlssSrError(
                 f"[ANTs] D3D12 device removed: 0x{removed & 0xFFFFFFFF:08X}.")
-        self.allocator.call_hr(_ALLOCATOR_RESET, [], what="Reset")
-        self.list.call_hr(_LIST_RESET, [_CVOID_P(), _CVOID_P()],
-                          self.allocator.ptr, None, what="Reset")
+        allocator.call_hr(_ALLOCATOR_RESET, [], what="Reset")
+        command_list.call_hr(_LIST_RESET, [_CVOID_P(), _CVOID_P()],
+                             allocator.ptr, None, what="Reset")
         # The GPU is idle here, so staging buffers from the recording we just
         # executed can be freed (see upload_texture).
         while self._pending_release:
@@ -512,6 +522,54 @@ class GpuContext:
                 self._pending_release.pop().release()
             except Exception:
                 pass
+
+    def _drop_recording(self, tag, exc):
+        """A recording that cannot be closed is VOID - rebuild and carry on.
+
+        Two causes are known from the rig:
+          * 0x80070057 (E_INVALIDARG): the recording contained an invalid
+            command (D3D12 poisons the list; one such command was our own
+            barrier on an upload-heap resource - fixed at the source) or the
+            runtime closed the list behind us;
+          * 0x80004005 (E_FAIL): the ReShade-oriented RenoDX build mangles the
+            shared list.
+        Whatever the cause, the list state is unknown and must not be reused:
+        the object is parked (never released while the GPU may still see it)
+        and a FRESH allocator+list replaces it. Recovery never raises unless
+        ANTS_D3D12_STRICT_CLOSE=1 asks for the hard error (A/B runs), because
+        a diagnostic run must not lose the node to a recovery step.
+        """
+        if os.environ.get("ANTS_D3D12_STRICT_CLOSE") == "1":
+            raise exc
+        from ..log import dlss_logger
+        if tag == "runtime":
+            self.runtime_recoveries += 1
+            dlss_logger.warning(
+                "[ANTs] D3D12: the NGX command list could not be closed after "
+                "the feature call (%s) - the runtime's recording is VOID and "
+                "this frame's enhanced output is stale or unchanged. The list "
+                "and its allocator were replaced (recovery #%d). Please send "
+                "this line with the console and the nvngx.log from the "
+                "evidence collector; ANTS_D3D12_STRICT_CLOSE=1 turns this into "
+                "a hard error if you prefer the run to stop here.",
+                exc, self.runtime_recoveries)
+            old_list, old_alloc = self.runtime_list, self.runtime_allocator
+            self.runtime_list, self.runtime_allocator = None, None
+            self._parked += [obj for obj in (old_list, old_alloc)
+                             if obj is not None]
+            self.command_list()          # fresh pair for the next frame
+            return
+        dlss_logger.warning(
+            "[ANTs] D3D12 command list not closable (%s) - dropping the "
+            "recording and replacing the list. GPU work recorded since the "
+            "last submit is LOST; if the output looks stale, send this line "
+            "with the rest of the log. ANTS_D3D12_STRICT_CLOSE=1 turns this "
+            "into a hard error.", exc)
+        old_list, old_alloc = self.list, self.allocator
+        self._parked += [obj for obj in (old_list, old_alloc) if obj is not None]
+        self._pending_release.clear()   # the recording never reached the GPU
+        self.allocator = self.device.create_command_allocator()
+        self.list = self.device.create_command_list(self.allocator)
 
     def close(self):
         if self._closed:
@@ -524,9 +582,14 @@ class GpuContext:
                 pass
         self._pending_release.clear()
         win32.close_handle(self.event)
-        for obj in (self.list, self.allocator, self.queue, self.fence):
+        for obj in (self.list, self.allocator, self.runtime_list,
+                    self.runtime_allocator, self.queue, self.fence,
+                    *self._parked):
+            if obj is None:
+                continue
             try:
                 obj.release()
             except Exception:
                 pass
+        self._parked.clear()
         self.adapter = None

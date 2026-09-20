@@ -75,14 +75,21 @@ def blend_frames(base, processed, amount: float):
     return base * (1.0 - amount) + processed * amount
 
 
-def decide_cuda_acceleration(mode: str, torch_cuda_available: bool, engine_cuda_ok: bool):
-    """Pure decision: run the CUDA device-pointer path? (unit-testable)"""
+def decide_cuda_acceleration(mode: str, torch_cuda_available: bool,
+                             engine_cuda_ok: bool, engine_why: str = ""):
+    """Pure decision: run the CUDA device-pointer path? (unit-testable)
+
+    `engine_why` is the engine's own explanation (core.cuda_available()[1]) -
+    the rig log used to print a bare "engine lacks CUDA interop (False)",
+    which said nothing about WHICH engine build was loaded or why.
+    """
     if mode == GPU_OFF:
         return False, "CPU mode selected (host staging)"
     if not torch_cuda_available:
         return False, "torch reports no CUDA device"
     if not engine_cuda_ok:
-        return False, f"engine lacks CUDA interop ({engine_cuda_ok})"
+        return False, ("engine has no CUDA interop"
+                       + (f": {engine_why}" if engine_why else ""))
     return True, "CUDA device-pointer path"
 
 
@@ -445,9 +452,26 @@ class ReFactorDLSS5Enhancer:
                 logger.status("DLSS5 note: the native NGX engine has no mask-plane input - "
                               "the connected mask is ignored (Auto Mask still applies).")
         else:
+            engine_ok, engine_why = self.manager.cuda_available()
             use_cuda, cuda_why = decide_cuda_acceleration(
-                gpu_acceleration, torch.cuda.is_available(), self.manager.cuda_available()[0])
+                gpu_acceleration, torch.cuda.is_available(), engine_ok,
+                engine_why)
+            # Always name the helper build we are running: when the GPU path
+            # is missing, THIS line is what says which engine caused it.
+            try:
+                logger.status(f"[ANTs] {self.manager.engine_report()}")
+            except Exception as exc:                     # never fatal
+                logger.status(f"[ANTs] engine report unavailable: {exc}")
         logger.status(f"DLSS5 processing via {'CUDA' if use_cuda else 'host staging (CPU)'} - {cuda_why}")
+        if not use_cuda and gpu_acceleration != GPU_OFF and not native:
+            logger.warning(
+                "[ANTs] GPU acceleration is ON but this run uses CPU staging. "
+                "On a CUDA machine that is a 20-25x slowdown for DLSS-NR. "
+                "The engine line above names the helper build that is loaded "
+                "and whether it exports the CUDA entry points; if it does not, "
+                "replace the neuroframe pair in models/DLSS/Merserk_DLLS with "
+                "a build that carries dlss5nr_process_cuda_v6 "
+                "(Gourieff's neuroframe_dlls.zip has the current one).")
 
         if use_cuda:
             cuda_dev = torch.device(f"cuda:{self._ordinal}")

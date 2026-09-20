@@ -780,6 +780,47 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - Suite: **385 checks** (dlsssr 87, dlssnr_bridge 92, native_flow 35) +
   pyflakes/scope/smoke green.
 
+### 2026-09-20 (run 18:16/18:25) — CUDA regression diagnosed + fixed; the native host's command list isolated
+
+- **Owner rig run 18:16 (legacy engine): the auto picking works** with a
+  deliberately renamed `nvngx_dlssnr_RenoDX_4000_series_friendly_2026-08-13.dll`
+  - staging named the build + version from the file name and the engine ran
+  (18.69 s for the prompt). The stage line now also states where the helper
+  pair came from.
+- **BUG (owner-reported, high priority): "engine lacks CUDA interop (False)"**
+  - GPU acceleration silently fell back to CPU staging on a 4090, ~20-25x
+  slower; the message even printed a BOOL instead of the engine's reason.
+  Fixes:
+  * `node.py` prints the engine's own explanation and, right before it, an
+    `engine:` line naming the build + which CUDA entry points it exports.
+    A loud warning follows whenever acceleration is ON but we use CPU.
+  * NEW `ants/dlssnr/peexports.py`: a **read-only export-table reader** (bounded
+    file reads, no loading, hostile/truncated images return "no names"). This
+    is how the pack learns what a 158 MB DLL exports without running it.
+  * `core.find_engine_dll` now prefers a build that exports
+    `dlss5nr_init` + the CUDA pair over an alphabetically-earlier plain one.
+  * `discovery.choose_helper_stash()` stages from the stash whose engine HAS
+    the CUDA entry points, even when that is the lower-priority folder; the
+    log names it. No CUDA-capable build anywhere -> normal order + a reason.
+  * Collector: new **HELPER / ENGINE INVENTORY** section listing every helper
+    DLL (size, sha head, exports) across models/DLSS, the staged folders and
+    the owner's `I:\ComfyUI\MODELS\DLSS` mirror, flagging when no build on
+    disk can do GPU.
+- **BUG (native engine): `ID3D12GraphicsCommandList.Close` → 0x80070057 after
+  the first EvaluateFeature killed the node** (ComfyUI survived). Two changes:
+  * the runtime now records into a **dedicated command list**
+    (`GpuContext.command_list()`); Create/Evaluate are handed that one, so a
+    runtime-mangled recording can never take our frame uploads with it;
+  * a recording that cannot be closed is VOID: the list+allocator are PARKED
+    and a FRESH pair replaces them (`_drop_recording`) - recovery never raises
+    unless `ANTS_D3D12_STRICT_CLOSE=1`. The runtime path warns that this
+    frame's output is stale and counts the recoveries
+    (`gpu.runtime_recoveries`), which the next evidence run should carry.
+  * pre/post bracketing is unchanged: our copies drain BEFORE the feature call,
+    the runtime's own recording is executed right AFTER it.
+- Suite: **397 checks** (dlsssr 89, dlssnr_bridge 99, native_flow 38) +
+  pyflakes/scope/smoke green.
+
 ### 2026-09-20 (owner correction #3) — there is NO "safe vs risky" build: the community RenoDX build IS the path
 - **Owner clarification (authoritative):** the official DLSS 5 NR runtime targets
   RTX 50-series; on RTX 30/40 series (most users, and his own 4090) the

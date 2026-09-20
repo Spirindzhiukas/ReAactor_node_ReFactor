@@ -85,6 +85,25 @@ python and never registers callbacks.
       (README + CLAUDE.md 2b + MODELS_DLSS_LAYOUT.md). The NR picker no longer refuses an
       all-risky folder (the owner's own rig): it prefers the newest safe build, else warns and
       uses the newest.
+- [x] **RUN 18:16/18:25 (owner) — two bugs fixed**: (a) GPU acceleration fell
+      back to CPU ("engine lacks CUDA interop") → the pack now reads export
+      tables (read-only `peexports.py`), prefers a CUDA-capable engine when
+      staging and when loading, prints the engine build + what it exports, and
+      the collector gained a HELPER / ENGINE INVENTORY section; (b) the native
+      host died on `CommandList.Close` 0x80070057 after the first evaluate →
+      the runtime records into a DEDICATED command list now, and an
+      unconclosable recording is dropped + replaced (never reused, never
+      fatal; `ANTS_D3D12_STRICT_CLOSE=1` for A/B).
+- [ ] **Run 32 (owner)**: legacy engine with the CUDA-capable pair in
+      `Merserk_DLLS` → the log must print `exports dlss5nr_init +
+      dlss5nr_process_cuda_v6, dlss5nr_cuda_supported` and
+      `DLSS5 processing via CUDA`. If it prints `NO CUDA ENTRY POINTS`, the
+      pair on disk is the old build → replace it from Gourieff's
+      `neuroframe_dlls.zip` (the inventory section names what you have).
+- [ ] **Run 32 (owner, native)**: same run with the ANTs native engine → the
+      Close warning should either be gone (dedicated list) or appear ONCE per
+      frame with `recovery #n`; the node now survives it. Send console +
+      `rig_evidence.txt` (the engine inventory is in it).
 - [ ] **Run 31 (owner): plain re-run** (`set "NVSDK_NGX_LOG_LEVEL=1"`,
       no ANTS_ lines needed) — the first run that should reach CreateFeature +
       evaluate with the full host-parity contract. Console + nvngx.log + crash

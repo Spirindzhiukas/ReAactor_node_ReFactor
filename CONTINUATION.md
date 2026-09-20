@@ -442,6 +442,34 @@ build on purpose to test the picker.
   hit), on top of the already-inlined black box and resolved offsets. The
   `files\` folder is only needed for the rare oversized log.
 
+## Run 18:16 / 18:25 (2026-09-20, owner) — what broke, and what is fixed
+
+**Auto picking works**: a deliberately renamed
+`nvngx_dlssnr_RenoDX_4000_series_friendly_2026-08-13.dll` was selected and
+staged as expected (the naming rule + the version read out of the name showed
+in the status line).
+
+**Bug 1 — GPU acceleration fell back to CPU** (`engine lacks CUDA interop
+(False)`, 20-25x slower). Causes we could act on without the rig: the message
+printed a bool instead of the reason, nothing named the loaded engine build,
+and a folder/stash could hold a plain engine next to a CUDA-capable one.
+Fixed: `ants/dlssnr/peexports.py` (read-only export reader), CUDA-capable
+engine preference in `core.find_engine_dll` and
+`discovery.choose_helper_stash()`, an `engine:` status line + the engine's own
+reason on the CPU path, and a HELPER / ENGINE INVENTORY section in the
+collector report. Next run tells us definitively whether the pair on disk has
+the entry points.
+
+**Bug 2 — the native host died** on `ID3D12GraphicsCommandList.Close`
+(E_INVALIDARG) right after the first `EvaluateFeature`, and the recovery's
+`Reset` failed on the same poisoned list, killing the node (ComfyUI survived).
+Fixed: the runtime records into a **dedicated** command list
+(`GpuContext.command_list()`), and a recording that cannot be closed is now
+dropped with the list+allocator PARKED and replaced (`_drop_recording`) - it
+never raises unless `ANTS_D3D12_STRICT_CLOSE=1`. The runtime path warns that
+the frame is stale and increments `gpu.runtime_recoveries`, so the next run
+carries the count.
+
 ## Rig facts (owner environment)
 
 Windows portable ComfyUI `C:\ComfyUI_PORTABLE\ComfyUI`, RTX 24 GB; node at

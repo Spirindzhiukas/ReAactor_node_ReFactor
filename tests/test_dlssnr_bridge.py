@@ -19,6 +19,45 @@ PASS = 0
 FAIL = 0
 
 
+def synth_pe(path, names):
+    """Minimal PE32+ exporting `names` - same shape as the rig's DLLs.
+
+    Used to pin the read-only export reader (ants/dlssnr/peexports.py) and the
+    CUDA-capable-engine preference without loading anything.
+    """
+    import struct
+
+    buf = bytearray(0x2400)
+    put = lambda off, data: buf.__setitem__(slice(off, off + len(data)), data)  # noqa: E731
+    n = len(names)
+    put(0, b"MZ")
+    put(0x3C, struct.pack("<I", 0x80))
+    put(0x80, b"PE\x00\x00")
+    put(0x84, struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 240, 0x2022))
+    opt = 0x98
+    put(opt, struct.pack("<HBBIIIIIQII", 0x20B, 14, 0, 0x1400, 0, 0, 0x1000,
+                         0x1000, 0x400000, 0x1000, 0x200))
+    put(opt + 112, struct.pack("<II", 0x1000, 0x400))          # export dir
+    # VirtualSize, VirtualAddress, SizeOfRawData, PointerToRawData
+    put(opt + 240, b".rdata\x00\x00" + struct.pack("<IIII", 0x2000, 0x1000,
+                                                   0x2000, 0x400) + b"\x00" * 20)
+    # section: RVA 0x1000 -> raw 0x400
+    def rva(r):
+        return 0x400 + (r - 0x1000)
+
+    put(rva(0x1000), struct.pack("<IIHHIIIIIII", 0, 0, 1, 0, 0, 0x1040, n, n,
+                                 0x1180, 0x1080, 0x10A0))
+    put(rva(0x1040), b"engine.dll\x00")
+    put(rva(0x1080),
+        b"".join(struct.pack("<I", 0x1300 + i * 40) for i in range(n)))
+    put(rva(0x1180), struct.pack("<" + "I" * n, *[0x1500 + i * 0x10 for i in range(n)]))
+    put(rva(0x10A0), struct.pack("<" + "H" * n, *range(n)))
+    for i, name in enumerate(names):
+        put(rva(0x1300 + i * 40), name.encode() + b"\x00")
+    with open(path, "wb") as handle:
+        handle.write(bytes(buf))
+
+
 def check(name, cond):
     global PASS, FAIL
     if cond:
@@ -100,7 +139,11 @@ def main():
     from ants.dlssnr.node import GPU_AUTO, GPU_FORCE, GPU_OFF, decide_cuda_acceleration
     ok, _ = decide_cuda_acceleration(GPU_AUTO, True, True)
     check("cuda decision: auto + torch cuda + engine ok -> CUDA", ok)
-    ok, why = decide_cuda_acceleration(GPU_AUTO, True, False)
+    ok, why = decide_cuda_acceleration(GPU_AUTO, True, False, "engine has no "
+                                       "dlss5nr_process_cuda_v6")
+    check("cuda: the refusal names the engine's own reason (the rig log used "
+          "to print a bare '(False)')",
+          "dlss5nr_process_cuda_v6" in why)
     check("cuda decision: engine lacking CUDA -> CPU with reason", not ok and "CUDA interop" in why)
     ok, why = decide_cuda_acceleration(GPU_FORCE, False, True)
     check("cuda decision: force gpu without torch cuda -> CPU", not ok and "no CUDA device" in why)
@@ -448,6 +491,81 @@ def main():
           versions.describe("nvngx_dlssnr_2026-09-14.dll") == "date 2026-09-14"
           and versions.describe("nvngx_dlss_310.9.1.dll") == "version 310.9.1"
           and "no version" in versions.describe("nvngx_dlssnr.dll"))
+
+    # ---- read-only export reader + the CUDA-capable engine preference ----
+    # Rig 2026-09-20 18:16: the node fell back to CPU staging on a 4090
+    # ("engine lacks CUDA interop") - a 20-25x slowdown. The zero-copy path
+    # needs an engine exporting dlss5nr_process_cuda_v6, so the pack now looks
+    # at EXPORT TABLES (never loading anything) and prefers such a build.
+    import tempfile as _tf
+    from ants.dlssnr import peexports
+
+    _pe_dir = _tf.mkdtemp()
+    _plain = os.path.join(_pe_dir, "plain_engine.dll")
+    _cuda = os.path.join(_pe_dir, "cuda_engine.dll")
+    synth_pe(_plain, ["dlss5nr_init", "dlss5nr_process_v6"])
+    synth_pe(_cuda, ["dlss5nr_init", "dlss5nr_process_cuda_v6",
+                     "dlss5nr_cuda_supported"])
+    check("peexports: export names are read from a PE without loading it",
+          peexports.export_names(_cuda) == {"dlss5nr_init",
+                                            "dlss5nr_process_cuda_v6",
+                                            "dlss5nr_cuda_supported"}
+          and peexports.export_names(_plain) == {"dlss5nr_init",
+                                                 "dlss5nr_process_v6"})
+    check("peexports: the CUDA entry-point pair is detected",
+          peexports.has_exports(_cuda, peexports.CUDA_ENTRYPOINTS)
+          and not peexports.has_exports(_plain, peexports.CUDA_ENTRYPOINTS))
+    hostile = os.path.join(_pe_dir, "hostile.dll")
+    with open(hostile, "wb") as handle:
+        handle.write(b"MZ" + os.urandom(64))          # truncated header
+    with open(os.path.join(_pe_dir, "notpe.dll"), "wb") as handle:
+        handle.write(b"^^ not an image ^^")
+    check("peexports: a hostile or truncated image yields NO names instead of "
+          "faulting (run 28's lesson: an AV in a raw deref is fatal)",
+          peexports.export_names(hostile) == set()
+          and peexports.export_names(os.path.join(_pe_dir, "notpe.dll")) == set()
+          and peexports.export_names(os.path.join(_pe_dir, "missing.dll")) == set())
+
+    from ants.dlssnr.core import DLSSStandaloneManager
+    _two = _tf.mkdtemp()
+    synth_pe(os.path.join(_two, "a_neuroframe_engine.dll"),
+             ["dlss5nr_init", "dlss5nr_process_v6"])          # plain, sorts first
+    synth_pe(os.path.join(_two, "z_neuroframe_engine.dll"),
+             ["dlss5nr_init", "dlss5nr_process_cuda_v6",
+              "dlss5nr_cuda_supported"])                       # CUDA-capable
+    check("core: find_engine_dll prefers the CUDA-capable engine over the "
+          "alphabetically-first one (that is the 20-25x path)",
+          DLSSStandaloneManager.find_engine_dll(_two)
+          .endswith("z_neuroframe_engine.dll"))
+
+    saved = (discovery.DLSS_ROOT, discovery.PACKAGE_DLL_DIR)
+    try:
+        _stash_root = _tf.mkdtemp()
+        discovery.DLSS_ROOT = _stash_root
+        discovery.PACKAGE_DLL_DIR = os.path.join(_stash_root, "_nopkg")
+        for folder, engine, exports in (
+                ("Merserk_DLLS", "neuroframe_engine.dll",
+                 ["dlss5nr_init", "dlss5nr_process_v6"]),          # plain
+                ("HELPERS", "neuroframe_engine.dll",
+                 ["dlss5nr_init", "dlss5nr_process_cuda_v6",
+                  "dlss5nr_cuda_supported"])):                    # CUDA-capable
+            os.makedirs(os.path.join(_stash_root, folder))
+            synth_pe(os.path.join(_stash_root, folder, engine), exports)
+            open(os.path.join(_stash_root, folder, "neuroframe_caller.dll"),
+                 "wb").write(b"caller")
+        chosen, why = discovery.choose_helper_stash()
+        check("staging: the CUDA-capable helper stash wins even when it is the "
+              "lower-priority folder (the rig regression: a plain engine in "
+              "Merserk_DLLS must not shadow a capable one elsewhere)",
+              chosen.endswith("HELPERS") and "CUDA" in why)
+        # ... and when NO stash is capable, the normal order is kept, loudly
+        os.remove(os.path.join(_stash_root, "HELPERS", "neuroframe_engine.dll"))
+        chosen, why = discovery.choose_helper_stash()
+        check("staging: with no capable engine anywhere the normal order wins "
+              "and the reason says why the CPU path is used",
+              chosen.endswith("Merserk_DLLS") and "no CUDA" in why)
+    finally:
+        discovery.DLSS_ROOT, discovery.PACKAGE_DLL_DIR = saved
 
     # ---- provenance is INFORMATIONAL, never a gate (owner, 2026-09-20) ----
     # The official DLSS 5 NR runtime targets RTX 50-series; on RTX 30/40 the

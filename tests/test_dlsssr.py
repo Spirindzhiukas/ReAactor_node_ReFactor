@@ -484,6 +484,10 @@ def _rig_evidence_check():
         # the black box is inlined, so the pasted report carries the verdict
         inlined = "CRASH BLACK BOX" in report and "int29 site" in report
         # ... and so are the raw logs: one file to send (owner request)
+        helper_section = ("HELPER / ENGINE INVENTORY" in report
+                          and ("no helper/engine DLL found" in report
+                               or "NO helper build on disk" in report
+                               or "CUDA entry points" in report))
         self_contained = ("RAW LOGS (inlined" in report
                           and "NGXLoadFromPath failed: 0xBAD00000" in report
                           and "[truncated: last" not in report
@@ -497,7 +501,7 @@ def _rig_evidence_check():
                  and "(helper duplicate" in report
                  and "staging area - rebuilt on demand" in report
                  and "AUTO would load in NR/:" in report)
-        return (code == 0 and self_contained and audit
+        return (code == 0 and self_contained and audit and helper_section
                 and auto and guard and outside and offsets and inlined
                 and "2099-01-01.1" in report          # deployment marker
                 and "nvngx_dlssnr.dll" in report      # runtime inventory
@@ -969,6 +973,14 @@ def main():
           "MODELS/DLSS LAYOUT AUDIT" in evidence_src
           and "def layout_audit" in evidence_src
           and "Merserk_DLLS only" in evidence_src)
+    check("tools: the report inventories helper engines and says which ones "
+          "carry the CUDA entry points (the 18:16 CPU-staging regression - "
+          "'why is my 4090 idle')",
+          "HELPER / ENGINE INVENTORY" in evidence_src
+          and "dlss5nr_process_cuda_v6" in evidence_src
+          and "20-25x slower CPU staging" in evidence_src
+          and "def helper_inventory" in evidence_src
+          and "load_pack_peexports" in evidence_src)
     check("docs: docs/MODELS_DLSS_LAYOUT.md documents the paths the code reads "
           "and what is safe to delete",
           (REPO / "docs" / "MODELS_DLSS_LAYOUT.md").is_file()
@@ -1189,11 +1201,22 @@ def main():
           "UPLOAD_READBACK_HEAPS" in d3d12_src
           and "transition(staging" not in d3d12_src
           and "Heap not closable" not in d3d12_src)
-    check("d3d12: any unconclosable command list is recovered loudly, with a "
-          "strict opt-out for A/B runs",
+    check("d3d12: an unconclosable command list is REPLACED (never reused), "
+          "the loss is stated loudly, and a strict opt-out exists for A/B runs",
           "ANTS_D3D12_STRICT_CLOSE" in d3d12_src
           and "not closable" in d3d12_src
-          and "recorded since the last submit is LOST" in d3d12_src)
+          and "recorded since the " in d3d12_src
+          and "last submit is LOST" in d3d12_src
+          and "self._parked" in d3d12_src
+          and "create_command_allocator()" in d3d12_src)
+    check("d3d12: the NGX runtime records into a DEDICATED command list, so a "
+          "poisoned runtime recording cannot carry our frame copies with it "
+          "(rig 18:25: Close 0x80070057 after the first EvaluateFeature)",
+          "def command_list(self)" in d3d12_src
+          and "def runtime_submit_and_wait" in d3d12_src
+          and "runtime_recoveries" in d3d12_src
+          and "self.gpu.command_list().ptr" in (REPO / "ants" / "dlsssr" / "ngx.py").read_text()
+          and "runtime_submit_and_wait" in (REPO / "ants" / "dlsssr" / "nr.py").read_text())
     check("d3d12: staging buffers outlive the recording that references them "
           "(freed after the GPU is done, not at record time)",
           "_pending_release" in d3d12_src

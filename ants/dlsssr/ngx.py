@@ -844,7 +844,7 @@ class NgxSession:
     def create_feature(self, feature_id):
         _log().status(f"NGX CreateFeature(feature {feature_id}) ->")
         out = ctypes.c_void_p()
-        hr = self._create(self.gpu.list.ptr, ctypes.c_int32(feature_id),
+        hr = self._create(self.gpu.command_list().ptr, ctypes.c_int32(feature_id),
                           self.params.ptr, ctypes.byref(out))
         _log().status(f"NGX CreateFeature <- hr=0x{hr & 0xFFFFFFFF:08X}")
         if hr != 1:
@@ -900,7 +900,7 @@ class NgxSession:
             _log().status("NGX EvaluateFeature -> (first frame; crash black "
                           f"box: {crash_file}; params[{len(names)}]: "
                           + ", ".join(sorted(set(names))) + ")")
-        hr = self._evaluate(self.gpu.list.ptr, ctypes.c_void_p(self.handle),
+        hr = self._evaluate(self.gpu.command_list().ptr, ctypes.c_void_p(self.handle),
                             self.params.ptr, None)
         if first:
             self._eval_done.set()

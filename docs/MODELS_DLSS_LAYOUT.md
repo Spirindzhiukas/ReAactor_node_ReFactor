@@ -147,6 +147,35 @@ reached `EvaluateFeature` and threw a **catchable** C++ exception instead, which
 investigation continues. The crash black box and the traps stay armed on every native NR run, so a
 regression is recorded rather than guessed at.
 
+### The helper pair must carry the CUDA entry points (GPU acceleration)
+
+The zero-copy path (the one that makes DLSS-NR ~20-25x faster) needs a
+neuroframe engine that exports `dlss5nr_process_cuda_v6` (plus
+`dlss5nr_cuda_supported`). Without it the node still runs, but on CPU staging,
+and the console says so:
+
+```
+[ANTs] engine: neuroframe_engine.dll (570368 bytes) exports dlss5nr_init + NO CUDA ENTRY POINTS
+DLSS5 processing via host staging (CPU) - engine has no CUDA interop: ...
+```
+
+How the pack decides (all read-only, nothing is executed to find out):
+
+* `ants/dlssnr/peexports.py` reads each candidate's **export table** straight
+  from the file (bounded reads, no loading - a truncated or hostile image
+  yields "no names" instead of a fault);
+* staging gives the stage folder the helper pair from the stash **that has a
+  CUDA-capable engine**, even when that stash is the lower-priority folder;
+  the log line names it: `runtime + helper pair from <path> (2 copied)
+  [CUDA-capable engine 'neuroframe_engine.dll']`;
+* the engine loader prefers a CUDA-capable build inside a folder too, so a
+  folder holding several helper builds cannot silently pick the slow one.
+
+If no build on disk has the entry points, the evidence collector's
+**HELPER / ENGINE INVENTORY** section says so and names every helper DLL it
+found with its size and hash - that is the list to compare against Gourieff's
+`neuroframe_dlls.zip` (the current neuroframe release).
+
 ### Duplicate names are detected by content
 
 `nvngx_dlssnr.dll` and `nvngx_dlssnr_RenoDX_4000_series_friendly.dll` on the owner's disk are the

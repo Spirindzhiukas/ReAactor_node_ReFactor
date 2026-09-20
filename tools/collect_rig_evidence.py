@@ -549,6 +549,93 @@ def load_pack_versions(repo):
         return None
 
 
+def load_pack_peexports(repo):
+    """The pack's read-only export reader (ants/dlssnr/peexports.py).
+
+    Loaded straight from the file like versions.py: importing `ants.dlssnr`
+    would drag ComfyUI bootstrapping into a read-only diagnostic.
+    """
+    import importlib.util
+    path = os.path.join(repo or "", "ants", "dlssnr", "peexports.py")
+    if not os.path.isfile(path):
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("ants_pack_peexports", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        return None
+
+
+HELPER_INVENTORY_HINTS = ("neuroframe", "merserk", "caller", "engine")
+
+
+def extra_dlss_roots(dlss_root):
+    """Every models/DLSS tree worth auditing (the owner keeps a mirror)."""
+    roots = [dlss_root] if dlss_root else []
+    mirror = r"I:\ComfyUI\MODELS\DLSS"
+    env = os.environ.get("ANTS_DLSS_MIRRORS", "")
+    for candidate in [mirror] + [part.strip() for part in env.split(";") if part.strip()]:
+        if candidate and os.path.isdir(candidate) \
+                and os.path.normcase(candidate) not in {os.path.normcase(r) for r in roots}:
+            roots.append(candidate)
+    return roots
+
+
+def helper_inventory(roots, out_lines, pe):
+    """Every helper/engine DLL on disk + whether it carries the CUDA entries.
+
+    This is the answer to "why is the node on CPU staging": the zero-copy path
+    needs an engine exporting dlss5nr_process_cuda_v6, and the report now says
+    which builds have it and which do not - across models/DLSS, the staged
+    folders and the owner's mirror.
+    """
+    found = []          # (path, exports_ok, cuda_ok)
+    for root in roots:
+        for folder, _dirs, names in os.walk(root):
+            for name in names:
+                lower = name.lower()
+                if not lower.endswith(".dll"):
+                    continue
+                if not any(hint in lower for hint in HELPER_INVENTORY_HINTS) \
+                        and not any(hint in os.path.basename(folder).lower()
+                                    for hint in ("merserk", "helper", "hlp")):
+                    continue
+                path = os.path.join(folder, name)
+                names_set = pe.export_names(path) if pe else set()
+                found.append((path, "dlss5nr_init" in names_set,
+                              bool(names_set) and all(
+                                  entry in names_set
+                                  for entry in (pe.CUDA_ENTRYPOINTS if pe else ()))))
+    if not found:
+        out_lines.append("  (no helper/engine DLL found in the audited trees)")
+        return []
+    cuda_capable = [row for row in found if row[2]]
+    for path, exports_ok, cuda_ok in found:
+        try:
+            size = os.path.getsize(path)
+            digest = sha256_head(path)
+        except OSError:
+            size, digest = 0, "?"
+        verdict = ("CUDA entry points present <<< use this build"
+                   if cuda_ok else
+                   ("neuroframe engine, NO CUDA entry points (CPU path)"
+                    if exports_ok else "not a neuroframe engine"))
+        out_lines.append(f"  {path}  {size} bytes  sha256(first 8) {digest}")
+        out_lines.append(f"      {verdict}")
+    if not cuda_capable:
+        out_lines.append("  [!] NO helper build on disk exports the CUDA entry "
+                         "points (dlss5nr_process_cuda_v6) - the node will run "
+                         "the 20-25x slower CPU staging path. Replace the "
+                         "neuroframe pair in models/DLSS/Merserk_DLLS with a "
+                         "build that has it (Gourieff's neuroframe_dlls.zip).")
+    else:
+        out_lines.append("  [i] CUDA-capable build(s) above: staging prefers "
+                         "them automatically now.")
+    return found
+
+
 def layout_audit(dlss_root, out_lines, versions=None):
     """Read-only KEEP/DELETE audit of the models/DLSS tree.
 
@@ -798,6 +885,16 @@ def main(argv=None):
     lines.append("")
     lines.append("--- MODELS/DLSS LAYOUT AUDIT (keep / delete) " + "-" * 32)
     layout_audit(dlss_root, lines, load_pack_versions(args.repo))
+
+    lines.append("")
+    lines.append("--- HELPER / ENGINE INVENTORY (CUDA-capable?) " + "-" * 31)
+    pe_mod = load_pack_peexports(args.repo)
+    if pe_mod is None:
+        lines.append("  (peexports.py not found - export tables not read)")
+    roots = extra_dlss_roots(dlss_root)
+    for root in roots[1:]:
+        lines.append(f"  (extra root: {root})")
+    helper_inventory(roots, lines, pe_mod)
 
     lines.append("")
     lines.append("--- LOGS (copied into ./files) " + "-" * 41)

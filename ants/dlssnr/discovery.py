@@ -75,14 +75,45 @@ def helper_dll_dirs():
 
 
 def helper_stash_dir():
-    """The one folder the helper pair is expected to live in (or None).
-
-    ``models/DLSS/Merserk_DLLS/`` in the owner's tree; any ``Merserk*`` /
-    ``HELPERS`` / ``HLP*`` folder works, and the package ``dll/`` folder is
-    the last resort. This is what makes the per-category copies unnecessary.
-    """
+    """The one folder the helper pair is expected to live in (or None)."""
     dirs = helper_dll_dirs()
     return dirs[0] if dirs else None
+
+
+def choose_helper_stash():
+    """(dir, reason): the helper stash to stage from - CUDA-capable first.
+
+    Rig 2026-09-20 (18:16 run): the node fell back to CPU staging with
+    "engine lacks CUDA interop" while a 4090 sat idle - a 20-25x slowdown. The
+    zero-copy path needs a neuroframe engine that exports
+    ``dlss5nr_process_cuda_v6``, and a folder can hold more than one helper
+    build (Merserk's bundle ships the NR engine AND the frame-interpolation
+    engine; users collect builds over time). So the choice is made on the
+    export table - read-only, no loading (see peexports.py) - instead of on
+    the folder name:
+
+    * a stash whose engine carries the CUDA entry points wins (loudly named in
+      the log, because this decides the fastest available path);
+    * otherwise the normal search order applies (Merserk_DLLS first) and the
+      reason says that no CUDA-capable engine was found anywhere.
+    """
+    from .peexports import has_exports, CUDA_ENTRYPOINTS
+    dirs = helper_dll_dirs()
+    if not dirs:
+        return None, "no helper stash found"
+    fallback = None
+    for folder in dirs:
+        for name in dll_files(folder):
+            path = os.path.join(folder, name)
+            if not has_exports(path, ("dlss5nr_init",)):
+                continue
+            if has_exports(path, CUDA_ENTRYPOINTS):
+                return folder, f"CUDA-capable engine '{name}'"
+            if fallback is None:
+                fallback = (folder, f"engine '{name}' has no CUDA entry points")
+    if fallback:
+        return fallback
+    return dirs[0], "no engine with a readable export table found"
 
 PACKAGE_DLL_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "dll")
 
@@ -533,7 +564,7 @@ def stage_nr_runtime(dll_path):
     # (models/DLSS/Merserk_DLLS by default); the stage stays self-contained
     # because the snippet loads its dependencies from its own directory.
     import shutil
-    stash = helper_stash_dir()
+    stash, stash_why = choose_helper_stash()
     copied, kept = [], []
     if stash:
         for name in dll_files(stash):
@@ -548,9 +579,9 @@ def stage_nr_runtime(dll_path):
             except (PermissionError, OSError):
                 pass  # a locked leftover from a previous run; not needed
         logger.status(
-            "[ANTs] NR stage %s: runtime + helper pair from %s%s",
+            "[ANTs] NR stage %s: runtime + helper pair from %s%s [%s]",
             os.path.basename(stage), stash,
-            f" ({len(copied)} copied)" if copied else "")
+            f" ({len(copied)} copied)" if copied else "", stash_why)
     else:
         # Compat: no helper stash on disk, so the older layout (helpers next
         # to the runtime) is honoured - copy the siblings as before. Loud,

@@ -83,6 +83,7 @@ class DLSSStandaloneManager:
         self._lock = threading.RLock()
         self._library = None
         self.dll_dir = dll_dir
+        self.engine_path = None
         self._process_cuda = None
         self._cuda_supported_fn = None
         self._cuda_status_fn = None
@@ -92,12 +93,34 @@ class DLSSStandaloneManager:
     def find_engine_dll(dll_dir: str):
         """Locate the bridge/engine DLL in a set regardless of file naming.
 
-        Per the owner's 'accept any filenames' rule: probe each .dll for the
-        engine's export (dlss5nr_init). Prefer a name containing 'engine'
-        first (cheap fast path), then brute-force probe. Non-Windows/test
-        envs fall back to name matching only.
+        Per the owner's 'accept any filenames' rule the exports decide, not
+        the name - but the ORDER matters: a folder can hold several helper
+        builds, and the one that matters is the one with the zero-copy CUDA
+        entry points, because without them the node silently drops to CPU
+        staging (20-25x slower on the rig). So:
+
+        1. read the export table of every .dll (read-only, no loading - see
+           peexports.py) and prefer one that exports ``dlss5nr_init`` AND the
+           CUDA entry points; a CUDA-capable build beats a plain 'engine'
+           name;
+        2. otherwise take the first that exports ``dlss5nr_init``;
+        3. if no export table could be read (non-Windows test hosts, exotic
+           images), fall back to the old name-based dynamic probe.
+        Non-Windows/test envs keep working: the reader returns nothing there.
         """
+        from .peexports import export_names, CUDA_ENTRYPOINTS
         candidates = sorted(f for f in os.listdir(dll_dir) if f.lower().endswith(".dll"))
+        static = []
+        for fname in candidates:
+            names = export_names(os.path.join(dll_dir, fname))
+            if "dlss5nr_init" not in names:
+                continue
+            cuda_ok = all(name in names for name in CUDA_ENTRYPOINTS)
+            static.append((0 if cuda_ok else 1,
+                           0 if "engine" in fname.lower() else 1, fname))
+        if static:
+            static.sort()
+            return os.path.join(dll_dir, static[0][2])
         named = [f for f in candidates if "engine" in f.lower()] or candidates
         probed_any = False
         for fname in named:
@@ -129,6 +152,7 @@ class DLSSStandaloneManager:
                 os.add_dll_directory(self.dll_dir)
 
             engine_path = self.find_engine_dll(self.dll_dir)
+            self.engine_path = engine_path
 
             loader = getattr(ctypes, "WinDLL", ctypes.CDLL)
             try:
@@ -209,11 +233,36 @@ class DLSSStandaloneManager:
                 logger.debug(f"dlss5nr_shutdown raised (ignored): {exc}")
             self._library = None
 
+    def engine_report(self):
+        """One line naming the engine build and its CUDA entry points."""
+        path = self.engine_path or "(not loaded)"
+        try:
+            from .peexports import export_names, CUDA_ENTRYPOINTS
+            names = export_names(path)
+        except Exception:
+            names = set()
+            CUDA_ENTRYPOINTS = ()
+        if not names:
+            return f"engine: {path} (export table unreadable here)"
+        have = [name for name in CUDA_ENTRYPOINTS if name in names]
+        size = 0
+        try:
+            import os as _os
+            size = _os.path.getsize(path)
+        except OSError:
+            pass
+        return (f"engine: {os.path.basename(path)} ({size} bytes) exports "
+                f"dlss5nr_init + {', '.join(have) if have else 'NO CUDA ENTRY POINTS'}")
+
     def cuda_available(self):
         """(ok, reason): engine-side CUDA interop readiness."""
         if self._process_cuda is None:
-            return False, ("engine DLL has no dlss5nr_process_cuda_v6 export "
-                           "(older neuroframe build - grab a fresh neuroframe_dlls.zip)")
+            return False, (
+                "the loaded engine does not export dlss5nr_process_cuda_v6, so "
+                "the zero-copy GPU path is unavailable (CPU staging is 20-25x "
+                "slower). Check which helper build is in models/DLSS/"
+                "Merserk_DLLS: a newer neuroframe engine (Gourieff's "
+                "neuroframe_dlls.zip) exports it.")
         if self._cuda_supported_fn is not None and not self._cuda_supported_fn():
             status = ""
             if self._cuda_status_fn is not None:

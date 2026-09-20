@@ -128,6 +128,13 @@ Python side validates everything and works headless without it.
 the node's `denoise_model` socket (SCUNet, PureScale2 `1x_PureVision`, …) — it runs through the
 comfy-native tiled pipeline *before* the DLSS-NR engine, with a `pre_denoise_strength` blend.
 
+**GPU acceleration needs a CUDA-capable helper engine.** The zero-copy path (`dlss5nr_process_cuda_v6`
+in the neuroframe engine) is ~20-25x faster than CPU staging. The node logs which engine build it
+loaded and whether that entry point exists; if it is missing, the run still works but on CPU, and the
+console says why. Put the current neuroframe pair in `models/DLSS/Merserk_DLLS/` (see
+[docs/MODELS_DLSS_LAYOUT.md](docs/MODELS_DLSS_LAYOUT.md)) — the collector's *HELPER / ENGINE INVENTORY*
+section lists every helper DLL on disk with its exports.
+
 **GPU acceleration (on by default):** frames are processed GPU-resident through the engine's CUDA
 entry point (`dlss5nr_process_cuda_v6`) — zero PCIe copies when the batch already lives in VRAM,
 orders of magnitude faster at 4K and with `nr_passes` > 1. `CPU (host staging)` stays as a compat
