@@ -1131,7 +1131,17 @@ the shim, the callbacks or the process state was ever wrong.
 RGBA16F readback before the clamp, plus byte-identity against the input; one log line, never raises),
 `ANTS_NR_SOAK=1` (handles + torch VRAM per prompt) and the opt-in `ANTS_NR_SESSION_CACHE=1`
 (cross-prompt session reuse; default OFF — per-prompt init is what the working run used, and the knob
-exists to measure its ~1 s). `HOST_BUILD` is `2026-09-21.3`.
+exists to measure its ~1 s). `HOST_BUILD` is `2026-09-21.5`.
+
+**UPDATE 2026-09-21 (run 29) - the SR pre-denoise stage faulted at init; fixed.** With
+`pre_denoise_strength` > 0 the ladder did two wrong things: the driver core alone answered
+`0xBAD0000B` (a core has no provider module for feature 1 unless the runtime registered it), and the
+fallback then handed the SDK runtime the NR snippet's SWAPPED `Init_Ext` order - it faulted reading
+address `0x15`, the version constant landing in the feature-info pointer slot. The runtime is now the
+session OWNER, called in the PUBLIC order (`Init_Ext(appId, path, device, sdkVersion, featureInfo)`)
+with the driver core preloaded for presence; the core-only route stays second, the swapped-ABI route
+is opt-in (`ANTS_SR_SNIPPET_DIRECT=1`), and a runtime FAULT stops the ladder with one loud `[ANTs]`
+error that says RESTART (never a second guess).
 
 **Next, owner-run:** the synthetic-image smoke prompt, the ~50-prompt soak, and the still-image depth
 A/B (flat zero depth vs a real estimated depth map). Keep the literal-name staging rule.

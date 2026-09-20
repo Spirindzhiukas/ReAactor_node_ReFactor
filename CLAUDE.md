@@ -102,7 +102,12 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
    list and all three engine paths (native, legacy CUDA, legacy host staging). SR mode needs NO
    model - the strength is only the gate - so never collapse its strength to 0 for a missing
    `denoise_model`, and never re-gate the stage on the engine. It needs `nvngx_dlss*.dll` in
-   `models/DLSS/SR/` (loud error names the path if missing).
+   `models/DLSS/SR/` (loud error names the path if missing). The runtime is the session OWNER and
+   is called in the PUBLIC `Init_Ext` order (`appId, path, device, sdkVersion, featureInfo`) - the
+   SWAPPED order belongs to the NR snippet and is opt-in (`ANTS_SR_SNIPPET_DIRECT=1`): calling the
+   SDK runtime with the swap faults inside `Init_Ext` (0x15 = the version constant landing in the
+   feature-info pointer slot, rig 29). A runtime FAULT stops the ladder - one loud `[ANTs]` error,
+   RESTART, never a second guess.
 
 ## Engineering conventions
 
@@ -114,7 +119,7 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
 - **Gates before every commit:** `pyflakes` over `ants/`, `nodes.py`, `tests/`
   (benign exceptions: star-import notes in `codeformer_arch.py`); `tests/test_pyflakes.py`,
   `tests/test_scope_check.py`, `tests/smoke_import.py` (asserts exactly 22 nodes), plus
-  the full suite. Current tally: **461 checks** (see `memory.md`).
+  the full suite. Current tally: **468 checks** (see `memory.md`).
 - **Rebrand hygiene:** no `ReFactor` outside the historical H1 note and the git clone URL
   in `README.md`; `CATEGORY` attrs are `ANTs` / `ANTs/loaders`; `[ANTs]` log prefix.
 - **Commits:** conventional prefixes (`feat:`, `fix:`, `docs:`), body bullets explaining

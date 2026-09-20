@@ -1,12 +1,21 @@
 """DLSS Super Resolution (feature 1) — the regular upscaler, pure Python.
 
-Driver-core route: the core owns `nvngx_dlss.dll` (found via the
-FeatureCommonInfo path list pointing at the chosen SR set folder) and the
-parameter allocator. Modes map to fixed ratios (per the public SDK:
-DLAA 1.0, Quality 1.5, Balanced ~1.724, Performance 2.0, Ultra Performance
-3.0); the model presets (J/K/L/M and friends) are per-mode NGX parameters —
-which model a letter selects is a property of the installed
-nvngx_dlss.dll.
+Session routes (rig 2026-09-21, run 29 — the full story in
+``_open_first_working``):
+
+1. **the staged runtime as the app-facing module** (``nvngx_dlss.dll``): its
+   ``NVSDK_NGX_D3D12_*`` exports ARE the public API in the PUBLIC argument
+   order, and the runtime loads the driver core itself. This is the route
+   every DLSS application uses, and the only one that creates feature 1;
+2. **the driver core alone**, with the SR folder in the search-path list
+   (the previous primary — on the rig the core answered 0xBAD0000B);
+3. **snippet-direct** (opt-in, ``ANTS_SR_SNIPPET_DIRECT=1``) for NR-style
+   builds whose ``Init_Ext`` takes the SWAPPED argument order.
+
+Modes map to fixed ratios (per the public SDK: DLAA 1.0, Quality 1.5,
+Balanced ~1.724, Performance 2.0, Ultra Performance 3.0); the model presets
+(J/K/L/M and friends) are per-mode NGX parameters — which model a letter
+selects is a property of the installed nvngx_dlss.dll.
 
 Stills use zeroed motion vectors with ``MV.Scale = 0`` + ``Reset`` (the
 DVT-proven pattern). The caller gets the OUTPUT-resolution RGBA bytes and
@@ -58,6 +67,46 @@ _PRESET_PARAM = {
 }
 
 
+# The literal file name the staging dir holds: ants/dlssnr/discovery.py's
+# ``stage_sr_dll`` canonicalises the CHOSEN build to it, whatever the source
+# file was called (the file NAME is never the identity - the exports are).
+_SR_DLL_NAME = "nvngx_dlss.dll"
+
+# The public NGX API a DLSS SR runtime must export. Probed, never loaded, so
+# the log says what the file is BEFORE any call goes into it.
+_PUBLIC_ENTRYPOINTS = ("NVSDK_NGX_D3D12_Init_Ext",
+                       "NVSDK_NGX_D3D12_CreateFeature",
+                       "NVSDK_NGX_D3D12_EvaluateFeature")
+
+
+def _log():
+    from ..log import dlss_logger
+    return dlss_logger
+
+
+def sr_runtime_path(sr_dll_dir):
+    """The staged ``nvngx_dlss.dll`` inside a staging/search dir (or None)."""
+    if not sr_dll_dir:
+        return None
+    candidate = os.path.join(sr_dll_dir, _SR_DLL_NAME)
+    return candidate if os.path.isfile(candidate) else None
+
+
+def describe_runtime(path):
+    """What the file claims to be, read from its export table (no load)."""
+    try:
+        from ..dlssnr.peexports import export_names
+        names = export_names(path)
+    except Exception as exc:            # pragma: no cover - defensive
+        return f"export probe unavailable ({exc})"
+    if not names:
+        return "export probe: no readable export table (not a PE?)"
+    missing = [n for n in _PUBLIC_ENTRYPOINTS if n not in names]
+    if missing:
+        return "export probe: MISSING " + ", ".join(missing)
+    return "exports the public NGX API (Init_Ext/CreateFeature/EvaluateFeature)"
+
+
 class DlssSrSession:
     """One created SR feature; evaluate() runs one frame."""
 
@@ -78,30 +127,8 @@ class DlssSrSession:
         # Stage dir FIRST (owner's chosen build), then NVIDIA's own managed
         # models dir - the stock core prefers its properly-installed runtime.
         search = [d for d in (sr_dll_dir, NGX_MODELS_DIR) if d]
-        self.ngx = NgxSession(
-            gpu, core_path, search_paths=search, app_data_path=app_data_path)
-        self._apply_create_params(quality, hdr, preset)
-        try:
-            self.ngx.create_feature(FEATURE_SR)
-        except DlssSrError as core_err:
-            if "0xBAD0000B" not in str(core_err):
-                raise
-            # FeatureNotSupported from the DRIVER CORE: most often the core
-            # refusing to load a snippet outside its managed models root.
-            # Fallback: snippet-direct - load nvngx_dlss.dll as the provider
-            # with OUR parameter object (same route as the NR host).
-            from ..log import dlss_logger as logger
-            logger.status("DLSS SR: driver core rejected feature 1 (FeatureNotSupported) "
-                          "- retrying snippet-direct with our own parameter object.")
-            self.ngx.close()
-            snippet = os.path.join(sr_dll_dir, "nvngx_dlss.dll")
-            if not os.path.isfile(snippet):
-                raise core_err from None
-            self.ngx = NgxSession(
-                gpu, snippet, search_paths=[sr_dll_dir],
-                use_own_parameters=True, app_data_path=app_data_path)
-            self._apply_create_params(quality, hdr, preset)
-            self.ngx.create_feature(FEATURE_SR)
+        self.ngx = self._open_first_working(core_path, search, sr_dll_dir,
+                                            app_data_path, quality, hdr, preset)
 
         dev = gpu.device
         self.color = dev.create_input_texture2d(self.rw, self.rh,
@@ -124,8 +151,111 @@ class DlssSrSession:
         self.gpu.upload_texture(self.motion, zeros, input_state)
         self.gpu.submit_and_wait()
 
-    def _apply_create_params(self, quality, hdr, preset):
-        p = self.ngx.params
+    # ------------------------------------------------------------ session
+    def _open_first_working(self, core_path, search, sr_dll_dir, app_data_path,
+                            quality, hdr, preset):
+        """Start the SR feature on the first route this build accepts.
+
+        Rig 29 (2026-09-21, owner) decided the order:
+
+        * route 2 below was the old primary and returned ``0xBAD0000B``: the
+          driver core has no provider module for feature 1 unless the runtime
+          itself registered it, so the core alone cannot create it;
+        * the old fallback was route 3's SWAPPED ``Init_Ext`` layout against
+          the SDK runtime, and it faulted INSIDE the runtime: ctypes reported
+          ``access violation reading 0x15`` - 0x15 is ``NGX_VERSION_API``, so
+          the runtime dereferenced our version constant as the feature-info
+          pointer. The SDK runtime is called in the PUBLIC argument order.
+
+        An NGX *error* moves on to the next route. A *fault* (OSError from
+        ctypes) stops the ladder: a process whose NGX runtime faulted is not a
+        process to keep working in, so that case raises loudly and says so.
+        """
+        runtime = sr_runtime_path(sr_dll_dir)
+        if runtime:
+            _log().status(
+                "[ANTs] SR stage: %s (%d bytes) from %s - %s",
+                os.path.basename(runtime), os.path.getsize(runtime),
+                os.path.dirname(runtime), describe_runtime(runtime))
+        else:
+            _log().status(
+                "[ANTs] SR stage: no %s under %s - starting from the driver "
+                "core alone.", _SR_DLL_NAME, sr_dll_dir)
+
+        routes = []
+        if runtime:
+            routes.append((
+                f"the SR runtime '{os.path.basename(runtime)}' as the "
+                "app-facing module (public Init_Ext order)",
+                runtime, False, True))     # own params? core preloaded?
+        if core_path:
+            routes.append((
+                f"the driver core '{os.path.basename(str(core_path))}' with "
+                "the SR search path", core_path, False, False))
+        if runtime and os.environ.get("ANTS_SR_SNIPPET_DIRECT") == "1":
+            routes.append(("snippet-direct (NR-style build, swapped Init_Ext "
+                           "argument order)", runtime, True, False))
+        if not routes:
+            raise DlssSrError(
+                "[ANTs] No DLSS SR runtime and no NGX driver core to start the "
+                f"pre-denoise stage with (sr_dll_dir={sr_dll_dir!r}).\n"
+                "    Install nvngx_dlss*.dll into ComfyUI/models/DLSS/SR, pick "
+                "it in sr_dll_version and press refresh.")
+
+        failures = []
+        for label, path, own_params, preload_core in routes:
+            session = None
+            try:
+                session = NgxSession(self.gpu, path, search_paths=search,
+                                     use_own_parameters=own_params,
+                                     preload_core=preload_core,
+                                     app_data_path=app_data_path)
+                self._apply_create_params(session, quality, hdr, preset)
+                session.create_feature(FEATURE_SR)
+            except OSError as exc:
+                # ctypes turns a fault inside the runtime into OSError. Never
+                # try another route after that (rig 29).
+                self._quiet_close(session)
+                raise DlssSrError(
+                    "[ANTs] The DLSS SR runtime FAULTED (access violation) "
+                    f"inside {path}: {exc}\n"
+                    "    The call layout does not match this build (see "
+                    "ANTS_SR_SNIPPET_DIRECT) or the file is not an SR "
+                    "runtime.\n"
+                    "    RESTART ComfyUI before running again - the process "
+                    "is no longer trustworthy.\n"
+                    "    To skip the stage entirely: pre_denoise_mode OFF or "
+                    "sr_strength 0.") from exc
+            except DlssSrError as exc:
+                self._quiet_close(session)
+                failures.append((label, exc))
+                continue
+            _log().status("[ANTs] SR session route: %s - %s", label,
+                          os.path.basename(str(path)))
+            return session
+
+        detail = "\n".join(f"    - {label}: {exc}" for label, exc in failures)
+        raise DlssSrError(
+            "[ANTs] The DLSS SR pre-denoise stage could not create feature 1.\n"
+            f"    runtime: {runtime or '<no nvngx_dlss.dll in the stage dir>'}\n"
+            f"{detail}\n"
+            "    Check that ComfyUI/models/DLSS/SR holds a real nvngx_dlss*.dll "
+            "(tens of MB), pick it in sr_dll_version and press refresh; the "
+            "driver must be DLSS-capable.\n"
+            "    To skip the stage: pre_denoise_mode OFF or sr_strength 0.")
+
+    @staticmethod
+    def _quiet_close(session):
+        """Close a half-built session; a teardown complaint is not the story."""
+        if session is None:
+            return
+        try:
+            session.close()
+        except Exception:
+            pass
+
+    def _apply_create_params(self, ngx, quality, hdr, preset):
+        p = ngx.params
         p.set_u32("PerfQualityValue", quality)
         p.set_u32("Width", self.rw)
         p.set_u32("Height", self.rh)

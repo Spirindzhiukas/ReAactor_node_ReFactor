@@ -9,10 +9,10 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   `main` moves via PR merge)
 - **Head at last update:** the native NGX host **RIG-VERIFIED** — UAV flag byte fix (`4e483f1`),
   documented rule + D3D12 debug layer (`cb7c572`), first-frame output smoke test + `ANTS_NR_SOAK` +
-  opt-in `ANTS_NR_SESSION_CACHE` (`a3f2c47`), and the SR pre-denoise stage alive on BOTH engines
-  (`HOST_BUILD` `2026-09-21.4`)
-- **Suite:** ALL GREEN — 465 checks + 2 scanners + smoke_import (22 nodes)
-  (`test_dlssnr_bridge` 110, `test_dlsssr` 108, `test_native_flow` 58,
+  opt-in `ANTS_NR_SESSION_CACHE` (`a3f2c47`), the SR pre-denoise stage alive on BOTH engines
+  (`794d34e`), and its SR session route fixed after rig run 29 (`HOST_BUILD` `2026-09-21.5`)
+- **Suite:** ALL GREEN — 468 checks + 2 scanners + smoke_import (22 nodes)
+  (`test_dlssnr_bridge` 112, `test_dlsssr` 109, `test_native_flow` 60,
   `test_runtime_surface` 58, `test_nr_schedule` 35, `test_upres` 27,
   `test_pure_helpers` 26, `test_facerestore_routing` 21, `test_swapper_state`
   13, `test_detection_state_dict` 7)
@@ -104,9 +104,9 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 
 | File | Checks | Coverage |
 |---|---|---|
-| test_dlssnr_bridge.py | 110 | HDR bridge math + defaults neutrality + discovery (categories, flat labels, loud error) + GPU decision + native output smoke/soak/cache instruments |
-| test_dlsssr.py | 108 | NGX host: D3D12 flag table + debug-layer wire bytes, shim/params ABI, SR/NR sessions, probe bat |
-| test_native_flow.py | 58 | native NR flow: stub thunk addresses, create/evaluate contract, loud refusals |
+| test_dlssnr_bridge.py | 112 | HDR bridge math + defaults neutrality + discovery (categories, flat labels, loud error) + GPU decision + native output smoke/soak/cache instruments |
+| test_dlsssr.py | 109 | NGX host: D3D12 flag table + debug-layer wire bytes, shim/params ABI, SR/NR sessions, probe bat |
+| test_native_flow.py | 60 | native NR flow: stub thunk addresses, create/evaluate contract, loud refusals |
 | test_runtime_surface.py | 58 | 22-node surface, ANTs branding, pre-pass contract, OPTIONS socket |
 | test_nr_schedule.py | 35 | schedule parse/validate/pad, plan bypass + denoise fallback (incl. the SR-stage gate), loud slot errors, node surface |
 | test_upres.py | 27 | upRes/upscale paths |
@@ -117,7 +117,7 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | smoke_import.py | — | import + 22-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 465 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.4`; 22 nodes; package `ants/`).**
+**Total: 468 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.5`; 22 nodes; package `ants/`).**
 Sandbox venv: numpy, opencv-python-headless, pillow, pyflakes, pefile (NO torch — stub harness only).
 huggingface.co is TLS-blocked from the sandbox (DLL zips can't be downloaded there — verify engine
 versions on the owner rig).
@@ -1199,5 +1199,31 @@ versions on the owner rig).
   AI-generated images, and no render-pass-grade depth exists outside render-time apps (which already
   ship their own DLSS5 NR path). Revisit only if a real depth source appears; it would need an
   optional depth socket on the native node first.
-- Suite: **465 checks** (dlssnr_bridge 112, dlsssr 108, native_flow 58, runtime_surface 58,
+- Suite: **468 checks** (dlssnr_bridge 112, dlsssr 109, native_flow 60, runtime_surface 58,
+  nr_schedule 35).
+
+### 2026-09-21 (rig run 29) - the SR pre-denoise stage FAULTED at init; the route is fixed
+- **Owner's A/B**: `pre_denoise_strength` 0 = "ran as usual" (the rule skips the stage); strength 1
+  died in the SR session init. Two nested causes:
+  1. the primary route asked the DRIVER CORE alone to create feature 1 -> `0xBAD0000B`
+     (FeatureNotSupported): a core has no provider module for a feature nobody registered, so the
+     core-alone route can never create feature 1;
+  2. the fallback then loaded `nvngx_dlss.dll` as a snippet with the SWAPPED `Init_Ext` order (the
+     order `nvngx_dlssnr.dll` wants) - ctypes reported
+     `OSError: exception: access violation reading 0x0000000000000015`, and `0x15` IS
+     `NGX_VERSION_API`: the runtime dereferenced our version constant as the `FeatureCommonInfo`
+     pointer. The SDK runtime is called in the PUBLIC argument order.
+- **Fixed** in `ants/dlsssr/sr.py` as an explicit ladder:
+  route 1 (default) = the staged runtime is the session OWNER and the feature provider, called in
+  the public order (`Init_Ext(appId, path, device, sdkVersion, featureInfo)`), capability map from
+  the runtime, driver core preloaded for presence (`preload_core=True` - the reference host's loader
+  order); route 2 = the driver core alone with the SR search path (kept for sets where the core does
+  own the SR implementation); route 3 = the NR-style swapped-ABI snippet route, now OPT-IN
+  (`ANTS_SR_SNIPPET_DIRECT=1`) because it was the thing that faulted.
+- An NGX *error* moves to the next route; a FAULT stops the ladder and raises ONE loud `[ANTs]`
+  error naming the file, the access violation and "RESTART ComfyUI", with `pre_denoise_mode OFF` /
+  `sr_strength 0` as the way out. The runtime file, its size and its export verdict (probed from the
+  export table - never the file name) are logged before any call goes into it, and the crash
+  instrumentation is armed on EVERY route (it used to be gated to the snippet routes).
+- Suite: **468 checks** (dlsssr 109, native_flow 60, dlssnr_bridge 112, runtime_surface 58,
   nr_schedule 35).

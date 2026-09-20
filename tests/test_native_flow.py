@@ -1100,6 +1100,63 @@ def main():
           len(big) == 60 * 80 * 4 and big[:240] == small[:240] and big[-1] == 0xCD)
 
     sr.close()
+
+    # ---- SR ladder: the staged runtime IS the app-facing module -----------
+    # Rig 29: the old primary (driver core + search path) answered 0xBAD0000B
+    # and the old fallback handed the SDK runtime the NR snippet's SWAPPED
+    # Init_Ext order - it faulted reading address 0x15 (the version constant
+    # in the feature-info pointer slot). The runtime itself must own the
+    # session and be called in the PUBLIC order.
+    sr_dir = tempfile.mkdtemp(prefix="ants_sr_stage_")
+    with open(os.path.join(sr_dir, "nvngx_dlss.dll"), "wb") as handle:
+        handle.write(b"MZ" + b"\x00" * 1024)
+    PARAMS.clear()
+    sr2 = sr_mod.DlssSrSession(gpu, 30, 40, 30, 40, mode="DLAA", preset="J",
+                               sr_dll_dir=sr_dir)
+    check("sr: the staged runtime is the session OWNER and the feature "
+          "provider (the public-ABI route every DLSS application uses), the "
+          "capability map comes from it, and the driver core is preloaded for "
+          "presence - not the old core-alone plus swapped-ABI fallback",
+          os.path.basename(str(sr2.ngx.module.path)) == "nvngx_dlss.dll"
+          and sr2.ngx.feature_module is None
+          and sr2.ngx._own_parameters is None
+          and sr2.ngx._core_handle == 4242
+          and any(entry[0] == "CreateFeature" and entry[1] == 1
+                  for entry in RECORD)
+          and PARAMS.get("DLSS.Hint.Render.Preset.DLAA", ("u32", -1))[1] == 10)
+    sr2.close()
+
+    # ---- SR ladder: a runtime FAULT stops the ladder and says RESTART -----
+    faults = []
+    real_fn = ngx.NgxModule.fn
+
+    def faulting_fn(self, name, argtypes, restype=ctypes.c_int32, thunk="call"):
+        if name == "NVSDK_NGX_D3D12_Init_Ext":
+            faults.append(os.path.basename(str(getattr(self, "path", ""))))
+
+            def boom(*args):
+                raise OSError(
+                    "exception: access violation reading 0x0000000000000015")
+            return boom
+        return real_fn(self, name, argtypes, restype, thunk)
+
+    ngx.NgxModule.fn = faulting_fn
+    try:
+        try:
+            sr_mod.DlssSrSession(gpu, 30, 40, 30, 40, mode="DLAA", preset="J",
+                                 sr_dll_dir=sr_dir)
+            text = ""
+        except _Exc as exc:
+            text = str(exc)
+        check("sr: a runtime fault becomes ONE loud [ANTs] error naming the "
+              "file, saying RESTART and offering OFF/0 as the way out - the "
+              "ladder is NOT continued into the next route (a process whose "
+              "NGX runtime faulted must not keep working)",
+              "access violation" in text and "RESTART" in text
+              and "nvngx_dlss.dll" in text and "OFF" in text
+              and faults == ["nvngx_dlss.dll"])
+    finally:
+        ngx.NgxModule.fn = real_fn
     gpu.close()
     check("flow: teardown releases the feature",
           any(entry[0] == "ReleaseFeature" for entry in RECORD))

@@ -308,11 +308,13 @@ python and never registers callbacks.
 - [ ] **~50-prompt soak with `ANTS_NR_SOAK=1`** (item 2): process handles + torch VRAM should stay
       flat. Per-prompt NGX re-init (~1 s - ComfyUI makes a new node object per prompt) is expected;
       `ANTS_NR_SESSION_CACHE=1` A/Bs reuse across prompts (default OFF).
-- [ ] **Owner A/B of the SR pre-denoise stage** (owner request, 2026-09-21): mode
-      `SR (DLSS denoise)` now actually runs a 1:1 DLAA pass per frame BEFORE the engine, on BOTH
-      engines (it is our `ants/dlsssr` host, not part of either engine) - needs `nvngx_dlss*.dll` in
+- [ ] **Owner A/B of the SR pre-denoise stage** (owner request, 2026-09-21; rig 29: strength 0 =
+      no change, strength 1 faulted at SR init -> the route is fixed, see the completed list): mode
+      `SR (DLSS denoise)` runs a 1:1 DLAA pass per frame BEFORE the engine, on BOTH engines (it is
+      our `ants/dlsssr` host, not part of either engine) - needs `nvngx_dlss*.dll` in
       `models/DLSS/SR/`. Compare OFF vs SR on the same prompt, native first, then legacy (the legacy
-      case is the first time our SR host and the neuroframe engine share one process).
+      case is the first time our SR host and the neuroframe engine share one process). If it still
+      refuses, the error names the file, the route and the hr.
 - [x] Literal-name staging rule stays (item 3): canonical `nvngx_dlssnr.dll` staged copy + the
       sibling-name warning on stage - no change needed.
 - [ ] Fix any owner-reported issues from the test round above (priority over new features).
@@ -393,4 +395,8 @@ python and never registers callbacks.
       (strength is the gate - the old builders zeroed it without a model, which had made the stage
       inert); the legacy fallback warning and the schedule-path `StopIteration` log line are gone;
       `HOST_BUILD` `2026-09-21.4`.
+- [x] SR session route fixed (rig run 29): the SDK runtime is now the session OWNER, called in the
+      PUBLIC `Init_Ext` order, with the driver core preloaded for presence; the core-alone route is
+      the fallback; the NR-style swapped-ABI route is opt-in (`ANTS_SR_SNIPPET_DIRECT=1`); a runtime
+      fault stops the ladder with one loud RESTART error. `HOST_BUILD` `2026-09-21.5`.
 - [x] `4e483f1` — `ALLOW_UNORDERED_ACCESS = 0x4` (the one-bit root cause of the whole native saga).

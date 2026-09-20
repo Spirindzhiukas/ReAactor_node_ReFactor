@@ -12,12 +12,21 @@ One class serves every layout, because the API surface is identical:
   callbacks and feature metadata" — a plain ``AllocateParameters`` map lets
   CreateFeature succeed and then fails inside evaluate, which is exactly the
   run-14..27c signature;
-- **driver core alone** (`_nvngx.dll`) — the SR path: the core locates and
-  owns `nvngx_dlss.dll` through the search-path list in
-  ``NVSDK_NGX_FeatureCommonInfo``;
+- **the SR runtime as the app-facing module** (`nvngx_dlss.dll`) — the route
+  every DLSS application uses, and the only one that creates feature 1: its
+  ``NVSDK_NGX_D3D12_*`` exports are the PUBLIC API in the PUBLIC argument
+  order (``Init_Ext(appId, path, device, sdkVersion, featureInfo)``) and the
+  runtime loads the driver core itself. Handing the driver core the SR folder
+  in the search-path list is NOT enough: on the rig the core answered
+  ``0xBAD0000B`` (no provider module for feature 1), and calling the runtime
+  in the snippet order below faults inside ``Init_Ext`` — the swap puts the
+  version constant 0x15 into the feature-info pointer slot (rig 29);
+- **driver core alone** (`_nvngx.dll`) — kept as the SR fallback for sets
+  where the core does own the SR implementation;
 - **snippet direct** (`use_own_parameters=True`) — the legacy fallback where
-  the snippet itself is the provider and is handed our own parameter object.
-  Kept for diagnostics (and for the SR fallback), NOT the NR default.
+  the snippet itself is the provider and is handed our own parameter object
+  (the SWAPPED ``Init_Ext`` order). Kept for NR diagnostics and for an opt-in
+  SR route (``ANTS_SR_SNIPPET_DIRECT=1``), NOT a default anywhere.
 
 Every NGX call is routed through the generated caller shim (``shim.py``):
 the target address is parked in a slot immediately before each call and the
@@ -76,7 +85,7 @@ NGX_ENGINE_TYPE_CUSTOM = 0
 # Console deployment marker: bumped with every host-layout change so the
 # owner's console unambiguously says WHICH build ran (run-28 attempt #1 was
 # diagnosed from a stack trace because the old file was still deployed).
-HOST_BUILD = "2026-09-21.4"
+HOST_BUILD = "2026-09-21.5"
 
 FEATURE_SR = 1    # NVSDK_NGX_Feature_SuperSampling
 FEATURE_NR = 18   # NVSDK_NGX_Feature_NeuralRendering ("CG2R")
@@ -359,7 +368,7 @@ class NgxSession:
     def __init__(self, gpu, module_path, app_id=APP_ID, search_paths=(),
                  use_own_parameters=False, app_data_path=None, use_shim=True,
                  feature_module_path=None, project_id=None,
-                 ngx_log=None):
+                 preload_core=False, ngx_log=None):
         """module_path: the session OWNER (the driver core for NR/SR; the
         snippet itself only in the legacy snippet-direct fallback).
 
@@ -416,10 +425,12 @@ class NgxSession:
         # NGX core _nvngx.dll...") and inits the snippet through a caller
         # helper. Our NR path did none of that before run 21.
         #
-        # LEGACY snippet-direct route (use_own_parameters=True): the snippet
-        # itself is the provider, so the core is loaded for PRESENCE only (its
-        # evaluate path resolves the core in-process).
-        if use_own_parameters:
+        # LEGACY snippet-direct route (use_own_parameters=True) and the SR
+        # route (preload_core=True): the module being inited is a FEATURE
+        # provider, not the core, so the driver core is loaded for PRESENCE
+        # only - the provider's own Init/evaluate path resolves the core
+        # in-process, and the reference host loads it FIRST for that reason.
+        if use_own_parameters or preload_core:
             core_path = None
             local_core = os.path.join(os.path.dirname(module_path), "_nvngx.dll")
             if os.path.isfile(local_core):
@@ -452,35 +463,34 @@ class NgxSession:
                 "feature calls routed through the caller shim)")
 
         # --- crash instrumentation ---------------------------------------
-        # ARMED ALWAYS on the NR path (run 27b lesson: nested inside an
+        # ARMED ALWAYS on EVERY route (run 27b lesson: nested inside an
         # env-gated experiment, one env deletion stripped every net and the
-        # run went out instrument-free). Only ANTS_NR_TERMINATION_TRAP=0
-        # opts out. Patches the NGX modules' import tables (static
-        # terminates) and detours ntdll!NtTerminateProcess (dynamic
-        # GetProcAddress terminates - the snippet imports
-        # LoadLibraryW/GetProcAddress, so IATs alone are dodgeable), and
-        # converts kernel-direct __fastfail (int 29h) sites to breakpoints
-        # so the VEH names the check that fires.
-        if use_own_parameters or feature_module_path:
-            self._instrumented = [
-                (self.module.handle, self._module_label("session owner")),
-            ]
-            if self.feature_module is not None:
-                self._instrumented.append(
-                    (self.feature_module.handle,
-                     "snippet " + os.path.basename(str(feature_module_path))))
-            if self._core_handle:
-                self._instrumented.append((self._core_handle, "driver core"))
-            if os.environ.get("ANTS_NR_TERMINATION_TRAP", "1") != "0":
-                from . import crashlog
-                crashlog.install_termination_trap(self._instrumented)
-                crashlog.install_ntdll_terminate_detour()
-                if os.environ.get("ANTS_NR_INT29_TRAP", "1") != "0":
-                    crashlog.install_int29_trap(self._instrumented)
-            if os.environ.get("ANTS_NR_RUNTIME_CALLBACKS"):
-                self._register_runtime_callbacks(
-                    self.feature_module if self.feature_module is not None
-                    else self.module)
+        # run went out instrument-free; and the SR route is NR-grade now).
+        # Only ANTS_NR_TERMINATION_TRAP=0 opts out. Patches the NGX modules'
+        # import tables (static terminates) and detours
+        # ntdll!NtTerminateProcess (dynamic GetProcAddress terminates - the
+        # snippet imports LoadLibraryW/GetProcAddress, so IATs alone are
+        # dodgeable), and converts kernel-direct __fastfail (int 29h) sites to
+        # breakpoints so the VEH names the check that fires.
+        self._instrumented = [
+            (self.module.handle, self._module_label("session owner")),
+        ]
+        if self.feature_module is not None:
+            self._instrumented.append(
+                (self.feature_module.handle,
+                 "snippet " + os.path.basename(str(feature_module_path))))
+        if self._core_handle:
+            self._instrumented.append((self._core_handle, "driver core"))
+        if os.environ.get("ANTS_NR_TERMINATION_TRAP", "1") != "0":
+            from . import crashlog
+            crashlog.install_termination_trap(self._instrumented)
+            crashlog.install_ntdll_terminate_detour()
+            if os.environ.get("ANTS_NR_INT29_TRAP", "1") != "0":
+                crashlog.install_int29_trap(self._instrumented)
+        if os.environ.get("ANTS_NR_RUNTIME_CALLBACKS"):
+            self._register_runtime_callbacks(
+                self.feature_module if self.feature_module is not None
+                else self.module)
 
         app_data = app_data_path or os.path.join(writable_cache_dir("appdata"), "logs")
         os.makedirs(app_data, exist_ok=True)
@@ -760,7 +770,9 @@ class NgxSession:
 
         ``nvngx_dlssnr.dll`` (snippet build) takes
         ``Init_Ext(appId, path, device, FeatureCommonInfo*, sdkVersion)`` -
-        the last two arguments are SWAPPED against the public header order,
+        the last two arguments are SWAPPED against the public header order
+        (the SDK SR runtime wants the PUBLIC order instead: calling it with
+        the swap faults reading address 0x15 - rig 29, ``sr.py``);
         and calling it the public way hands the runtime a version number where
         it expects a pointer (which it dereferences later, on the evaluate
         path). The shim's ``fwd_init_ext`` thunk performs the swap in native
