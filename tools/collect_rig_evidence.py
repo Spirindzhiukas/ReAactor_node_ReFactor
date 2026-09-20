@@ -65,11 +65,75 @@ def mtime_of(path):
         return "?"
 
 
+def clean_path(value):
+    """A path handed over by cmd can arrive mangled (a trailing backslash
+    inside quotes escapes the quote - ``--repo "C:\"`` - and the argument
+    parser then swallows the NEXT option into the value). Anything with a
+    stray quote in it is not a path."""
+    if not value:
+        return ""
+    value = value.strip().strip('"')
+    if '"' in value:
+        return ""
+    return value
+
+
+def find_comfy_root(explicit, repo):
+    """<ComfyUI> root - the parent of custom_nodes, or a portable install."""
+    candidates = [explicit, os.environ.get("ANTS_EVIDENCE_COMFY", "")]
+    portable = os.environ.get("COMFYUI_PORTABLE")
+    if portable:
+        candidates.append(os.path.join(portable, "ComfyUI"))
+        candidates.append(portable)
+    here = os.path.realpath(repo) if repo else ""
+    if here:
+        # <comfy>/custom_nodes/<pack> -> <comfy>
+        candidates.append(os.path.dirname(os.path.dirname(here)))
+    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":   # no A:/B: (floppy probing)
+        candidates.append(f"{letter}:\\ComfyUI_PORTABLE\\ComfyUI")
+        candidates.append(f"{letter}:\\ComfyUI")
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if os.path.isdir(os.path.join(candidate, "models")):
+            return os.path.abspath(candidate)
+    return None
+
+
+def find_pack(explicit, script_dir):
+    """The nodepack checkout: a folder holding ants/dlsssr/ngx.py."""
+    def looks_like_pack(path):
+        return bool(path) and os.path.isfile(
+            os.path.join(path, "ants", "dlsssr", "ngx.py"))
+
+    candidates = [explicit, os.environ.get("ANTS_EVIDENCE_REPO", "")]
+    candidates += [script_dir, os.path.dirname(script_dir), os.getcwd(),
+                   os.path.dirname(os.getcwd())]
+    portable = os.environ.get("COMFYUI_PORTABLE")
+    if portable:
+        for root in (os.path.join(portable, "ComfyUI"), portable):
+            nodes = os.path.join(root, "custom_nodes")
+            if os.path.isdir(nodes):
+                for entry in sorted(os.listdir(nodes)):
+                    candidates.append(os.path.join(nodes, entry))
+    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":   # no A:/B: (floppy probing)
+        for root in (f"{letter}:\\ComfyUI_PORTABLE\\ComfyUI", f"{letter}:\\ComfyUI"):
+            nodes = os.path.join(root, "custom_nodes")
+            if os.path.isdir(nodes):
+                for entry in sorted(os.listdir(nodes)):
+                    candidates.append(os.path.join(nodes, entry))
+    for candidate in candidates:
+        if looks_like_pack(candidate):
+            return os.path.abspath(candidate)
+    return None
+
+
 def find_dlss_root(explicit, repo):
     """Locate ``<ComfyUI>/models/DLSS`` without importing ComfyUI itself."""
     candidates = []
     if explicit:
         candidates.append(explicit)
+    candidates.append(os.environ.get("ANTS_EVIDENCE_DLSS", ""))
     portable = os.environ.get("COMFYUI_PORTABLE")
     if portable:
         candidates.append(os.path.join(portable, "ComfyUI", "models", "DLSS"))
@@ -279,8 +343,9 @@ def nvidia_smi(out_lines):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--repo", default=os.getcwd(),
-                        help="the nodepack checkout (contains ants/)")
+    parser.add_argument("--repo", default="",
+                        help="the nodepack checkout (contains ants/); "
+                             "auto-detected when omitted")
     parser.add_argument("--dlss-root", default="",
                         help="override: <ComfyUI>/models/DLSS")
     parser.add_argument("--out", default="",
@@ -289,16 +354,40 @@ def main(argv=None):
                         help="<ComfyUI> root, used to find custom_nodes copies")
     args = parser.parse_args(argv)
 
-    repo = os.path.abspath(args.repo)
-    stamp = time.strftime("%Y-%m-%d_%H%M%S")
-    out_dir = args.out or os.path.join(repo, "tools", "rig_evidence", stamp)
-    logs_dir = os.path.join(out_dir, "files")
-    os.makedirs(logs_dir, exist_ok=True)
-
-    dlss_root = find_dlss_root(args.dlss_root, repo)
-    if dlss_root is None and args.comfy_root:
-        guess = os.path.join(args.comfy_root, "models", "DLSS")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    notes = []
+    raw_repo = args.repo or os.environ.get("ANTS_EVIDENCE_REPO", "")
+    if raw_repo and clean_path(raw_repo) != raw_repo:
+        notes.append(f"ignoring a mangled --repo value ({raw_repo!r}); "
+                     "pass paths as environment variables instead")
+    repo = find_pack(clean_path(raw_repo), script_dir)
+    if repo is None:
+        repo = clean_path(raw_repo) or os.getcwd()
+        notes.append(f"NOT FOUND: the nodepack checkout (searched {script_dir} "
+                     "and its parent, the cwd, and every custom_nodes folder "
+                     "on every drive) - put this tool in the pack's tools\\ "
+                     "folder, or set ANTS_EVIDENCE_REPO")
+    comfy_root = find_comfy_root(clean_path(args.comfy_root), repo)
+    dlss_root = find_dlss_root(clean_path(args.dlss_root), repo)
+    if dlss_root is None and comfy_root:
+        guess = os.path.join(comfy_root, "models", "DLSS")
         dlss_root = guess if os.path.isdir(guess) else None
+    if dlss_root is None:
+        notes.append("NOT FOUND: <ComfyUI>/models/DLSS (set ANTS_EVIDENCE_DLSS "
+                     "or COMFYUI_PORTABLE if the install lives somewhere "
+                     "unusual)")
+
+    stamp = time.strftime("%Y-%m-%d_%H%M%S")
+    out_root = clean_path(args.out)
+    out_dir = out_root or os.path.join(repo, "tools", "rig_evidence", stamp)
+    logs_dir = os.path.join(out_dir, "files")
+    try:
+        os.makedirs(logs_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"[X] cannot create {logs_dir}: {exc}")
+        print("    set ANTS_EVIDENCE_REPO to the pack folder, or run this "
+              "from a folder you can write to")
+        return 1
 
     lines = []
     lines.append("=" * 74)
@@ -308,7 +397,12 @@ def main(argv=None):
     lines.append(f"python      : {sys.version.split()[0]}  ({sys.executable})")
     lines.append(f"cwd         : {os.getcwd()}")
     lines.append(f"nodepack    : {repo}")
-    lines.append(f"models/DLSS : {dlss_root or '<NOT FOUND - pass --dlss-root>'}")
+    lines.append(f"comfy root  : {comfy_root or '<not found>'}")
+    lines.append(f"models/DLSS : {dlss_root or '<NOT FOUND>'}")
+    if notes:
+        lines.append("-" * 74)
+        for note in notes:
+            lines.append(f"[!] {note}")
     lines.append("=" * 74)
 
     lines.append("")
@@ -410,6 +504,11 @@ def main(argv=None):
     print("\n".join(lines))
     print(f"[ANTs] report  : {report}")
     print(f"[ANTs] raw logs: {logs_dir}")
+    if any(note.startswith("NOT FOUND") for note in notes):
+        print("[X] the report is incomplete - fix the NOT FOUND lines above "
+              "and run again (the report is still worth sending: it says what "
+              "was searched)")
+        return 1
     return 0
 
 

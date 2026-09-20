@@ -56,8 +56,21 @@ _TERM_PROTOS = {
 
 _MAX_EMISSIONS = 50
 
-_state = {"fd": None, "handler": None, "count": 0,
-          "trap": False, "trap_keep": []}
+# MSVC C++ throw ("msc" + 3): RaiseException(0xE06D7363, ...) from
+# _CxxThrowException. Run 30 (2026-09-20) surfaced one of these out of the
+# snippet's EvaluateFeature - ctypes turned it into a Python OSError, and for
+# the first time the failure was CATCHABLE instead of a silent process kill.
+# The record carries everything needed to name it: the thrown object, and the
+# ThrowInfo -> CatchableTypeArray -> TypeDescriptor chain whose tail holds the
+# RTTI type name (e.g. ".?AVinvalid_argument@std@@"), plus the live stack.
+_CXX_CODE = 0xE06D7363
+_CXX_MAGIC = 0x19930520
+_MAX_CXX = 20
+_CXX_NOISE = ("ntdll", "kernelbase", "kernel32", "vcruntime", "ucrtbase",
+              "python", "libffi", "_ctypes", "msvcp")
+
+_state = {"fd": None, "handler": None, "count": 0, "cxx_count": 0,
+          "cxx": [], "trap": False, "trap_keep": [], "path": None}
 
 
 def _kernel32():
@@ -215,6 +228,7 @@ def arm(crash_file_path):
         return
     if k32 is None:
         return
+    _state["path"] = str(crash_file_path)
     try:
         parent = os.path.dirname(str(crash_file_path))
         if parent:
@@ -237,7 +251,9 @@ def arm(crash_file_path):
                 if record is not None:
                     code = ctypes.c_uint32.from_address(record).value
                     address = ctypes.c_void_p.from_address(record + 16).value
-                    if code in _INTERESTING:
+                    if code == _CXX_CODE:
+                        _report_cxx(k32, record)
+                    elif code in _INTERESTING:
                         _state["count"] += 1
                         where = ""
                         if address:
@@ -291,6 +307,91 @@ def _stack_chain(k32, skip=0, count=8):
         else:
             out.append(f"0x{addr:X}")
     return out
+
+
+def _cxx_type_and_message(mem, thrown, throw_info):
+    """(RTTI type name, best-effort message) for an MSVC throw record.
+
+    x64 chain: ThrowInfo{attributes, pUnwind, pForwardCompat,
+    pCatchableTypeArray} -> CatchableTypeArray{count, ptrs} ->
+    CatchableType{properties, pType} -> TypeDescriptor{vftable, spare,
+    name[]}. Every hop is a guarded read: a diagnostic that faults is worse
+    than no diagnostic (that is the run-28 lesson), and none of this memory
+    belongs to us.
+    """
+    type_name = None
+    if throw_info:
+        catchable = mem.u64(throw_info + 24)          # pCatchableTypeArray
+        if catchable:
+            count = mem.u32(catchable)
+            first = mem.u64(catchable + 8) if count else None
+            descriptor = mem.u64(first + 8) if first else None   # pType
+            if descriptor:
+                raw = mem.read_some(descriptor + 16, 240)
+                text = raw.split(b"\x00", 1)[0].decode("ascii", "replace")
+                if text.startswith(".?"):
+                    type_name = text
+    message = None
+    if thrown and type_name:
+        # std::exception-derived objects keep {void* vfptr; _Data{ptr,len}}:
+        # the second qword normally points at the what() text. It is a guess,
+        # so it is reported as one.
+        ptr = mem.u64(thrown + 8)
+        if ptr:
+            raw = mem.read_some(ptr, 256)
+            text = raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
+            if text and text.isprintable():
+                message = text
+    return type_name, message
+
+
+def _report_cxx(k32, record):
+    """Log one MSVC C++ throw: type, guess at the message, live stack."""
+    if os.environ.get("ANTS_NR_CXX_TRAP", "1") == "0":
+        return
+    if _state["cxx_count"] >= _MAX_CXX:
+        return
+    if ctypes.sizeof(ctypes.c_void_p) != 8:      # x64 record offsets
+        return
+    mem = _Mem(k32)
+    try:
+        count = ctypes.c_uint32.from_address(record + 24).value
+        info = [ctypes.c_void_p.from_address(record + 32 + 8 * i).value or 0
+                for i in range(min(count, 4))]
+    except Exception:
+        return
+    if not info:
+        return
+    type_name, message = (None, None)
+    try:
+        type_name, message = _cxx_type_and_message(
+            mem, info[1] if len(info) > 1 else 0,
+            info[2] if len(info) > 2 else 0)
+    except Exception:
+        pass
+    try:
+        frames = [f for f in _stack_chain(k32, 0, 16)
+                  if not any(noise in f.lower() for noise in _CXX_NOISE)]
+        frames = frames[:6] or _stack_chain(k32, 0, 6)
+    except Exception:
+        frames = []
+    _state["cxx_count"] += 1
+    text = (f"[ANTs] C++ exception 0x{_CXX_CODE:08X} (magic 0x{info[0]:X}) "
+            f"type {type_name or '<?> (type descriptor unreadable)'}"
+            + (f" message guess {message!r}" if message else "")
+            + (f" thrown from {' <- '.join(frames)}" if frames else ""))
+    _state["cxx"].append(text)
+    _emit("\n" + text + "\n")
+
+
+def last_cxx_report():
+    """The most recent C++ throw we saw, for a Python-side error message."""
+    return _state["cxx"][-1] if _state["cxx"] else None
+
+
+def crash_file_path():
+    """Where the black box writes (once armed), for the error message."""
+    return _state["path"]
 
 
 def _write_iat_ptr(k32, addr, value, mem=None):

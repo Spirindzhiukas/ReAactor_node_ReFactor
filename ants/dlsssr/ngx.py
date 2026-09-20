@@ -521,6 +521,7 @@ class NgxSession:
         """
         limit = 400
         seen = {"n": 0}
+        echo = os.environ.get("ANTS_NR_NGX_ECHO") == "1"
 
         def _read(ptr):
             if not ptr:
@@ -543,10 +544,16 @@ class NgxSession:
             text = _read(message).rstrip("\n")
             if ngx_log:
                 ngx_log(text, int(level or 0), int(source or 0))
-            else:
+            elif echo:
+                # Off by default: run 30's console was ~90% NGX chatter, and
+                # the same lines are already in the core's own log file, which
+                # is what we ask for after a failure.
                 _log().status(f"[NGX] {text}")
             if seen["n"] == limit:
-                _log().status("[ANTs] NGX log callback: further lines suppressed.")
+                _log().status(
+                    f"[ANTs] NGX log callback: {limit} lines "
+                    + ("echoed" if echo else "captured into the core log")
+                    + "; set ANTS_NR_NGX_ECHO=1 to see them on the console.")
 
         cb = ctypes.CFUNCTYPE(None, _CVOID, _CI32, _CI32)(_cb)
         self._cb_keep.append(cb)

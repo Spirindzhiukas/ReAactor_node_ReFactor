@@ -204,6 +204,47 @@ int29 trap names a breakpoint site). E1 (`ANTS_NR_USE_SHIM=0`) is still
 unexecuted and now matters only for "does the shim's PRESENCE change anything"
 — the helper's own signature/version is exonerated.
 
+## Run 30 (2026-09-20) — the silence broke: evaluate reached, C++ throw caught
+
+The full host contract ran for the first time: build marker, `NGX init ->
+_nvngx.dll (bound directly)`, both trap sets + int29, `Init_ProjectID` hr=1,
+capability params hr=1, snippet `Init_Ext` via caller shim hr=1,
+**`CreateFeature(feature 18)` hr=1**, **`EvaluateFeature ->`** with the whole
+90-parameter contract written.
+
+Then, instead of a silent kill: the snippet raised an **MSVC C++ exception
+(`0xE06D7363`)** which ctypes surfaced as
+`OSError: [WinError -529697949] Windows Error 0xe06d7363`, and ComfyUI
+reported a normal node error (prompt finished). That is the first catchable
+verdict in the whole investigation, and it is consistent with the earlier
+"silent kill" being the same throw unwinding into a host without a handler.
+
+**What the black box now does for you:** the first-chance handler decodes a
+C++ throw into its RTTI type name (e.g. `.?AVinvalid_argument@std@@`), a
+best-effort `what()` message, and the filtered live stack as
+`module+0xoffset`. It is written to the same file as the other crash lines
+(`.../staged/ANTs/appdata/logs/native-crash.log`) and the node error repeats
+it in the console. `ANTS_NR_CXX_TRAP=0` opts out; the decode is
+VirtualQuery-guarded and validated against hostile structures.
+
+**The core's own log also confirmed the geometry fix**: `NGXInitContext:
+called from module libffi-8.dll` (straight from our process - no shim in the
+call chain), `NvAPI_DRS_FindApplicationByName -166` (python.exe is not a
+registered driver-settings app - harmless), and the same signed-snippet
+refusal for our staged community build, which is expected because WE host
+that file.
+
+**Console noise**: the NGX log callback is no longer echoed by default (run
+30's console was ~90% core chatter, each line duplicated); the same text is
+in `nvngx.log`. `ANTS_NR_NGX_ECHO=1` brings the echo back for a debugging
+session.
+
+**Next run (31)**: plain re-run, no env lines needed. What we want from it
+is the **C++ type + throw site** line - that names the branch inside the
+snippet that rejects our frame/parameters. Run `tools\collect_rig_evidence.bat`
+afterwards (it now auto-detects everything and can be run from anywhere) and
+send the report plus `files\`.
+
 ## Run 28+ host layout — IMPLEMENTED while run 28 is pending (2026-09-20)
 
 The whole NR host was rebuilt onto the layout the **working** hosts of this

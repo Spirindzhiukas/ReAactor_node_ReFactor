@@ -10,8 +10,8 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
 - **Head at last update:** run-28+ NR host layout (core-owned session + caller
   shim with the snippet Init_Ext swap; working tree, commit pending) on top of
   the GPU-acceleration commit (`588f790` DLSS5 hybrid, `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 357 checks + 2 scanners + smoke_import (20 nodes)
-  (`test_nr_schedule` 32, `test_dlssnr_bridge` 65, `test_dlsssr` 75,
+- **Suite:** ALL GREEN — 363 checks + 2 scanners + smoke_import (20 nodes)
+  (`test_nr_schedule` 32, `test_dlssnr_bridge` 65, `test_dlsssr` 80,
   `test_runtime_surface` 58, `test_native_flow` 33, `test_upres` 27,
   `test_pure_helpers` 26, `test_facerestore_routing` 21, `test_swapper_state`
   13, `test_detection_state_dict` 7)
@@ -563,3 +563,58 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   buffers now live on `GpuContext._pending_release` and are freed on the next
   `submit_and_wait()` (or when a recording is dropped, or at close). Pinned in
   `test_native_flow` with a spy on `submit_and_wait`.
+
+### 2026-09-20 — RUN 30: EvaluateFeature REACHED, and the kill is gone - the snippet now throws a CATCHABLE MSVC C++ exception
+- **RIG RESULT (07:26): the whole host contract ran end to end for the first
+  time** - build marker, `NGX init -> _nvngx.dll (bound directly)`, traps +
+  ntdll detour + int29 (10 sites session owner / 6 snippet), `Init_ProjectID
+  <- hr=1`, `GetCapabilityParameters <- hr=1`, `snippet Init_Ext via caller
+  shim <- hr=1`, **`NGX CreateFeature(feature 18) <- hr=1`**,
+  **`NGX EvaluateFeature ->`** - i.e. the parameter contract (90 params),
+  the feature creation and the first evaluate ALL worked. Run 29 died before
+  any of that, on our own D3D12 staging barrier.
+- **The failure mode changed: no silent kill, a real exception.** The snippet
+  raised an MSVC C++ exception (`0xE06D7363`, i.e. `_CxxThrowException`) out
+  of `EvaluateFeature`; ctypes converted it to
+  `OSError: [WinError -529697949] Windows Error 0xe06d7363` and ComfyUI
+  reported a clean node error (prompt finished, 12.14 s). That is the first
+  CATCHABLE verdict in this investigation - and it is consistent with the
+  earlier "silent kill" being the same throw unwinding into a host that had
+  no handler (the old geometry ran the snippet as the session owner).
+- **NEW INSTRUMENT: the first-chance handler now decodes C++ throws**
+  (`crashlog._report_cxx`): exception record -> magic 0x19930520 + thrown
+  object + ThrowInfo -> CatchableTypeArray -> CatchableType -> TypeDescriptor
+  -> RTTI type name, plus a best-effort `what()` guess from the object's
+  second qword, plus the live (filtered) stack in module+offset form. Every
+  hop goes through the VirtualQuery guard; a hostile chain is refused, never
+  faulted (tested with a synthetic record and two hostile ones:
+  `type .?AVinvalid_argument@std@@ message guess 'DLSSNR: bad parameter:
+  MVec'`). `ANTS_NR_CXX_TRAP=0` opts out.
+- **The failure is now LOUD**: `nr.py` wraps `ngx.evaluate()` and raises a
+  `[ANTs]` error that names the C++ type, the throw site and the black-box
+  file; the node then DROPS the native session (`_close_native`) so a
+  half-dead NGX feature is never evaluated into again.
+- **Caller geometry fix confirmed in the core's log**:
+  `NGXInitContext: called from module libffi-8.dll` - the core is now called
+  straight from the process (before it saw `nvngx.dll_ants.dll`). Also
+  visible: `NvAPI_DRS_FindApplicationByName -166` (python.exe is not a
+  registered app - harmless, init continued), the core enumerating every
+  known snippet (`nvngx_dldenoiser`, `nvngx_dlssd`, `nvngx_fpgx`, ... - the
+  full list of features it tries), and the same documented
+  `nvLoadSignedLibraryW`/FileVersionInfo refusal for our staged community
+  build (expected: we host the snippet, the core only owns the session).
+- **Console de-flooded**: the NGX log callback echoed ~300 lines into the
+  node log (each line twice: core file log + console). Echo is OFF by
+  default now (`ANTS_NR_NGX_ECHO=1` restores it) - the same text is in
+  `nvngx.log`, which is what we ask for after a failure anyway.
+- **Collector fixed for the owner's real environment**: his first attempt ran
+  it from `C:\\tools\\` and the argument `--repo "C:\\"` was mangled by cmd
+  (a trailing backslash before the closing quote escapes it) - the script
+  now auto-detects the pack, the ComfyUI root and `models\\DLSS` (env
+  overrides: `ANTS_EVIDENCE_REPO` / `ANTS_EVIDENCE_COMFY` /
+  `ANTS_EVIDENCE_DLSS`), refuses mangled paths explicitly, never crashes on a
+  NOT FOUND (it reports what it searched and exits non-zero), and the bat
+  passes no path arguments at all.
+- NEXT: re-run (the new first-chance decode will name the exception type and
+  the snippet offset that threw, which is the branch that rejects our frame
+  or parameter set). Also still unexecuted: E1 (`ANTS_NR_USE_SHIM=0`).

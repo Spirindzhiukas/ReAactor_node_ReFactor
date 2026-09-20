@@ -297,7 +297,25 @@ class DlssNrSession:
                                 _rgba8_to_fp16(color_rgba, self.w, self.h), uav)
         self.gpu.transition(self.output, uav)
         self._set_eval_params(reset)
-        self.ngx.evaluate()
+        try:
+            self.ngx.evaluate()
+        except Exception as exc:
+            # C++ exceptions out of the snippet are CATCHABLE (run 30): the
+            # first time the failure is not a silent process kill, so make
+            # the most of it - name the throw and where it came from.
+            from .crashlog import last_cxx_report, crash_file_path
+            cxx = last_cxx_report()
+            log = crash_file_path()
+            detail = f"{cxx}\n    original Python exception: {exc}" if cxx \
+                else str(exc)
+            raise DlssSrError(
+                "[ANTs] NGX EvaluateFeature failed for the NR snippet.\n"
+                f"    {detail}\n"
+                + (f"    Full detail: {log}\n" if log else "")
+                + "    Send that file (and the console) - a C++ throw from "
+                  "the snippet means it ran and rejected the frame or the\n"
+                  "    parameter contract; the type and throw site above name "
+                  "the check that refused.") from exc
         return _fp16_to_rgba8(self.gpu.readback_texture(self.output, uav),
                               self.w, self.h)
 

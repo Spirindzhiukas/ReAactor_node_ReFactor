@@ -552,7 +552,17 @@ class ReFactorDLSS5Enhancer:
                     sess = self._native_session_for(int(frame_t.shape[1]),
                                                     int(frame_t.shape[0]), look)
                     payload, w_px, h_px = self._frame_to_rgba8(frame_t)
-                    out = sess.evaluate(payload, reset=do_reset)
+                    try:
+                        out = sess.evaluate(payload, reset=do_reset)
+                    except Exception:
+                        # A failing evaluate can leave the NGX feature (and the
+                        # snippet's internal state) mid-flight; run 30 showed a
+                        # C++ throw from the snippet. Drop the session so the
+                        # next queue item builds a fresh one instead of
+                        # evaluating into a half-dead feature, and keep the
+                        # original error as the one the user sees.
+                        self._close_native()
+                        raise
                     frame_t = self._rgba8_to_frame(out, w_px, h_px, self.device)
                 elif use_cuda:
                     if denoise_this:

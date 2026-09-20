@@ -39,7 +39,15 @@ python and never registers callbacks.
       caller helper is unsigned and versionless, so the "VERSION resource in
       the shim" cure is dead. Re-run next; always send
       `models/DLSS/staged/ANTs/appdata/logs/nvngx.log` with the console.
-- [ ] **Run 30 (owner): plain re-run of the fixed build** (`set "NVSDK_NGX_LOG_LEVEL=1"`,
+- [x] **Run 30 (2026-09-20) — EvaluateFeature REACHED; silence broken**: the
+      full host contract ran (init -> capability params -> snippet Init_Ext ->
+      CreateFeature hr=1 -> EvaluateFeature) and the snippet threw a CATCHABLE
+      MSVC C++ exception (0xE06D7363) instead of killing the process. The
+      first-chance handler now decodes those throws to RTTI type + message +
+      stack; `nr.py` reports it loudly and the node drops the dead session;
+      console de-flooded (ANTS_NR_NGX_ECHO). Collector fixed for a real rig
+      (auto-detection, no path arguments, no cmd quote mangling).
+- [ ] **Run 31 (owner): plain re-run** (`set "NVSDK_NGX_LOG_LEVEL=1"`,
       no ANTS_ lines needed) — the first run that should reach CreateFeature +
       evaluate with the full host-parity contract. Console + nvngx.log + crash
       file if the int29 trap names a site.

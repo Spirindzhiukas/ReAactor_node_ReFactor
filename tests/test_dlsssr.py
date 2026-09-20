@@ -348,6 +348,76 @@ def _int29_partial_section_check():
             and unmapped_site == b"\xcd\x29")
 
 
+def _cxx_exception_check():
+    """Decode a synthetic MSVC C++ throw record, then two hostile ones.
+
+    Run 30 (2026-09-20) surfaced the first CATCHABLE failure ever: an MSVC
+    C++ exception (0xE06D7363) out of the snippet's EvaluateFeature. The
+    vectored handler now decodes it - ThrowInfo -> CatchableTypeArray ->
+    CatchableType -> TypeDescriptor (RTTI name) plus a best-effort message
+    from the thrown object. The decoder must be exact on a well-formed
+    record and must refuse to fault on a truncated one.
+    """
+    import struct
+
+    from ants.dlsssr import crashlog
+
+    def build(size=0x4000):
+        buf = (ctypes.c_char * size)()
+        base = ctypes.addressof(buf)
+        return buf, base
+
+    def put(buf, base, offset, data):
+        ctypes.memmove(base + offset, data, len(data))
+
+    buf, base = build()
+    # TypeDescriptor{vftable, spare, name[]}
+    put(buf, base, 0x100, b"\x00" * 16 + b".?AVinvalid_argument@std@@\x00")
+    # CatchableType{props, pad, pType}
+    put(buf, base, 0x200, struct.pack("<IIQ", 0, 0, base + 0x100))
+    # CatchableTypeArray{count, pad, ptrs[]}
+    put(buf, base, 0x300, struct.pack("<IIQ", 1, 0, base + 0x200))
+    # ThrowInfo{attributes, pUnwind, pForwardCompat, pCatchableTypeArray}
+    put(buf, base, 0x400, struct.pack("<I4xQQQ", 0, 0, 0, base + 0x300))
+    # thrown object: {vfptr, _Data{ptr, len}} + the what() text
+    put(buf, base, 0x500, struct.pack("<QQ", 0, base + 0x600))
+    put(buf, base, 0x600, b"DLSSNR: bad parameter: MVec\x00")
+
+    k32 = _fake_kernel32([(base, 0x4000)])
+    mem = crashlog._Mem(k32)
+    type_name, message = crashlog._cxx_type_and_message(
+        mem, base + 0x500, base + 0x400)
+    good = (type_name == ".?AVinvalid_argument@std@@"
+            and message == "DLSSNR: bad parameter: MVec")
+
+    # hostile: a ThrowInfo whose chain points outside the mapped region
+    type_name2, message2 = crashlog._cxx_type_and_message(
+        mem, 0, 0x90000000)          # unmapped throw_info
+    hostile_a = type_name2 is None and message2 is None
+
+    # hostile: the array claims a type but the descriptor is unmapped
+    put(buf, base, 0x700, struct.pack("<I4xQQQ", 0, 0, 0, base + 0x800))
+    put(buf, base, 0x800, struct.pack("<IIQ", 1, 0, 0x90000000))
+    type_name3, _ = crashlog._cxx_type_and_message(mem, 0, base + 0x700)
+    hostile_b = type_name3 is None
+
+    # the reporter writes a readable line for the same record
+    record = (ctypes.c_char * 128)()
+    rec_base = ctypes.addressof(record)
+    ctypes.memmove(rec_base, struct.pack(
+        "<IIQQI", 0xE06D7363, 0, 0, 0, 3), 28)
+    ctypes.memmove(rec_base + 32, struct.pack(
+        "<QQQ", 0x19930520, base + 0x500, base + 0x400), 24)
+    before = crashlog._state["cxx_count"]
+    crashlog._report_cxx(k32, rec_base)
+    report = crashlog.last_cxx_report() or ""
+    reported = (crashlog._state["cxx_count"] == before + 1
+                and "0xE06D7363" in report
+                and ".?AVinvalid_argument@std@@" in report
+                and "DLSSNR: bad parameter: MVec" in report)
+    return good and hostile_a and hostile_b and reported
+
+
 def _rig_evidence_check():
     """Run the evidence collector over a synthetic rig tree.
 
@@ -387,7 +457,14 @@ def _rig_evidence_check():
                                 "--out", str(out), "--comfy-root", str(root)])
         report = (out / "rig_evidence.txt").read_text()
         copied = sorted(p.name for p in (out / "files").iterdir())
+        # auto-detection + the mangled-argument guard (the owner's first run
+        # of this tool died on --repo "C:\\" - cmd eats the closing quote)
+        auto = (module.find_pack("", str(repo)) == str(repo)
+                and module.find_dlss_root("", str(repo)) == str(dlss))
+        guard = (module.clean_path('C:\\" --comfy-root C:') == ""
+                 and module.clean_path('"C:\\ComfyUI"') == "C:\\ComfyUI")
         return (code == 0
+                and auto and guard
                 and "2099-01-01.1" in report          # deployment marker
                 and "nvngx_dlssnr.dll" in report      # runtime inventory
                 and "sha256(first 8)" in report
@@ -782,6 +859,31 @@ def main():
     check("tools: resolver tolerates junk tokens (rig: the bat's own name "
           "reached int() and tracebacked - now skipped with [skip])",
           _resolver_tolerance_check())
+    node_src = (REPO / "ants" / "dlssnr" / "node.py").read_text()
+    nr_src = (REPO / "ants" / "dlsssr" / "nr.py").read_text()
+    check("crashlog: the C++ throw reporter is wired into the armed "
+          "first-chance handler and still lets the exception unwind",
+          "_report_cxx(k32, record)" in crashlog_src
+          and "EXCEPTION_CONTINUE_SEARCH" in crashlog_src
+          and "ANTS_NR_CXX_TRAP" in crashlog_src)
+    check("nr: an evaluate failure is reported as a loud [ANTs] error naming "
+          "the C++ throw and the black box, not as a raw Python traceback",
+          "last_cxx_report" in nr_src
+          and "NGX EvaluateFeature failed" in nr_src
+          and "crash_file_path" in nr_src)
+    check("node: a failed evaluate drops the native session (a half-dead "
+          "NGX feature is never evaluated into again)",
+          "self._close_native()" in node_src
+          and "half-dead feature" in node_src)
+    check("ngx: core log lines are captured, not echoed to the console by "
+          "default (run 30's console was ~90% NGX chatter; "
+          "ANTS_NR_NGX_ECHO=1 restores the echo)",
+          "ANTS_NR_NGX_ECHO" in ngx_src
+          and 'os.environ.get("ANTS_NR_NGX_ECHO") == "1"' in ngx_src)
+    check("crashlog: an MSVC C++ throw (0xE06D7363) is decoded to its RTTI "
+          "type + message and reported with the live stack; a hostile "
+          "ThrowInfo chain is refused instead of faulting",
+          _cxx_exception_check())
     check("tools: rig evidence collector finds the deployment marker, the "
           "staged runtime and the NGX log, and copies the logs out "
           "(one folder for the owner to send)",
