@@ -81,8 +81,15 @@ class _MBI(ctypes.Structure):
 
 
 _MEM_COMMIT = 0x1000
-_PAGE_NOACCESS = 0x01
 _PAGE_GUARD = 0x100
+# page protections we may READ through (PAGE_EXECUTE alone is NOT readable -
+# reading it faults just like an unmapped page)
+_READABLE_PAGES = (0x02,   # PAGE_READONLY
+                   0x04,   # PAGE_READWRITE
+                   0x08,   # PAGE_WRITECOPY
+                   0x20,   # PAGE_EXECUTE_READ
+                   0x40,   # PAGE_EXECUTE_READWRITE
+                   0x80)   # PAGE_EXECUTE_WRITECOPY
 
 
 class _Mem:
@@ -122,8 +129,10 @@ class _Mem:
             return 0, 0
         if mbi.State != _MEM_COMMIT:
             return 0, 0
-        if mbi.Protect & (_PAGE_GUARD | _PAGE_NOACCESS):
+        if mbi.Protect & _PAGE_GUARD:                  # guard page: refuse
             return 0, 0
+        if (mbi.Protect & 0xFF) not in _READABLE_PAGES:
+            return 0, 0                                # NOACCESS / EXECUTE-only
         return (mbi.BaseAddress or 0) + mbi.RegionSize, mbi.Protect
 
     def read(self, address, size):
@@ -139,6 +148,19 @@ class _Mem:
             out += ctypes.string_at(at, take)
             at += take
         return bytes(out)
+
+    def read_some(self, address, size):
+        """Whatever is readable from `address`, up to `size` bytes.
+
+        For C strings whose length is unknown: stopping at a region
+        boundary is fine (the NUL is normally well before it), while an
+        unmapped address simply yields nothing."""
+        address = int(address)
+        end, _ = self.region(address)
+        if not end or end <= address:
+            return b""
+        take = min(size, end - address)
+        return ctypes.string_at(address, take) if take > 0 else b""
 
     def u16(self, address):
         data = self.read(address, 2)
@@ -270,7 +292,16 @@ def _stack_chain(k32, skip=0, count=8):
     return out
 
 
-def _write_iat_ptr(k32, addr, value):
+def _write_iat_ptr(k32, addr, value, mem=None):
+    """Point one IAT slot at a trampoline. The slot address comes out of the
+    module's own import table, so verify it is committed AND readable before
+    asking for write access - VirtualProtect fails on an unmapped address
+    anyway, but a guard keeps the intent explicit (a diagnostic never writes
+    anywhere it has not verified)."""
+    if mem is None:
+        mem = _Mem(k32)
+    if mem.read(addr, 8) is None:
+        return False
     old = ctypes.c_uint32(0)
     protect = k32.VirtualProtect
     protect.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
@@ -359,7 +390,7 @@ def _patch_iat(k32, base, keep, mem=None):
                     original = u64(ft + i * 8)  # loader-resolved target
                     if original:
                         ptr = _term_stub(k32, fname, original, keep)
-                        if _write_iat_ptr(k32, base + ft + i * 8, ptr):
+                        if _write_iat_ptr(k32, base + ft + i * 8, ptr, mem):
                             patched.append(f"{dll}!{fname}")
             i += 1
         d += 1

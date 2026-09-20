@@ -81,8 +81,29 @@ SLOT_GET_POINTER = 15
 SLOT_RESET = 16
 
 
-def _read_cstring(ptr):
-    return ctypes.string_at(ptr).decode("utf-8", errors="ignore")
+def _read_cstring(ptr, limit=96):
+    """Decode a runtime-supplied parameter name.
+
+    The pointer comes from the NGX runtime, so it is verified with
+    VirtualQuery before being read (bounded - a name is short): an
+    unreadable pointer must yield "" instead of taking the process down,
+    the same class of fault that killed the run-28 attempt inside the
+    diagnostics.
+    """
+    if not ptr:
+        return ""
+    try:
+        from .crashlog import _Mem, _kernel32
+        k32 = _kernel32()
+        if k32 is not None:
+            raw = _Mem(k32).read_some(int(ptr), limit)
+            if not raw:
+                return ""
+            return raw.split(b"\x00", 1)[0].decode("utf-8", errors="ignore")
+    except Exception:
+        pass
+    return ctypes.string_at(ptr, limit).split(b"\x00", 1)[0].decode(
+        "utf-8", errors="ignore")
 
 
 class OwnParameterObject:

@@ -44,9 +44,11 @@ def _fake_kernel32(regions, protect=0x04):
             addr = address.value if hasattr(address, "value") else int(address)
             for base, size in self.regions:
                 if base <= addr < base + size:
+                    # like the real API: the region's own base and FULL size
+                    # (not the remainder from the queried address)
                     mbi.BaseAddress = base
                     mbi.AllocationBase = base
-                    mbi.RegionSize = base + size - addr
+                    mbi.RegionSize = size
                     mbi.State = 0x1000                      # MEM_COMMIT
                     mbi.Protect = protect
                     return ctypes.sizeof(mbi)
@@ -258,6 +260,55 @@ def _nr_staging_rule_check():
     # the already-canonical selection stays exactly where it lives
     ok = ok and Path(nr_discovery.stage_nr_runtime(str(sibling))) == folder
     return ok
+
+
+def _mem_guard_check():
+    """The guard must refuse what VirtualQuery cannot vouch for: unmapped,
+    NOACCESS, GUARD and EXECUTE-only pages (PAGE_EXECUTE is not readable -
+    reading it faults exactly like an unmapped page)."""
+    import ctypes
+
+    from ants.dlsssr import crashlog
+
+    buf = ctypes.create_string_buffer(b"\xcd\x29" + b"x" * 62)
+    base = ctypes.addressof(buf)
+    expectations = ((0x04, True), (0x20, True), (0x02, True), (0x40, True),
+                    (0x10, False), (0x01, False), (0x104, False), (0x00, False))
+    ok = True
+    for protect, readable in expectations:
+        mem = crashlog._Mem(_fake_kernel32([(base, 64)], protect=protect))
+        ok = ok and (mem.read(base, 8) is not None) == readable
+    # a read spanning the end of the mapped region is refused, not clipped
+    mem = crashlog._Mem(_fake_kernel32([(base, 64)]))
+    ok = ok and mem.read(base + 60, 8) is None and mem.read(base + 56, 8) == \
+        bytes(ctypes.string_at(base + 56, 8))
+    return ok
+
+
+def _own_params_name_guard_check():
+    """The own-parameter object decodes parameter names the RUNTIME passed
+    us: an unreadable pointer must come back as "" (VirtualQuery-guarded)
+    instead of faulting inside a ctypes call."""
+    import ctypes
+
+    from ants.dlsssr import crashlog, parameters
+
+    buf = ctypes.create_string_buffer(b"DLSSNR.Width\x00extra")
+    good = parameters._read_cstring(ctypes.addressof(buf))
+    saved = crashlog._kernel32
+    crashlog._kernel32 = lambda: _fake_kernel32([])     # nothing is mapped
+    try:
+        bad = parameters._read_cstring(0x7FFF00000000)
+    finally:
+        crashlog._kernel32 = saved
+    crashlog._kernel32 = lambda: _fake_kernel32(
+        [(ctypes.addressof(buf), len(buf))])
+    try:
+        mapped = parameters._read_cstring(ctypes.addressof(buf))
+    finally:
+        crashlog._kernel32 = saved
+    return (good == "DLSSNR.Width" and bad == ""
+            and mapped == "DLSSNR.Width")
 
 
 def _resolver_tolerance_check():
@@ -583,6 +634,12 @@ def main():
     check("crashlog: IAT termination tracer walks imports and patches the "
           "termination APIs (flat-PE fixture, fake kernel32)",
           _iat_tracer_fixture_check())
+    check("params: runtime-supplied parameter names are decoded through the "
+          "guard (unreadable pointer -> empty, never a fault)",
+          _own_params_name_guard_check())
+    check("crashlog: the VirtualQuery guard refuses unmapped / NOACCESS / "
+          "GUARD / EXECUTE-only pages and never reads past a region",
+          _mem_guard_check())
     check("crashlog: int29 scanner converts CD29 sites in executable "
           "sections only (synthetic PE)",
           _int29_scanner_fixture_check())
