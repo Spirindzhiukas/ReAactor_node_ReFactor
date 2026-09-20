@@ -241,6 +241,25 @@ def main():
               in node_src
           and "def session_cache_enabled" in node_src)
 
+    # ---- pre-denoise: the SR stage runs on EVERY engine ----
+    from ants.dlssnr.node import (PRE_DENOISE_MODEL, PRE_DENOISE_OFF,
+                                  PRE_DENOISE_SR, pre_denoise_action)
+    check("pre-denoise: SR mode is the stage by itself (no model), OFF and a "
+          "zero strength switch it off, model mode needs the wire",
+          pre_denoise_action(PRE_DENOISE_SR, 1.0, False) == "sr"
+          and pre_denoise_action(PRE_DENOISE_SR, 0.0, False) is None
+          and pre_denoise_action(PRE_DENOISE_MODEL, 1.0, False) is None
+          and pre_denoise_action(PRE_DENOISE_MODEL, 1.0, True) == "model"
+          and pre_denoise_action(PRE_DENOISE_OFF, 1.0, True) is None)
+    check("pre-denoise: the SR stage is wired into all three engine paths "
+          "(native, legacy CUDA, legacy host) and no longer claims to need the "
+          "native engine",
+          "SR pre-denoise needs the native NGX engine" not in node_src
+          and "_sr_denoise_frame(frame, do_reset" in node_src
+          and "_sr_denoise_np(frame_np, do_reset)" in node_src
+          and "def _sr_denoise_np" in node_src
+          and "sr_stage=pre_denoise_mode == PRE_DENOISE_SR" in node_src)
+
     # ---- dispatch ----
     check("apply_bridge dispatch + off",
           np.allclose(apply_bridge(frame, "off"), frame)

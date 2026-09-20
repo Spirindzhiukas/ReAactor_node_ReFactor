@@ -143,6 +143,18 @@ def main():
         check("plan: unconnected chosen slot fails loudly naming the input",
               "[ANTs]" in str(exc) and "denoise_model" in str(exc))
 
+    # ---- SR pre-denoise: no model needed, the strength is the gate ----
+    plan4 = sc.build_pass_plan(sched, models, main_settings=main_settings,
+                               main_denoise_model=None, main_denoise_strength=0.8,
+                               sr_stage=True)
+    check("plan: SR pre-denoise mode keeps the strength gate without a model",
+          all(spec["denoise_model"] is None and spec["denoise_strength"] == 0.8
+              for spec in plan4))
+    plan5 = sc.build_pass_plan(sched, models, main_settings=main_settings,
+                               main_denoise_model=None, main_denoise_strength=0.8)
+    check("plan: without SR mode a missing model still means no denoise stage",
+          all(spec["denoise_strength"] == 0.0 for spec in plan5))
+
     # ---- describe ----
     check("describe: one-line summary",
           sc.describe(sc.default_schedule(2)) == "2 pass(es): Cinematic -> Natural")

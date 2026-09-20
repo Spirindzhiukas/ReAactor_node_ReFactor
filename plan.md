@@ -308,10 +308,11 @@ python and never registers callbacks.
 - [ ] **~50-prompt soak with `ANTS_NR_SOAK=1`** (item 2): process handles + torch VRAM should stay
       flat. Per-prompt NGX re-init (~1 s - ComfyUI makes a new node object per prompt) is expected;
       `ANTS_NR_SESSION_CACHE=1` A/Bs reuse across prompts (default OFF).
-- [ ] **Still-image depth A/B** (item 4): today `DLSSNR.Depth` is zero-filled, and the native node has
-      no depth socket - this needs an OPTIONAL depth-map input (default absent = flat zero, so existing
-      workflows are untouched) before it can be A/B'd. Implement on owner request, then compare flat vs
-      an estimated depth map.
+- [ ] **Owner A/B of the SR pre-denoise stage** (owner request, 2026-09-21): mode
+      `SR (DLSS denoise)` now actually runs a 1:1 DLAA pass per frame BEFORE the engine, on BOTH
+      engines (it is our `ants/dlsssr` host, not part of either engine) - needs `nvngx_dlss*.dll` in
+      `models/DLSS/SR/`. Compare OFF vs SR on the same prompt, native first, then legacy (the legacy
+      case is the first time our SR host and the neuroframe engine share one process).
 - [x] Literal-name staging rule stays (item 3): canonical `nvngx_dlssnr.dll` staged copy + the
       sibling-name warning on stage - no change needed.
 - [ ] Fix any owner-reported issues from the test round above (priority over new features).
@@ -369,6 +370,10 @@ python and never registers callbacks.
 
 - [ ] Eyes restoration (detection-only findings in `docs/RESEARCH_ultralytics_eye_fix.md` §8).
 - [ ] inswapper_128_fp16 work (topic closed).
+- [ ] Still-image depth A/B (owner decision 2026-09-21): our inputs are finished renders / AI
+      images, and no render-pass-grade depth exists outside render-time apps - so `DLSSNR.Depth`
+      stays zero-filled. Revisit only if a real depth source appears (needs an optional depth
+      socket on the native node first).
 
 ## ✅ Recently completed (detail lives in memory.md / git log)
 
@@ -383,4 +388,9 @@ python and never registers callbacks.
       `ANTS_NR_SESSION_CACHE` shipped with this docs pass (`HOST_BUILD` 2026-09-21.3).
 - [x] `cb7c572` — debug layer (`ANTS_D3D12_DEBUG_LAYER`), the docs-cited rule, the flags matrix probe
       (exit 14) and the test-side fixes that keep it all pinned.
+- [x] SR pre-denoise made real and engine-independent (owner request): one pure rule
+      (`pre_denoise_action`) drives the pass list and all three engine paths; SR mode needs no model
+      (strength is the gate - the old builders zeroed it without a model, which had made the stage
+      inert); the legacy fallback warning and the schedule-path `StopIteration` log line are gone;
+      `HOST_BUILD` `2026-09-21.4`.
 - [x] `4e483f1` — `ALLOW_UNORDERED_ACCESS = 0x4` (the one-bit root cause of the whole native saga).

@@ -244,7 +244,8 @@ def parse_schedule(data, passes: int, use_per_pass_settings: bool = False,
 
 
 def build_pass_plan(schedule: dict, scheduler_models, main_settings: dict,
-                    main_denoise_model, main_denoise_strength: float):
+                    main_denoise_model, main_denoise_strength: float,
+                    sr_stage: bool = False):
     """Resolve a canonical schedule into concrete per-pass engine-call specs.
 
     ``scheduler_models`` is the scheduler node's optional-input list (slots
@@ -254,6 +255,11 @@ def build_pass_plan(schedule: dict, scheduler_models, main_settings: dict,
     the style cycles. Denoise falls back to the main node's model/strength
     whenever the schedule does not override it for that pass. Missing model
     for a chosen slot fails loudly, naming the empty scheduler input.
+
+    ``sr_stage`` says the pre-denoise stage is the 1:1 DLAA SR host, which
+    needs NO model - the strength is then the on/off gate (the enhancer passes
+    ``pre_denoise_mode == PRE_DENOISE_SR``), so the main widget value survives
+    instead of collapsing to 0 for a missing model.
     """
     count = schedule["passes"]
     plan = []
@@ -284,7 +290,8 @@ def build_pass_plan(schedule: dict, scheduler_models, main_settings: dict,
             "style": STYLES[schedule["styles"][i]],
             "settings": merged,
             "denoise_model": model,
-            "denoise_strength": float(strength) if model is not None else 0.0,
+            "denoise_strength": float(strength)
+            if (model is not None or sr_stage) else 0.0,
         })
     return plan
 

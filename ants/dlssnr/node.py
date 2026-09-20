@@ -203,6 +203,25 @@ def soak_line(uses=None):
                               else "no data on this host")
 
 
+# --- pre-denoise stage selection (pure; exactly the rule the loop uses) ------
+def pre_denoise_action(mode, strength, has_model):
+    """What the pre-denoise stage does for ONE pass: "sr", "model" or None.
+
+    SR mode needs no model - the 1:1 DLAA pass through our own SR host IS the
+    stage, and the strength is only its on/off gate. Model mode needs the wired
+    model. OFF, or a strength of ~0, disables the stage for that pass.
+
+    Engine-independent by construction: the SR stage runs BEFORE whichever NR
+    engine is selected (native NGX or the legacy neuroframe engine), because it
+    is our own SR host and not part of either engine.
+    """
+    if mode == PRE_DENOISE_OFF or float(strength) <= 1e-4:
+        return None
+    if mode == PRE_DENOISE_SR:
+        return "sr"
+    return "model" if has_model else None
+
+
 # Cross-prompt session cache: key -> (session, gpu). Only touched when
 # ANTS_NR_SESSION_CACHE=1. A dict, not one slot, so a workflow that runs two
 # sizes (or two engines) never has ONE node close the OTHER node's feature:
@@ -266,7 +285,9 @@ class ReFactorDLSS5Enhancer:
                 "pre_denoise_mode": ([PRE_DENOISE_OFF, PRE_DENOISE_SR, PRE_DENOISE_MODEL],
                                      {"default": PRE_DENOISE_SR,
                                       "tooltip": "What runs as the pre-SR denoise pass: the ANTs DLSS SR host "
-                                                 "(1:1 DLAA with the chosen sr_dll_version + sr_model), the "
+                                                 "(1:1 DLAA with the chosen sr_dll_version + sr_model; runs on BOTH "
+                                                 "engines - it is our host, not the engine's; needs "
+                                                 "nvngx_dlss*.dll in models/DLSS/SR/), the "
                                                  "wired upscale/denoise model (SCUNet-style), or OFF - no "
                                                  "pre-denoise stage at all, even with a model connected and "
                                                  "pre_denoise_strength above 0 (the widget greys out). "
@@ -392,6 +413,9 @@ class ReFactorDLSS5Enhancer:
             except Exception:
                 pass
             self.native_gpu = None
+        # the SR pre-denoise sessions live on that same device - drop them too,
+        # or a later frame would reuse a feature on a closed device
+        self._sr_sessions.clear()
         self.native_key = None
 
     def load_bridge(self, nr_choice: str, engine: str = ENGINE_LEGACY):
@@ -563,11 +587,23 @@ class ReFactorDLSS5Enhancer:
             self._sr_sessions[key] = sess
         return sess
 
-    def _sr_denoise_frame(self, frame_t, reset):
-        """One 1:1 DLAA pass over a torch frame; returns the denoised frame."""
+    def _sr_denoise_frame(self, frame_t, reset, device=None):
+        """One 1:1 DLAA pass over a torch frame; returns the denoised frame.
+
+        ``device`` is where the result lands (default: the node's torch
+        device). The legacy CUDA path passes its own ``cuda:<ordinal>`` and the
+        host-staging path passes CPU, so neither bounces the frame through a
+        device it does not use.
+        """
         payload, w, h = self._frame_to_rgba8(frame_t)
         out = self._sr_session_for(w, h).evaluate(payload, reset=reset)
-        return self._rgba8_to_frame(out, w, h, self.device)
+        return self._rgba8_to_frame(out, w, h,
+                                    self.device if device is None else device)
+
+    def _sr_denoise_np(self, frame_np, reset):
+        """The SR stage for the numpy (legacy host-staging) path: numpy in, out."""
+        t = torch.from_numpy(np.ascontiguousarray(frame_np))
+        return self._sr_denoise_frame(t, reset, device="cpu").numpy()
 
     @staticmethod
     def _frame_to_rgba8(frame_t):
@@ -634,9 +670,13 @@ class ReFactorDLSS5Enhancer:
             logger.status("[ANTs] pre-denoise is OFF - nothing runs before the "
                           "engine (a connected denoise_model and "
                           "pre_denoise_strength are ignored for this run).")
-        elif pre_denoise_mode == PRE_DENOISE_SR and not native:
-            logger.warning("[ANTs] SR pre-denoise needs the native NGX engine - "
-                           "using the denoise_model input for this run.")
+        elif pre_denoise_mode == PRE_DENOISE_SR:
+            # The 1:1 DLAA stage is OUR SR host, not a part of the NR engine,
+            # so it runs before either engine - it only needs an SR runtime
+            # (a loud error names models/DLSS/SR if there is none).
+            logger.status("[ANTs] pre-denoise: SR mode - the 1:1 DLAA pass runs "
+                          "before the engine on ANY engine (needs nvngx_dlss*.dll "
+                          "in models/DLSS/SR/).")
 
         settings = {
             "style": nr_schedule_lib.STYLES[style], "intensity": intensity,
@@ -660,13 +700,16 @@ class ReFactorDLSS5Enhancer:
                 nr_schedule["schedule"], nr_schedule.get("denoise_models", ()),
                 main_settings=settings,
                 main_denoise_model=denoise_model,
-                main_denoise_strength=float(pre_denoise_strength))
+                main_denoise_strength=float(pre_denoise_strength),
+                sr_stage=pre_denoise_mode == PRE_DENOISE_SR)
             logger.status(f"ANTs DLSS5 NR Schedule engaged: {nr_schedule_lib.describe(nr_schedule['schedule'])}")
         else:
             plan = [{
                 "style": settings["style"], "settings": settings,
                 "denoise_model": denoise_model,
-                "denoise_strength": float(pre_denoise_strength) if denoise_model is not None else 0.0,
+                "denoise_strength": float(pre_denoise_strength)
+                if (denoise_model is not None
+                    or pre_denoise_mode == PRE_DENOISE_SR) else 0.0,
             }]
 
         enhanced_batch = []
@@ -728,23 +771,25 @@ class ReFactorDLSS5Enhancer:
 
         denoise_passes = [] if pre_denoise_mode == PRE_DENOISE_OFF else [
             i + 1 for i, spec in enumerate(plan)
-            if (spec["denoise_model"] is not None
-                or pre_denoise_mode == PRE_DENOISE_SR)
-            and spec["denoise_strength"] > 1e-4]
+            if pre_denoise_action(pre_denoise_mode, spec["denoise_strength"],
+                                 spec["denoise_model"] is not None) is not None]
         if denoise_passes:
-            if pre_denoise_mode == PRE_DENOISE_SR and native:
+            if pre_denoise_mode == PRE_DENOISE_SR:
+                engine_name = "native NGX" if native else "legacy"
                 logger.status(f"DLSS5 pre-SR denoise on pass(es) {denoise_passes}: "
-                              f"ANTs SR host (1:1 DLAA, dll '{sr_dll_version}', "
+                              f"ANTs SR host, 1:1 DLAA before the {engine_name} "
+                              f"engine (dll '{sr_dll_version}', "
                               f"model '{sr_model}')")
             else:
-                first = next(spec["denoise_model"] for spec in plan
-                             if spec["denoise_model"] is not None)
-                scale = getattr(first, "scale", 1)
-                logger.status(f"DLSS5 pre-SR denoise on pass(es) {denoise_passes}: "
-                              f"{scale}x model from the denoise_model input")
-                if scale != 1:
-                    logger.status("DLSS5 pre-SR denoise note: non-1x model connected - its output is "
-                                  "resized back to the input resolution before the engine.")
+                first = next((spec["denoise_model"] for spec in plan
+                              if spec["denoise_model"] is not None), None)
+                if first is not None:
+                    scale = getattr(first, "scale", 1)
+                    logger.status(f"DLSS5 pre-SR denoise on pass(es) {denoise_passes}: "
+                                  f"{scale}x model from the denoise_model input")
+                    if scale != 1:
+                        logger.status("DLSS5 pre-SR denoise note: non-1x model connected - its "
+                                      "output is resized back to the input resolution before the engine.")
 
         bridge_kwargs = dict(
             diffuse_white_nits=float(diffuse_white_nits),
@@ -817,17 +862,13 @@ class ReFactorDLSS5Enhancer:
 
                 d_model = pass_spec["denoise_model"]
                 d_strength = pass_spec["denoise_strength"]
-                if pre_denoise_mode == PRE_DENOISE_OFF:
-                    denoise_this = False
-                elif pre_denoise_mode == PRE_DENOISE_SR:
-                    denoise_this = d_strength > 1e-4  # SR mode: no model needed
-                else:
-                    denoise_this = d_model is not None and d_strength > 1e-4
+                action = pre_denoise_action(pre_denoise_mode, d_strength,
+                                            d_model is not None)
 
                 if native:
-                    if denoise_this and pre_denoise_mode == PRE_DENOISE_SR:
+                    if action == "sr":
                         frame_t = self._sr_denoise_frame(frame_t, do_reset)
-                    elif denoise_this:
+                    elif action == "model":
                         frame_t = self._pre_denoise_frame(frame_t, d_model, d_strength)
                     look = {"style": pass_spec["style"], **pass_spec["settings"]}
                     sess = self._native_session_for(int(frame_t.shape[1]),
@@ -867,7 +908,10 @@ class ReFactorDLSS5Enhancer:
                         logger.status("%s", soak_line(
                             getattr(sess, "evaluates", None)))
                 elif use_cuda:
-                    if denoise_this:
+                    if action == "sr":
+                        frame = self._sr_denoise_frame(frame, do_reset,
+                                                       device=cuda_dev)
+                    elif action == "model":
                         frame = self._pre_denoise_frame(frame, d_model, d_strength)
                     if not frame.is_contiguous():
                         frame = frame.contiguous()
@@ -884,7 +928,9 @@ class ReFactorDLSS5Enhancer:
                     torch.cuda.synchronize(cuda_dev)
                     frame = dest
                 else:
-                    if denoise_this:
+                    if action == "sr":
+                        frame_np = self._sr_denoise_np(frame_np, do_reset)
+                    elif action == "model":
                         frame_np = self._pre_denoise_frame(
                             torch.from_numpy(frame_np), d_model, d_strength).numpy()
                     dest_np = cpu_bufs[pass_idx % len(cpu_bufs)]

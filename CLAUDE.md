@@ -96,6 +96,13 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
    sentences; `ANTS_NR_SOAK=1` prints one handles+VRAM line per prompt (the ~50-prompt soak);
    `ANTS_NR_SESSION_CACHE=1` keeps the size-keyed NGX session across prompts - the DEFAULT is the
    per-prompt init the working run used, so do not flip it without rig evidence.
+6. **The pre-denoise SR stage is engine-independent** (owner request, 2026-09-21): it is OUR
+   `ants/dlsssr` 1:1 DLAA host, run before whichever NR engine is selected. One selection rule,
+   `pre_denoise_action(mode, strength, has_model)` -> "sr" / "model" / None, drives both the pass
+   list and all three engine paths (native, legacy CUDA, legacy host staging). SR mode needs NO
+   model - the strength is only the gate - so never collapse its strength to 0 for a missing
+   `denoise_model`, and never re-gate the stage on the engine. It needs `nvngx_dlss*.dll` in
+   `models/DLSS/SR/` (loud error names the path if missing).
 
 ## Engineering conventions
 

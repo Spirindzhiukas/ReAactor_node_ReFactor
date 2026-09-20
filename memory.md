@@ -7,13 +7,13 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
 
 - **Version:** v1.1.0-alpha1 · branch: `arena/01a0bccd-reaactor-node-refactor` (session branch;
   `main` moves via PR merge)
-- **Head at last update:** the native NGX host **RIG-VERIFIED** — the UAV flag byte fix (`4e483f1`),
-  the documented rule + D3D12 debug layer (`cb7c572`), and the first-frame output smoke test +
-  `ANTS_NR_SOAK` soak line + opt-in `ANTS_NR_SESSION_CACHE` (this commit; `HOST_BUILD`
-  `2026-09-21.3`)
-- **Suite:** ALL GREEN — 461 checks + 2 scanners + smoke_import (22 nodes)
+- **Head at last update:** the native NGX host **RIG-VERIFIED** — UAV flag byte fix (`4e483f1`),
+  documented rule + D3D12 debug layer (`cb7c572`), first-frame output smoke test + `ANTS_NR_SOAK` +
+  opt-in `ANTS_NR_SESSION_CACHE` (`a3f2c47`), and the SR pre-denoise stage alive on BOTH engines
+  (`HOST_BUILD` `2026-09-21.4`)
+- **Suite:** ALL GREEN — 465 checks + 2 scanners + smoke_import (22 nodes)
   (`test_dlssnr_bridge` 110, `test_dlsssr` 108, `test_native_flow` 58,
-  `test_runtime_surface` 58, `test_nr_schedule` 33, `test_upres` 27,
+  `test_runtime_surface` 58, `test_nr_schedule` 35, `test_upres` 27,
   `test_pure_helpers` 26, `test_facerestore_routing` 21, `test_swapper_state`
   13, `test_detection_state_dict` 7)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
@@ -108,7 +108,7 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | test_dlsssr.py | 108 | NGX host: D3D12 flag table + debug-layer wire bytes, shim/params ABI, SR/NR sessions, probe bat |
 | test_native_flow.py | 58 | native NR flow: stub thunk addresses, create/evaluate contract, loud refusals |
 | test_runtime_surface.py | 58 | 22-node surface, ANTs branding, pre-pass contract, OPTIONS socket |
-| test_nr_schedule.py | 33 | schedule parse/validate/pad, plan bypass + denoise fallback, loud slot errors, node surface |
+| test_nr_schedule.py | 35 | schedule parse/validate/pad, plan bypass + denoise fallback (incl. the SR-stage gate), loud slot errors, node surface |
 | test_upres.py | 27 | upRes/upscale paths |
 | test_pure_helpers.py | 26 | pure helpers + DLSS discovery policy |
 | test_facerestore_routing.py | 21 | restore routing incl. e2e loud-failure |
@@ -117,7 +117,7 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | smoke_import.py | — | import + 22-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 461 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.3`; 22 nodes; package `ants/`).**
+**Total: 465 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.4`; 22 nodes; package `ants/`).**
 Sandbox venv: numpy, opencv-python-headless, pillow, pyflakes, pefile (NO torch — stub harness only).
 huggingface.co is TLS-blocked from the sandbox (DLL zips can't be downloaded there — verify engine
 versions on the owner rig).
@@ -1169,3 +1169,35 @@ versions on the owner rig).
     one workflow never close each other's feature (pinned by test).
 - Suite: **461 checks** (dlssnr_bridge 110, dlsssr 108, native_flow 58, runtime_surface 58,
   nr_schedule 33).
+
+### 2026-09-21 (owner request) — the SR pre-denoise stage now RUNS, and it runs on BOTH engines
+- **What was wrong** (three invisible things): (1) the stage was INERT - both plan builders
+  (`ants/dlssnr/node.py` single pass, `schedule.build_pass_plan`) wrote `denoise_strength = 0.0`
+  whenever no denoise MODEL was connected, and the SR gate is `strength > 1e-4`; picking
+  "SR (DLSS denoise)" - the DEFAULT - with no model therefore ran nothing, which is why the SR stage
+  was never A/B-able; (2) on a legacy engine the node logged "SR pre-denoise needs the native NGX
+  engine - using the denoise_model input for this run" and fell back to the model path; (3) with a
+  schedule, the pass-list log line then ran `next(spec["denoise_model"] ...)` without a default - a
+  legacy run with a strength would have raised StopIteration there.
+- **Implemented**: ONE selection rule, `pre_denoise_action(mode, strength, has_model)` -> "sr" /
+  "model" / None, used by the pass list AND all three engine paths (native, legacy CUDA, legacy host
+  staging). SR mode needs no model (strength is only the gate); the stage is OUR `ants/dlsssr` 1:1
+  DLAA host, so it runs before whichever NR engine is selected. `build_pass_plan(..., sr_stage=...)`
+  keeps the main widget strength so schedules carry the gate too; `_sr_denoise_frame` takes an
+  explicit output device (`cuda:<ordinal>` on the CUDA path, CPU on host staging via the new
+  `_sr_denoise_np`); `_close_native` drops the SR sessions together with the device they live on (a
+  session must never outlive its device); the pass-list line is engine-explicit ("1:1 DLAA before the
+  native NGX / legacy engine").
+- **Behaviour to expect on the rig**: with the default mode (SR) the 1:1 DLAA pass now RUNS on every
+  prompt, on both engines. It needs `nvngx_dlss*.dll` in `models/DLSS/SR/` (a loud error names the
+  path if missing). A/B = mode OFF vs SR; strength 0 also disables it by the same rule.
+- **Untested on the rig yet**: the SR stage has never run inside a prompt, and on the legacy engine
+  our SR session now shares the process with the neuroframe engine's own NGX session. First rig run:
+  small frame, native first, then legacy; if the legacy engine misbehaves with the stage ON, mode OFF
+  reproduces the previous behaviour exactly.
+- **Still-image depth A/B: TABLED (owner, same message)** - our inputs are finished renders /
+  AI-generated images, and no render-pass-grade depth exists outside render-time apps (which already
+  ship their own DLSS5 NR path). Revisit only if a real depth source appears; it would need an
+  optional depth socket on the native node first.
+- Suite: **465 checks** (dlssnr_bridge 112, dlsssr 108, native_flow 58, runtime_surface 58,
+  nr_schedule 35).

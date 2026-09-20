@@ -640,7 +640,14 @@ def _predenoise_off_check():
             and modes.index(nr_node.PRE_DENOISE_OFF) == 0
             and "pre_denoise_mode == PRE_DENOISE_OFF" in src
             and "denoise_passes = [] if pre_denoise_mode == PRE_DENOISE_OFF" in src
-            and "denoise_this = False" in src
+            # the selection rule itself (2026-09-21): OFF never runs, whatever
+            # is wired, and SR mode runs with NO model - the two halves of the
+            # owner's request that the old `denoise_this` ladder got wrong
+            and nr_node.pre_denoise_action(nr_node.PRE_DENOISE_OFF, 1.0, True) is None
+            and nr_node.pre_denoise_action(nr_node.PRE_DENOISE_OFF, 1.0, False) is None
+            and nr_node.pre_denoise_action(nr_node.PRE_DENOISE_SR, 1.0, False) == "sr"
+            and nr_node.pre_denoise_action(nr_node.PRE_DENOISE_MODEL, 1.0, False) is None
+            and "action = pre_denoise_action(" in src
             and "stage OFF" in js
             and '"pre_denoise_strength"' in js
             and "modeDisabled" in js)
