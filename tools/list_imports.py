@@ -1,4 +1,4 @@
-"""List a PE dll's imported functions, flagging termination and NGX APIs.
+"""List a PE dll's imported functions (every name), flagging termination/NGX APIs.
 
 Static analysis ONLY - the target is parsed as a file, never executed:
 
@@ -98,18 +98,17 @@ def main(argv):
         return 1
     total = sum(len(v) for v in table.values())
     print(f"[ANTs] {path}: {len(table)} imported dlls, {total} functions")
-    hits = 0
     for dll, names in sorted(table.items()):
         interesting = [n for n in names
                        if n in _TERM or n.startswith("NVSDK_NGX")
                        or (dll.lower().startswith("nvcuda") and n.startswith("cu"))]
-        flags = [n + ("  <== TERMINATION API" if n in _TERM else "")
-                 for n in interesting]
-        if show_all or flags:
-            print(f"  {dll}: {len(names)} imports")
-            for f in (flags if (show_all or flags) else []):
-                print(f"      {f}")
-        hits += len([n for n in names if n in _TERM])
+        if not (show_all or interesting):
+            continue
+        print(f"  {dll}: {len(names)} imports")
+        for n in names:
+            if show_all or n in interesting:
+                mark = "  <== TERMINATION API" if n in _TERM else ""
+                print(f"      {n}{mark}")
     term = sorted({n for names in table.values() for n in names if n in _TERM})
     if term:
         print(f"[ANTs] termination APIs imported: {', '.join(term)}")

@@ -50,6 +50,23 @@ NVIDIA NGX core + snippet
 | nvngx_dlssg.dll | 4 | 126 | TerminateProcess, ExitProcess | **none** |
 | neuroframe_engine_frame_interpolation.dll | 17 | 110 | terminate (CRT) | **none** |
 
+### 2b. The --all listings: dll-by-dll decode
+
+| dll | non-kernel32 static imports | reading |
+|---|---|---|
+| neuroframe_engine_neural_rendering (engine) | d3d12:1, dxgi:1, D3DCOMPILER_47:1, ole32:1 | builds its **own D3D12 device** (D3D12CreateDevice) on its **own DXGI adapter enum**; compiles **shaders** (D3DCompile); CoInitializeEx. **No CRT dlls** (statically linked CRT) and **no nvcuda** => the engine's CUDA (every result struct has cuda_result) is loaded **dynamically**. His host = a standalone device owner, exactly like ours. |
+| nvngx_dlssnr (snippet) | ADVAPI32:3, USER32:1, VERSION:3 | the classic **gate machinery**: VERSION.dll = GetFileVersionInfo family (**driver/file-version gating by metadata**), ADVAPI32 = registry reads (driver/NGX settings), USER32 single import (MessageBoxW candidate — a *blocking popup* failure mode, or a system-metrics query). 120 kernel32 imports = the dynamic-resolution surface (LoadLibrary/GetProcAddress/...). |
+| nvngx_dlssg | ADVAPI32:3, USER32:1, VERSION:3 | same gate shape as dlssnr. |
+| neuroframe_caller | (none — kernel32 only) | pure dynamic dispatch shim, 69 kernel32 imports. |
+| neuroframe_engine_frame_interpolation | ADVAPI32:3, USER32:1, d3d12:1, dxgi:1, D3DCOMPILER_47:1, MSVCP140/VCRUNTIME140(+1)/api-ms-crt-* (dynamic CRT) | the only CRT-dynamically-linked binary (MSVC /MD build); its only termination import is CRT `terminate`. |
+
+- Earlier finding refined: "0 GPU-gate strings in the 158 MB runtime" stands,
+  and now we can see the gate *machinery*: the snippet ships VERSION +
+  ADVAPI32 + USER32 plumbing — environment checks done via **file-version
+  queries and registry values**, which leave no readable strings.
+- The NR engine statically binds d3d12/dxgi (device creation) but resolves
+  its NGX *and* CUDA dynamically — one binary, two dynamic backends.
+
 - **No binary imports any NVSDK_NGX_* function.** Engine (92) and caller (69)
   are kernel32-dominated import tables ⇒ NGX binding is **dynamic**
   (`LoadLibrary` + `GetProcAddress` at runtime). Static import analysis
