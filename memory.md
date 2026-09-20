@@ -777,7 +777,7 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - **Collector**: the audit now prints `AUTO would load in <category>/: <name>
   (<version>)` for every category and annotates each KEEP line with the
   version it parsed - the owner sees which build wins, in his own report.
-- Suite: **385 checks** (dlsssr 87, dlssnr_bridge 92, native_flow 35) +
+- Suite: **397 checks** (dlsssr 89, dlssnr_bridge 99, native_flow 38) +
   pyflakes/scope/smoke green.
 
 ### 2026-09-20 (run 18:16/18:25) — CUDA regression diagnosed + fixed; the native host's command list isolated
