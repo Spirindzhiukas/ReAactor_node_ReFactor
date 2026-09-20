@@ -128,6 +128,58 @@ def _resolver_tolerance_check():
             and "0x1025 -> NVSDK_NGX_D3D12_EvaluateFeature_C" in out)
 
 
+def _imports_probe_check():
+    """Build a PE importing KERNEL32!{ExitProcess, NVSDK_NGX_CUDA_Evaluate}
+    and verify tools/list_imports.py flags the termination API statically."""
+    import struct
+    import subprocess
+    import tempfile
+
+    tool = REPO / "tools" / "list_imports.py"
+    buf = bytearray(0x2000)
+
+    def put(off, data):
+        buf[off:off + len(data)] = data
+
+    def w32(off, v):
+        put(off, struct.pack("<I", v))
+
+    def w64(off, v):
+        put(off, struct.pack("<Q", v))
+
+    put(0, b"MZ")
+    put(0x3C, struct.pack("<I", 0x80))
+    put(0x80, b"PE\x00\x00")
+    put(0x84, struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 240, 0x2022))
+    opt = 0x98
+    put(opt, struct.pack("<HBBIIIIIQII", 0x20B, 14, 0, 0x200, 0, 0, 0x1000,
+                         0x1000, 0x400000, 0x1000, 0x200))
+    put(opt + 120, struct.pack("<II", 0x1300, 0x100))
+    put(opt + 240, b".rdata\x00\x00" + struct.pack("<IIII", 0x1000, 0x1000,
+                                                    0x1C00, 0x400) + b"\x00" * 20)
+
+    def rva(r):
+        return 0x400 + (r - 0x1000)
+
+    w32(rva(0x1300), 0x1400)
+    w32(rva(0x130C), 0x13C0)
+    w32(rva(0x1310), 0x1500)
+    put(rva(0x13C0), b"KERNEL32.dll\x00")
+    put(rva(0x1400), struct.pack("<QQQ", 0x1440, 0x1460, 0))
+    put(rva(0x1500), struct.pack("<QQQ", 0xDEADBEEF, 0xDEADBEF0, 0))
+    put(rva(0x1440), struct.pack("<H", 0) + b"ExitProcess\x00")
+    put(rva(0x1460), struct.pack("<H", 0) + b"NVSDK_NGX_CUDA_EvaluateFeature_C\x00")
+
+    with tempfile.NamedTemporaryFile(suffix=".dll", delete=False) as fh:
+        fh.write(bytes(buf))
+        path = fh.name
+    out = subprocess.run([sys.executable, str(tool), path],
+                         capture_output=True, text=True).stdout
+    return ("TERMINATION API" in out
+            and "NVSDK_NGX_CUDA_EvaluateFeature_C" in out
+            and "termination APIs imported: ExitProcess" in out)
+
+
 def check(name, cond):
     global PASS, FAIL
     if cond:
@@ -248,6 +300,11 @@ def main():
     check("tools: resolver tolerates junk tokens (rig: the bat's own name "
           "reached int() and tracebacked - now skipped with [skip])",
           _resolver_tolerance_check())
+    check("tools: import lister flags termination APIs + NGX backend "
+          "bindings statically (engine-dll discriminator, no execution)",
+          (REPO / "tools" / "list_imports.py").is_file()
+          and (REPO / "tools" / "list_imports.bat").is_file()
+          and _imports_probe_check())
 
 
     bat = (REPO / "tools" / "resolve_offsets.bat")
