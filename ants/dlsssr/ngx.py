@@ -72,6 +72,11 @@ from . import win32
 NGX_VERSION_API = 0x15
 NGX_ENGINE_TYPE_CUSTOM = 0
 
+# Console deployment marker: bumped with every host-layout change so the
+# owner's console unambiguously says WHICH build ran (run-28 attempt #1 was
+# diagnosed from a stack trace because the old file was still deployed).
+HOST_BUILD = "2026-09-20.3"
+
 FEATURE_SR = 1    # NVSDK_NGX_Feature_SuperSampling
 FEATURE_NR = 18   # NVSDK_NGX_Feature_NeuralRendering ("CG2R")
 
@@ -332,6 +337,8 @@ class NgxSession:
         own argument order - see ``_init_feature_module``.
         """
         self.gpu = gpu
+        _log().status(f"[ANTs] NR/SR host build {HOST_BUILD} - core-owned "
+                      "session, guarded diagnostics")
         # E1 gate (runs 14-27c: deliberate kernel-direct kill surviving ALL
         # user-mode nets). ANTS_NR_USE_SHIM=0 = direct bind: no helper module
         # in the process at all, i.e. Merserk's host geometry as far as the

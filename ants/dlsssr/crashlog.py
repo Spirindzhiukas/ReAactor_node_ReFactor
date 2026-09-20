@@ -158,6 +158,7 @@ class _Mem:
         address = int(address)
         end, _ = self.region(address)
         if not end or end <= address:
+            self.holes.append(address)
             return b""
         take = min(size, end - address)
         return ctypes.string_at(address, take) if take > 0 else b""
@@ -547,20 +548,26 @@ def _rewrite_site(mem, k32, site):
 
 
 def _patch_section(mem, k32, start, size):
-    """Rewrite every fast-fail site in one executable section. Only guard-
-    verified pages are read; holes are stepped over, never touched."""
+    """Rewrite every fast-fail site in one executable section.
+
+    A section's VirtualSize is a CLAIM, not a promise: the loader can leave
+    parts of it unmapped (discardable sections, a VirtualSize larger than
+    what was committed), and reading one of those pages is exactly what
+    killed the run-28 attempt (`string_at` on an unmapped page, repeated
+    forever by whatever handles the AV). So the scan reads ONLY through the
+    guard, takes exactly the bytes VirtualQuery vouches for, and steps over
+    a hole in page-sized strides - readable bytes are never skipped, and an
+    unmapped page is never touched.
+    """
     chunk_limit = 64 << 10
     patched = 0
     done = 0
     while done < size:
         n = min(chunk_limit, size - done)
-        chunk = mem.read(start + done, n)
-        if chunk is None:
-            n = min(0x1000, n)
-            chunk = mem.read(start + done, n)
-            if chunk is None:
-                done += n       # unreadable page: skip it, never touch it
-                continue
+        chunk = mem.read_some(start + done, n)
+        if not chunk:
+            done += 0x1000      # unmapped page: skip it, never touch it
+            continue
         at = 0
         while True:
             at = chunk.find(b"\xcd\x29", at)

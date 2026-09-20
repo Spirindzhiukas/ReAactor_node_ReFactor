@@ -118,6 +118,20 @@ Both bugs are fixed and pinned by tests, so the next run is comparable:
    the exact runtime in use is logged with its size, and a canonical file
    that is not a copy of the selection is refused.
 
+Both crash sites from that attempt were the same defect class: the header
+read (`u32`) and the section BYTE scan (`ctypes.string_at` - the owner's full
+stream names this one). Section VirtualSize is a claim, not a promise: the
+loader can leave pages unmapped, and the pre-fix scanner read them raw. The
+scan now takes exactly the bytes VirtualQuery vouches for (`read_some`) and
+steps over holes in page strides, so coverage is complete for mapped memory
+and nothing else is ever touched.
+
+DEPLOYMENT CHECK: the console must show
+`[ANTs] NR/SR host build <date>.<n> - core-owned session, guarded diagnostics`
+(`HOST_BUILD` in `ants/dlsssr/ngx.py`). If that line is missing, an older
+build is still deployed - the first attempt was diagnosed from a stack trace
+precisely because of that.
+
 Re-run the same bat (`ANTS_NR_USE_SHIM=0`, `NVSDK_NGX_LOG_LEVEL=1`). Expected
 new lines before `NGX init ->`:
 `[ANTs] NR runtime in use: <path> (<bytes>)`, `[ANTs] int29 trap: scanning 2

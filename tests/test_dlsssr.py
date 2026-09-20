@@ -113,7 +113,8 @@ def _iat_tracer_fixture_check():
 
 
 def _synthetic_module(exec_sites=1, non_exec_site=False, n_sec=None,
-                      opt_size=0xF0, e_lfanew=0x80, table_overflow=False):
+                      opt_size=0xF0, e_lfanew=0x80, table_overflow=False,
+                      exec_vsize=0x100):
     """A 3-section PE (one executable) in a real in-process buffer.
 
     Returns (buffer, base, exec_rva) so tests can assert on the bytes.
@@ -132,7 +133,7 @@ def _synthetic_module(exec_sites=1, non_exec_site=False, n_sec=None,
     buf[e_lfanew + 6:e_lfanew + 8] = struct.pack("<H", count)
     buf[e_lfanew + 20:e_lfanew + 22] = struct.pack("<H", opt_size)
     sec0 = e_lfanew + 24 + opt_size
-    entries = [(".text\x00\x00\x00", 0x100, exec_rva, 0x60000020),
+    entries = [(".text\x00\x00\x00", exec_vsize, exec_rva, 0x60000020),
                (".data\x00\x00\x00", 0x100, data_rva, 0xC0000040),
                (".rdata\x00\x00", 0x100, 0x3000, 0x40000040)]
     for index, (name, vsize, vaddr, chars) in enumerate(entries):
@@ -309,6 +310,42 @@ def _own_params_name_guard_check():
         crashlog._kernel32 = saved
     return (good == "DLSSNR.Width" and bad == ""
             and mapped == "DLSSNR.Width")
+
+
+def _int29_partial_section_check():
+    """The run-28 signature, exactly: a section whose VirtualSize claims
+    more than the pages that are actually mapped (discardable/uncommitted
+    tails). The mapped site must convert, the unmapped one must be REFUSED
+    and reported - never read (the pre-fix scanner died in `string_at`
+    here, and the AV repeated forever)."""
+    import ctypes
+
+    from ants.dlsssr import crashlog
+
+    image, base, exec_rva = _synthetic_module(exec_sites=1,
+                                              exec_vsize=0x2000)
+    # a second site far inside the claimed-but-unmapped range (it exists in
+    # the buffer, so a scanner that ignores VirtualQuery would read it)
+    ctypes.memmove(base + exec_rva + 0x1FF0, b"\xcd\x29", 2)
+    mapped_end = 0x1800          # headers + the first 0x800 bytes of .text
+    lines = []
+    saved_emit = crashlog._emit
+    crashlog._emit = lines.append
+    crashlog._state["int29_done"] = False
+    try:
+        crashlog.install_int29_trap([(base, "partial.dll")],
+                                    k32=_fake_kernel32([(base, mapped_end)]))
+    finally:
+        crashlog._emit = saved_emit
+        crashlog._state["int29_done"] = False
+    text = "".join(lines)
+    mapped_site = bytes(ctypes.string_at(base + exec_rva + 0x10, 2))
+    unmapped_site = bytes(ctypes.string_at(base + exec_rva + 0x1FF0, 2))
+    return ("1 fast-fail site(s) converted to breakpoints in partial.dll"
+            in text
+            and "unreadable page" in text
+            and mapped_site == b"\xcc\x90"
+            and unmapped_site == b"\xcd\x29")
 
 
 def _resolver_tolerance_check():
@@ -643,6 +680,10 @@ def main():
     check("crashlog: int29 scanner converts CD29 sites in executable "
           "sections only (synthetic PE)",
           _int29_scanner_fixture_check())
+    check("crashlog: a section claiming more bytes than are mapped is read "
+          "only where the OS vouches for it (mapped site converted, unmapped "
+          "site refused and reported) - run 28's second fault signature",
+          _int29_partial_section_check())
     check("crashlog: int29 scanner survives hostile images (unmapped base, "
           "absurd section count, table past the mapping, unmapped section) "
           "- run 28 died in this scan, before NGX init",
