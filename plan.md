@@ -14,14 +14,29 @@ co-residence, shim-routing all exonerated; Merserk's v10 sources inspected
 (license-local under `RESEARCH/`) — his host never loads the snippet from
 python and never registers callbacks.
 
+- [x] **Run 28+ layout implemented (code side, owner-independent):** core-owned
+      session (driver core = owner, canonically-staged snippet = feature
+      provider), caller shim with the snippet `Init_Ext` swap (`fwd_init_ext`),
+      capability parameter map, RGBA16F surfaces + guides, full 1x create
+      contract re-applied per frame, `PerfQualityValue` 5 for 1x (6 = carrier
+      post-pass), `NvAPI_Initialize` pre-step, shim module name off the real
+      `nvngx.dll` name - contract parity with the two working community hosts
+      whose sources were decoded this session (see `memory.md` entry and
+      `CONTINUATION.md` "Run 28+ host layout"). Suite: 329 checks green.
 - [ ] **Run 28 (owner, one run carries both gates):** `set "ANTS_NR_USE_SHIM=0"`
       in the launch bat (keep `NVSDK_NGX_LOG_LEVEL=1`), scoop, run once.
       - Works → VERSION-gate-vs-shim confirmed → cure = ship a real
-        VS_VERSIONINFO resource inside our shim builder (keep the shim).
+        VS_VERSIONINFO resource inside our shim builder (keep the shim), or
+        simply keep the shim off the `nvngx.dll` name (run-29 candidate 1).
       - Dies with `NATIVE CRASH: exception 0x80000003 (breakpoint (patched
         fast-fail site)) at MODULE+0xOFF` → resolve the offset
         (`resolve_offsets.bat`) → the gate's address is named → decide
         (binary-diff vs stock nvngx_dlssnr / hard anti-tamper conclusion).
+- [ ] **Run 29 candidates (after run 28, in evidence order):**
+      `ANTS_NR_SHIM_NAME=nvngx.dll` (historical shim name vs the new
+      ecosystem-matching default), `ANTS_NR_PERF_QUALITY=none` (the
+      still-image reference host never writes the parameter),
+      `ANTS_NR_USE_OWN_PARAMS=1` (legacy snippet-direct route).
 - [ ] Still-open cheap discriminator: list imports of the **stock**
       `nvngx_dlssnr.dll` (DLSS Swapper copy) with `list_imports.bat` — never run.
 - [ ] After NR settles: drop-Merserk cleanup (legacy neuroframe path +

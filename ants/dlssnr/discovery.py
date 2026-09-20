@@ -306,10 +306,14 @@ def resolve_legacy_dir(choice: str):
     return resolve_dll_dir("auto")
 
 
-def stage_legacy_runtime(dll_path):
-    """A dir the legacy helper engine can consume.
+def stage_nr_runtime(dll_path):
+    """A dir with the chosen NR runtime under its CANONICAL name.
 
-    The helper locates files by LITERAL name ('nvngx_dlssnr.dll'):
+    Both consumers need the canonical name: the legacy helper engine locates
+    its files by literal name, and the NGX snippet itself is only ever loaded
+    as ``nvngx_dlssnr.dll`` by every host that works (the runtime's own
+    identity/version probing is name-sensitive; a renamed copy is the one
+    configuration that exists nowhere in the wild).
     - a set that already carries the canonical name (e.g. the owner's
       models/DLSS/Merserk_DLLS/ masters) is used IN PLACE - nothing is
       copied, nothing leaves models/DLSS;
@@ -340,3 +344,7 @@ def stage_legacy_runtime(dll_path):
             except PermissionError:
                 pass  # a locked leftover from a previous run; not needed
     return stage
+
+
+# Historical name (the legacy helper engine was the first consumer).
+stage_legacy_runtime = stage_nr_runtime

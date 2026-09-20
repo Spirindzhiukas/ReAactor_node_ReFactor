@@ -110,6 +110,15 @@ def find_nr_runtime_dll(nr_dir):
         "(any filename starting with 'nvngx_dlssnr'). See ants/dlssnr/dll_README.md.")
 
 
+def stage_nr_runtime(dll_path):
+    """Staging dir holding the chosen NR build as ``nvngx_dlssnr.dll``.
+
+    The snippet is loaded from there: see ants.dlssnr.discovery.stage_nr_runtime
+    for why the canonical name matters.
+    """
+    return _nr_discovery.stage_nr_runtime(dll_path)
+
+
 def stage_sr_dll(dll_path):
     """A SEARCH-PATH DIR for the chosen SR dll.
 

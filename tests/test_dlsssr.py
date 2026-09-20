@@ -205,22 +205,37 @@ def main():
         import pefile
         pe = pefile.PE(data=payload)
         names = sorted(e.name.decode() for e in pe.DIRECTORY_ENTRY_EXPORT.symbols)
-        check("shim: pefile parses + 4 exports",
-              names == ["fwd_create", "fwd_evaluate", "fwd_release", "fwd_set_slots"])
+        check("shim: pefile parses + 5 exports (incl. the Init_Ext swap thunk)",
+              names == ["fwd_create", "fwd_evaluate", "fwd_init_ext",
+                        "fwd_release", "fwd_set_slots"])
         check("shim: entry point + DYNAMIC_BASE|NX_COMPAT",
               pe.OPTIONAL_HEADER.DllCharacteristics & 0x140 == 0x140)
-        # unwind metadata for the 3 non-leaf thunks (rig run 14: an exception
-        # escaping through an unwindable-less frame killed the process)
+        # unwind metadata for the 4 non-leaf thunks (rig run 14: an exception
+        # escaping through an unwindable-less frame killed the process).
+        # UNWIND_INFO = ver|flags, SizeOfProlog, CountOfCodes, FrameReg|Off,
+        # then UNWIND_CODE = CodeOffset, UnwindOp<<4 | OpInfo: the thunks'
+        # "sub rsp, 0x48" is UWOP_ALLOC_SMALL (2) with OpInfo 72/8-1 = 8.
         import struct as _st
         raw = pe.get_memory_mapped_image()
         exc = pe.OPTIONAL_HEADER.DATA_DIRECTORY[3]
-        ok = exc.Size == 36
+        sizes = []
+        ok = exc.Size == 48
         for i in range(exc.Size // 12):
             b, e, u = _st.unpack_from("<III", raw, exc.VirtualAddress + i * 12)
+            sizes.append(e - b)
             ver, prolog, count = raw[u], raw[u + 1], raw[u + 2]
-            ok = ok and e - b == 63 and ver == 2 and prolog == 4 and count == 1 \
-                and raw[u + 4:u + 6] == b"\x04\x16"  # UWOP_ALLOC_SMALL 56 @4
-        check("shim: 3 RUNTIME_FUNCTIONs + shared UNWIND_INFO (thunks unwindable)", ok)
+            ok = ok and ver == 1 and prolog == 4 and count == 1 \
+                and raw[u + 4:u + 6] == b"\x04\x28"  # ALLOC_SMALL 72 @4
+        check("shim: 4 RUNTIME_FUNCTIONs + shared UNWIND_INFO (thunks unwindable)",
+              ok and sizes == [63, 63, 63, 82])
+        # the swap thunk's machine code: save r9, then r9 <- first stack arg
+        addr = [e.address for e in pe.DIRECTORY_ENTRY_EXPORT.symbols
+                if e.name == b"fwd_init_ext"][0]
+        code = raw[addr:addr + 8]
+        check("shim: fwd_init_ext swaps the last two Init_Ext args in native code",
+              code == bytes([0x4D, 0x89, 0xCB,             # mov r11, r9
+                             0x48, 0x83, 0xEC, 0x48,       # sub rsp, 0x48
+                             0x48]))                       # mov rax, [rsp+..]
     except ImportError:
         check("shim: pefile parses (pefile missing in env)", False)
 
@@ -261,9 +276,81 @@ def main():
           "NGX core preloaded" in ngx_src and "locate_ngx_core()" in ngx_src)
     check("ngx: explicit _nvngx.dll override next to the snippet wins",
           '"_nvngx.dll"' in ngx_src and "local_core" in ngx_src)
-    check("ngx: Init_Ext-first with the 0x13..0x20 version sweep on NR",
-          "Init_Ext-first" in ngx_src and "range(0x13, 0x21)" in ngx_src
-          and "classic 4-arg Init accepted" in ngx_src)
+    # ---- run 28: core-owned session + snippet feature provider ----
+    check("ngx: session owner inits by ProjectID -> Init_Ext -> classic Init",
+          "Init_ProjectID" in ngx_src and "classic 4-arg Init accepted" in ngx_src
+          and "range(0x13, 0x21)" in ngx_src)
+    check("ngx: snippet builds get the SWAPPED Init_Ext ABI through the shim "
+          "(common_info before version - public order hands it a version int "
+          "where it expects a pointer)",
+          'thunk="init_ext"' in ngx_src and "snippet ABI" in ngx_src
+          and "fwd_init_ext" in (REPO / "ants" / "dlsssr" / "shim.py").read_text())
+    check("ngx: feature 18 runs on the CORE's capability parameter map "
+          "(GetCapabilityParameters first, AllocateParameters fallback)",
+          "GetCapabilityParameters" in ngx_src
+          and "AllocateParameters" in ngx_src
+          and "_open_core_parameters" in ngx_src)
+    nr_src = (REPO / "ants" / "dlsssr" / "nr.py").read_text()
+    check("nr: canonical-name staging (the snippet is only ever loaded as "
+          "nvngx_dlssnr.dll by hosts that work)",
+          "stage_nr_runtime" in nr_src
+          and "nvngx_dlssnr.dll" in nr_src)
+    check("nr: the full reference-host create contract is written",
+          all(k in nr_src for k in (
+              "DLSSNR.InputWidth", "DLSSNR.Output.Width",
+              '"DLSSNR.{prefix}SubrectWidth"', "DLSSNR.MVec", "DLSSNR.Depth",
+              "DLSSNR.ScalingRatio", "DLSSNR.DepthInverted", "DLSSNR.Upscaling",
+              "DLSSNRComputeScalingRatioCallback", "DLSSNR.Backbuffer",
+              "NR_POSTPASS_PERF_QUALITY"))
+          and "R16G16B16A16_FLOAT" in nr_src
+          and "create the neural snippet" not in nr_src.lower())
+    # ---- run 29 candidate: the caller-shim MODULE NAME (ecosystem evidence:
+    # ---- the working caller shim ships as nvngx.dll_comfy.dll and the bare
+    # ---- nvngx.dll name survives only as a legacy fallback there) ----
+    from ants.dlsssr import shim as shim_mod
+    check("shim: default module name avoids the real nvngx.dll name",
+          shim_mod.DEFAULT_SHIM_NAME != "nvngx.dll"
+          and shim_mod.DEFAULT_SHIM_NAME.startswith("nvngx.dll")
+          and shim_mod.shim_name() == shim_mod.DEFAULT_SHIM_NAME)
+    import os as _os2
+    _os2.environ["ANTS_NR_SHIM_NAME"] = "nvngx.dll"
+    try:
+        check("shim: ANTS_NR_SHIM_NAME restores the historical geometry",
+              shim_mod.shim_name() == "nvngx.dll")
+    finally:
+        del _os2.environ["ANTS_NR_SHIM_NAME"]
+    import os as _os, tempfile as _tempfile
+    _tmpdir = _tempfile.mkdtemp(prefix="ants_shim_")
+    _shim_path = shim_mod.write_shim(_tmpdir)
+    check("shim: the written PE carries the file name as its module name",
+          _os.path.basename(_shim_path) == shim_mod.DEFAULT_SHIM_NAME)
+    try:
+        import pefile as _pefile
+        _pe = _pefile.PE(_shim_path)
+        check("shim: export-directory module name follows the file name",
+              _pe.DIRECTORY_ENTRY_EXPORT.name.decode()
+              == shim_mod.DEFAULT_SHIM_NAME)
+    except ImportError:
+        pass
+
+    # ---- run 28+: the feature-18 quality/contract rules ----
+    check("nr: 1x uses the native (DLAA) quality value - 6 is only the "
+          "carrier post-pass and mismatches the 1.0 scaling ratio",
+          "NR_PERF_QUALITY_1X = 5" in nr_src
+          and "NR_POSTPASS_PERF_QUALITY = 6" in nr_src
+          and "perf_quality" in nr_src)
+    check("nr: surfaces + subrects are re-applied for every frame",
+          nr_src.count("self._write_surfaces(p)") >= 2)
+    check("ngx: NvAPI_Initialize pre-step before the core Init (reference "
+          "host's first step; ANTS_NR_NVAPI=0 opts out)",
+          "_preload_nvapi" in ngx_src and "NvAPI_Initialize" in ngx_src
+          and "ANTS_NR_NVAPI" in ngx_src)
+    check("ngx: NR sessions arm the trap + ntdll detour + int29 scan from a "
+          "single instrumentation list",
+          "_instrumented" in ngx_src
+          and "install_termination_trap(self._instrumented)" in ngx_src
+          and "install_ntdll_terminate_detour()" in ngx_src
+          and "install_int29_trap(self._instrumented)" in ngx_src)
     check("ngx: snippet callbacks are an env-gated experiment, pinned",
           "ANTS_NR_RUNTIME_CALLBACKS" in ngx_src and "_cb_keep" in ngx_src
           and "SetRuntimeParamsCallback" in ngx_src

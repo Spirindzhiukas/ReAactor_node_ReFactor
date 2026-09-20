@@ -15,6 +15,7 @@ session (feature 1), the fence-wait path, and teardown.
 """
 
 import ctypes
+import os
 import random
 import sys
 import tempfile
@@ -64,6 +65,12 @@ def _write_ptr(out, value):
         out[0] = value
     else:
         ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = value
+
+
+def _ct_array_type():
+    """The ctypes array base class (used as the "is a live buffer" probe)."""
+    import ctypes as _c
+    return _c.Array
 
 
 def _name(ptr):
@@ -117,7 +124,7 @@ class FakeFence:
 # ---------------------------------------------------------------- fake D3D12
 def build_device_graph():
     fence = FakeFence()
-    bpp = {0: 1, 28: 4, 34: 4, 41: 4}  # DXGI format -> bytes per pixel
+    bpp = {0: 1, 10: 8, 28: 4, 34: 4, 41: 4}  # DXGI format -> bytes per pixel
 
     def make_resource(size, fmt, label, width_px=0):
         buf = (ctypes.c_char * max(size, 1))()  # addressable backing store
@@ -304,6 +311,20 @@ class FakeNgxModule:
         win32.get_proc = self.get_proc
         win32.callable_at = self.callable_at
 
+    # NVIDIA's flat C parameter API (the ABI-stable route our host prefers
+    # when the core exports it). Same store as the vtable setters so both
+    # backends are observable through PARAMS.
+    FLAT_SETTERS = {
+        "NVSDK_NGX_Parameter_SetULL": ("u64", ctypes.c_uint64),
+        "NVSDK_NGX_Parameter_SetF": ("f32", ctypes.c_float),
+        "NVSDK_NGX_Parameter_SetD": ("f64", ctypes.c_double),
+        "NVSDK_NGX_Parameter_SetUI": ("u32", ctypes.c_uint32),
+        "NVSDK_NGX_Parameter_SetI": ("i32", ctypes.c_int32),
+        "NVSDK_NGX_Parameter_SetD3d12Resource": ("ptr", ctypes.c_void_p),
+        "NVSDK_NGX_Parameter_SetD3d11Resource": ("ptr", ctypes.c_void_p),
+        "NVSDK_NGX_Parameter_SetVoidPointer": ("ptr", ctypes.c_void_p),
+    }
+
     def get_proc(self, handle, name):
         return hash(("export", name)) & 0x7FFFFFFF
 
@@ -354,6 +375,31 @@ class FakeNgxModule:
                 RECORD.append(("ReleaseFeature",))
                 return 1
             return release
+        if name in self.FLAT_SETTERS:
+            kind, argtype = self.FLAT_SETTERS[name]
+
+            def flat_set(_params, name_ptr, value, kind=kind):
+                # a real export receives the raw scalar; this python stand-in
+                # sees the ctypes wrapper our host builds, so unwrap it
+                PARAMS[_name(name_ptr)] = (kind, getattr(value, "value", value))
+            return flat_set
+        if name == "NVSDK_NGX_D3D12_Init_ProjectID":
+            def init_project(project, engine_type, engine_version, path, dev,
+                             sdk, info):
+                RECORD.append(("Init_ProjectID",
+                               ctypes.string_at(project).decode("ascii", "replace")
+                               if project else ""))
+                return 1
+            return init_project
+        if name == "NVSDK_NGX_D3D12_GetCapabilityParameters":
+            params = FakeObject(self.parameter_vtable(),
+                                "NVSDK_NGX_Parameter(capability)")
+
+            def get_caps(out):
+                _write_ptr(out, params.ptr)
+                RECORD.append(("GetCapabilityParameters",))
+                return 1
+            return get_caps
         if name == "fwd_set_slots":
             return lambda target, a, b: None
         if name == "fwd_probe":
@@ -369,14 +415,14 @@ class FakeNgxModule:
         """The 17-slot NGX parameter vtable (MSVC layout), dict-backed."""
         from ants.dlsssr import parameters as prm
         slots = {}
+        # the shipping MSVC slot map our host writes through (float on 6,
+        # pointers on 2, resources on 0, 32-bit ints on 3)
         specs = {
             prm.SLOT_SET_I32: (ctypes.c_int32, "i32"),
             prm.SLOT_SET_U32: (ctypes.c_uint32, "u32"),
             prm.SLOT_SET_F32: (ctypes.c_float, "f32"),
-            prm.SLOT_SET_F64: (ctypes.c_double, "f64"),
-            prm.SLOT_SET_U64: (ctypes.c_uint64, "u64"),
             prm.SLOT_SET_POINTER: (ctypes.c_void_p, "ptr"),
-            prm.SLOT_SET_D3D12: (ctypes.c_void_p, "ptr"),
+            prm.SLOT_SET_RESOURCE: (ctypes.c_void_p, "resource"),
         }
         for slot, (argtype, kind) in specs.items():
             def setter(name_ptr, value, kind=kind):
@@ -435,8 +481,16 @@ def main():
     ngx.writable_cache_dir = lambda tag: tempfile.mkdtemp(prefix=f"ants_{tag}_")
     # The shim thunk reinterpret (CFUNCTYPE over a raw machine address) is
     # rig-only by design; patch the seam so the routing logic still runs.
-    def fake_fn(self, name, argtypes, restype=ctypes.c_int32):
+    def fake_fn(self, name, argtypes, restype=ctypes.c_int32, thunk="call"):
         export = ngx_fake.make_export(name)
+        if thunk == "init_ext":
+            # the shim's fwd_init_ext presents the snippet's own order
+            # (common_info before the version) to the real export
+            raw = export
+
+            def reorder(app_id, path, dev, sdk, info):
+                return raw(app_id, path, dev, info, sdk)
+            export = reorder
 
         def routed(*args):
             if getattr(self, "_set_slots", None) is not None:
@@ -487,8 +541,11 @@ def main():
         import pathlib as _pl
         ngx_src = _pl.Path(REPO / "ants" / "dlsssr" / "ngx.py").read_text()
         check("shim fn: thunk stored as raw ADDRESS, bound with caller proto",
-              "self._fwd_stub = int(fwd_create)" in ngx_src
-              and "win32.callable_at(self._fwd_stub, argtypes, restype)" in ngx_src)
+              'self._fwd_stub = int(resolve("fwd_create"))' in ngx_src
+              and 'self._fwd_stub_init_ext = int(resolve("fwd_init_ext"))' in ngx_src
+              and "win32.callable_at(stub_addr, argtypes, restype)" in ngx_src
+              and "assert ctypes.cast(stub, ctypes.c_void_p).value == stub_addr"
+              in ngx_src)
     finally:
         win32.callable_at = saved_call
         win32.get_proc = saved_get
@@ -516,44 +573,76 @@ def main():
           and any(entry == ("D3D12CreateDevice", d3d12.D3D_FEATURE_LEVEL_11_0)
                   for entry in RECORD))
 
-    # ---- NR session (own parameters, feature 18) ----
+    # ---- NR session, core-owned route (feature 18) ----
+    # The snippet is staged under its canonical name from any-named source.
+    import numpy as _np
+    nr_source = Path(tempfile.mkdtemp(prefix="ants_nr_src_"))
+    nr_dll = nr_source / "nvngx_dlssnr_ANY_name.dll"
+    nr_dll.write_bytes(b"MZ" + bytes(4094))
+    ngx.locate_ngx_core = lambda: "fake/DriverStore/_nvngx.dll"
     from ants.dlsssr.nr import DlssNrSession
     from ants.dlsssr.ngx import FEATURE_NR
     W, H = 60, 48  # 240-byte rows != 256 pitch: exercises row padding
-    sess = DlssNrSession(gpu, W, H, "fake/nvngx_dlssnr.dll", style="Natural", intensity=0.8)
-    FakeNgxModule.own_store = sess.ngx.params.store
-    creates = [entry for entry in RECORD if entry[0] == "CreateFeature"]
-    check("nr: Init_Ext first (sdk 0x15) precedes CreateFeature(18) - run 21 order",
-          any(entry[0] == "Init_Ext" and entry[1] == 0x15 for entry in RECORD)
-          and creates and creates[0][1] == FEATURE_NR)
+    PARAMS.clear()
+    sess = DlssNrSession(gpu, W, H, str(nr_dll), style="Natural", intensity=0.8)
+    check("nr: core is the session OWNER, the snippet is the feature provider",
+          sess.ngx.feature_module is not None
+          and os.path.basename(sess.ngx.feature_module.path) == "nvngx_dlssnr.dll"
+          and sess.ngx.feature_module.path != str(nr_dll))
+    check("nr: ProjectID session first, then the snippet Init_Ext",
+          [e[0] for e in RECORD if e[0] in ("Init_ProjectID", "Init_Ext")][:2]
+          == ["Init_ProjectID", "Init_Ext"])
     init_exts = [entry for entry in RECORD if entry[0] == "Init_Ext"]
     check("nr: Init_Ext is attempted exactly once when accepted at 0x15 (no sweep)",
           len(init_exts) == 1 and not any(entry[0] == "Init4" for entry in RECORD))
+    creates = [entry for entry in RECORD if entry[0] == "CreateFeature"]
+    check("nr: CreateFeature(18) after both inits",
+          bool(creates) and creates[0][1] == FEATURE_NR)
+    check("nr: feature runs on the CORE's capability map through the flat C API",
+          any(e[0] == "GetCapabilityParameters" for e in RECORD)
+          and sess.ngx.params.backend == "c-api")
+    check("nr: 1x runs use the native (DLAA) quality value - 6 is the carrier "
+          "post-pass and mismatches the 1.0 ratio our callback reports",
+          PARAMS.get("PerfQualityValue") == ("u32", 5))
+    check("nr: full reference create contract landed",
+          PARAMS.get("DLSSNR.Width") == ("u32", W)
+          and PARAMS.get("DLSSNR.OutputSubrectWidth") == ("u32", W)
+          and PARAMS.get("DLSSNR.DepthInverted") == ("u32", 1)
+          and PARAMS.get("DLSSNR.Upscaling") == ("u32", 0)
+          and PARAMS.get("DLSSNR.ScalingRatio") == ("f32", 1.0)
+          and PARAMS.get("DLSSNR.Style") == ("u32", 1)          # Natural
+          and PARAMS.get("DLSSNR.UICorrection") == ("u32", 0)
+          and PARAMS.get("DLSSNRComputeScalingRatioCallback")[1])
 
     rng = random.Random(7)
     payload = bytes(rng.randrange(256) for _ in range(W * H * 4))
     out = sess.evaluate(payload, reset=True)
-    check("nr: padded-pitch upload/evaluate/readback round-trips byte-exact",
-          len(out) == W * H * 4 and out == payload,
-          f"len={len(out)}")
-    check("nr: engine consumed our param object",
-          FakeNgxModule.own_store.get("DLSSNR.Style") == 1          # Natural
-          and FakeNgxModule.own_store.get("DLSSNR.Width") == W
-          and FakeNgxModule.own_store.get("DLSSNR.UICorrection") == 0)
-    import ctypes as _ct2
-    check("nr: parameter object is 64-byte padded (stray-read safe)",
-          _ct2.sizeof(sess.ngx.params._object) == 64)
+    # color/output are RGBA16F (the HDR-capable domain the runtime renders
+    # in), so the frame crosses the float16 boundary in both directions.
+    want = (_np.frombuffer(payload, dtype=_np.uint8).reshape(H, W, 4)
+            .astype(_np.float32) / 255.0).astype(_np.float16).astype(_np.float32)
+    want = (_np.clip(want, 0.0, 1.0) * 255.0 + 0.5).astype(_np.uint8).tobytes()
+    check("nr: padded-pitch RGBA8 -> RGBA16F -> RGBA8 round-trips exactly",
+          len(out) == W * H * 4 and out == want, f"len={len(out)}")
+    intensity = PARAMS.get("DLSSNR.Intensity", ("", 0.0))[1]
+    check("nr: engine consumed the per-frame parameters",
+          abs(intensity - 0.8) < 1e-6          # f32 precision
+          and PARAMS.get("DLSSNR.Reset") == ("u32", 1)
+          and PARAMS.get("DLSSNR.LocalStructureStrength") == ("f32", 1.0))
+    check("nr: surfaces + subrects are re-applied for every frame "
+          "(reference hosts re-write the whole contract per evaluate)",
+          sess.ngx.params.written.count("DLSSNR.ColorSubrectWidth") >= 2
+          and sess.ngx.params.written.count("DLSSNR.Output") >= 2)
     check("nr: Init buffers retained on the session (runtime reads them lazily; "
           "freed ones = use-after-free at first evaluate)",
           len(sess.ngx._init_keep) >= 3
-          and isinstance(sess.ngx._init_keep[0], ctypes.Array)
+          and isinstance(sess.ngx._init_keep[0], _ct_array_type())
           and sess.ngx._init_keep[1] is not None)
 
-    payload2 = bytes((i * 7 + 3) & 0xFF for i in range(W * H * 4))
-    out2 = sess.evaluate(payload2, reset=False)
-    check("nr: second frame (reset=0) round-trips", out2 == payload2)
+    out2 = sess.evaluate(payload, reset=False)
+    check("nr: second frame (reset=0) round-trips", out2 == want)
     check("nr: DLSSNR.Reset toggles in the parameter object",
-          FakeNgxModule.own_store.get("DLSSNR.Reset") == 0)
+          PARAMS.get("DLSSNR.Reset") == ("u32", 0))
 
     # ---- fence lag: forces SetEventOnCompletion + event-wait path ----
     fence.lag = 1
@@ -561,7 +650,26 @@ def main():
     fence.lag = 0
     check("nr: fence-wait path engaged, frame still correct",
           any(entry[0] == "SetEventOnCompletion" for entry in RECORD)
-          and out3 == payload)
+          and out3 == want)
+    sess.close()
+
+    # ---- legacy snippet-direct route (ANTS_NR_USE_OWN_PARAMS=1 geometry) ----
+    FakeNgxModule.own_store = {}
+    legacy = DlssNrSession(gpu, W, H, str(nr_dll), style="Natural",
+                           intensity=0.8, use_own_parameters=True)
+    FakeNgxModule.own_store = legacy.ngx.params.store
+    check("nr legacy: snippet is the session owner, own parameter object",
+          legacy.ngx.feature_module is None
+          and legacy.ngx.params.backend == "own-object")
+    out4 = legacy.evaluate(payload, reset=True)
+    check("nr legacy: own-object route still round-trips",
+          out4 == want
+          and FakeNgxModule.own_store.get("DLSSNR.Style") == 1
+          and FakeNgxModule.own_store.get("DLSSNR.Width") == W)
+    import ctypes as _ct3
+    check("nr legacy: parameter object is 64-byte padded (stray-read safe)",
+          _ct3.sizeof(legacy.ngx.params._object) == 64)
+    legacy.close()
 
     # ---- barrier layout stays fixed (fake asserted ALL_SUBRESOURCES) ----
     check("d3d12: barriers recorded with before/after at 20/24",
@@ -583,7 +691,6 @@ def main():
     check("sr: evaluate returns output-size frame with engine tail marker",
           len(big) == 60 * 80 * 4 and big[:240] == small[:240] and big[-1] == 0xCD)
 
-    sess.close()
     sr.close()
     gpu.close()
     check("flow: teardown releases the feature",

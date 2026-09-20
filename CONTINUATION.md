@@ -88,6 +88,63 @@ Outcomes:
 After NR settles: drop-Merserk cleanup (plan.md), credit Merserk + document
 provenance in the nodepack docs.
 
+## Run 28+ host layout — IMPLEMENTED while run 28 is pending (2026-09-20)
+
+The whole NR host was rebuilt onto the layout the **working** hosts of this
+runtime use, because their sources became readable offline
+(`ComfyUI-DLSS5-NR-Linux` / `DLSS5-Video`, MIT, credited) — the strongest
+evidence available without the rig:
+
+- **The runtime is called through a SEPARATE helper module** — never from the
+  module that loaded it ("the NR runtime validates the module that owns its
+  RETURN ADDRESS", `0xBAD00002` when it is the bridge). Their helper ships as
+  **`caller/nvngx.dll_comfy.dll`** (91 KB MinGW, 5 `DLSSNR_Call*` exports,
+  **no VERSION resource**) and the bare `nvngx.dll` name survives there only as
+  a *legacy fallback* for older release ZIPs.
+- **The snippet's `Init_Ext` argument order is swapped** against the public
+  header one: snippet = `(app, path, device, FeatureCommonInfo*, sdkVersion)`.
+  A host that passes the header order hands the runtime an `int` where it
+  expects a pointer (our shim now performs the swap in native code —
+  `fwd_init_ext` — so the return address stays inside the helper image).
+- **Core-owned session**: `Init_ProjectID` first (project id + engine version +
+  runtime dir), then the snippet init, then **the CORE's capability parameter
+  map** (`GetCapabilityParameters`; `AllocateParameters` "can still let
+  CreateFeature succeed but then returns InvalidParameter at Evaluate").
+- **ABI slot map** (both hosts, pinned): resource = 0, generic pointer/callback
+  = 2, int/uint = 3, **float = 6**. The public-header float slot (1) "silently
+  invokes a different overload and leaves every float parameter at an
+  invalid/default value" → `0xBAD00005`.
+- **Quality/ratio**: `PerfQualityValue` is the request's own mode — a 1×
+  (DLAA/native) request is **5**, ratio 1.0, and the
+  `DLSSNRComputeScalingRatioCallback` must confirm 1.0. `6` is the *neural
+  post-pass* value and only correct **on top of an ordinary DLSS carrier**.
+- **Per-frame contract**: the whole surface/subrect/parameter set is re-written
+  before every evaluate; a zero-filled `R16G16_FLOAT` MVec (or NULL) and an
+  optional zeroed `R32_FLOAT` depth with `DepthInverted=1` are both proven
+  working (still-image vs video hosts).
+- **`NvAPI_Initialize` runs before the NGX core init** (mandatory under
+  Wine/vkd3d-NVAPI, harmless on Windows).
+- Colour is handled in **`R16G16B16A16_FLOAT`** on both sides of the feature.
+
+Our package now mirrors all of that: `ants/dlsssr/ngx.py` (session owner =
+driver core, feature provider = the canonically-staged snippet, swap thunk,
+NvAPI pre-step, always-on traps), `ants/dlsssr/nr.py` (full create contract,
+1× quality 5, per-frame re-application, RGBA16F surfaces + guides),
+`ants/dlsssr/shim.py` (swap thunk + **module name knob**), `ants/dlsssr/
+parameters.py` (shim ABI slot map + flat C-API backend),
+`ants/dlsssr/discovery.py` + `ants/dlssnr/discovery.py` (canonical-name
+staging), `tests/test_native_flow.py` (fake-COM end-to-end for the new route).
+
+Run 28 is unchanged (E1 still tests the shim-is-the-poison question). New
+**run 29** candidates, in the order the evidence supports them:
+1. `set "ANTS_NR_SHIM_NAME=nvngx.dll"` — restores the historical geometry
+   against the new default `nvngx.dll_ants.dll` (the ecosystem's working shim
+   deliberately avoids the exact `nvngx.dll` name).
+2. `set "ANTS_NR_PERF_QUALITY=none"` — the still-image reference host never
+   writes `PerfQualityValue` at all.
+3. `set "ANTS_NR_USE_OWN_PARAMS=1"` — legacy snippet-direct route (the only
+   geometry that ever reached the evaluate callback).
+
 ## Tool inventory (all rig-proven or tested)
 
 - `tools/resolve_offsets.bat` + `tools/resolve_crash_offset.py` (owner copies:
