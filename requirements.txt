@@ -1,0 +1,18 @@
+# ReActor ReFactor — runtime dependencies
+#
+# Kept deliberately minimal and clash-free. Everything else the nodepack uses
+# (numpy, torch, pillow, tqdm, safetensors, transformers-free pipeline) already
+# ships with ComfyUI itself, and install.py manages onnxruntime in a
+# flavor-aware way (see the note in pyproject.toml — never install
+# onnxruntime and onnxruntime-gpu over each other).
+#
+# Removed vs. upstream ReActor:
+#   - albumentations   (was declared, never imported — dead weight)
+#   - ultralytics      (only used by the removed YOLO masking path; masking now
+#                       uses ComfyUI-native SAM3/mask nodes or the built-in
+#                       face-region fallback)
+#   - segment_anything (same — vendored-free approach via ComfyUI-native nodes)
+#   - insightface      (already gone upstream; the pure-Python ONNX engine stays)
+#
+onnx>=1.14.0
+opencv-python>=4.8.0
