@@ -27,7 +27,8 @@ IGNORE_SUBSTRINGS = (
 
 def main():
     try:
-        import pyflakes  # noqa: F401
+        import pyflakes  # probe: gate enforced only when installed
+        assert pyflakes is not None
     except ImportError:
         print("SKIP: pyflakes not installed (pip install pyflakes) — gate not enforced here.")
         return 0

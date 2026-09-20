@@ -107,10 +107,17 @@ def main():
           and "SetRuntimeParamsCallback" in ngx_src
           and "ANTS_NR_CALLBACK_RET" in ngx_src
           and "ANTS_NR_CALLBACK_DUMP" in ngx_src)
+    check("ngx: the callback dumper cannot fault (VirtualQuery, never "
+          "IsBadReadPtr - run 23's AV was the dumper itself)",
+          "VirtualQuery" in ngx_src and ".IsBadReadPtr(" not in ngx_src
+          and "*([_CVOID] * 8)" in ngx_src)
+    check("tools: crash-offset resolver ships (names MODULE+0xRVAs)",
+          (REPO / "tools" / "resolve_crash_offset.py").is_file()
+          and "bisect" in (REPO / "tools" / "resolve_crash_offset.py").read_text())
     check("ngx: session close frees the core AFTER the snippet (reverse order)",
           ngx_src.find("self.module.close()") < ngx_src.find(
               "Reverse load order"))
-    from ants.dlsssr.sr import PERF_QUALITY, PERF_RATIO, DLSS_RENDER_PRESETS
+    from ants.dlsssr.sr import PERF_RATIO, DLSS_RENDER_PRESETS
     check("sr: mode ratios fixed (DLAA 1.0 .. UP 3.0)",
           PERF_RATIO[5] == 1.0 and PERF_RATIO[3] == 3.0 and PERF_RATIO[1] > 1.72)
     check("sr: preset letters include J/K/L/M",

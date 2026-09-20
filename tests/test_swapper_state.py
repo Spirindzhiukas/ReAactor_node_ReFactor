@@ -9,7 +9,6 @@ Usage: python tests/test_swapper_state.py
 
 import os
 import sys
-import types
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent

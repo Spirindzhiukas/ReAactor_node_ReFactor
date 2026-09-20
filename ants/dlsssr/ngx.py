@@ -293,23 +293,53 @@ class NgxSession:
                 except Exception as exc:
                     _log().status(f"[ANTs] NGX core preload skipped: {exc}")
             if os.environ.get("ANTS_NR_RUNTIME_CALLBACKS"):
-                # EXPERIMENT (runs 22-23, env-gated): register callbacks on
-                # the snippet the way a snippet host would. Run 22 PROVED the
-                # hook point: the snippet CALLED the RuntimeParams callback
-                # inside the first evaluate and died right after consuming
-                # our answer - the open question is what the answer must BE.
-                #   ANTS_NR_CALLBACK_RET    int the stubs return (default 1)
-                #   ANTS_NR_CALLBACK_DUMP=1 hex-dump up to 64 bytes behind
-                #     every non-NULL pointer argument - identifies the
-                #     struct/params interface the snippet wants filled.
-                # Prototype: x64 passes extra args in registers harmlessly,
-                # so declaring 4 pointer slots is safe whether the real
-                # callback takes 0 or 4.
-                ret = int(os.environ.get("ANTS_NR_CALLBACK_RET", "1") or "1")
+                # EXPERIMENT (runs 22-24, env-gated): register callbacks on
+                # the snippet the way a snippet host would. Run 22/23 PROVED
+                # the hook: inside the first evaluate the snippet calls
+                # RuntimeParamsCallback(18, 8, paramsStruct*, "DLSSNR: color
+                # (%d,%d %dx%d) ..." fmt*, ...varargs) - a logging/report
+                # hook. Run 23's access violation was OUR OWN dumper: it
+                # probed memory with kernel32 IsBadReadPtr (deprecated, racy
+                # on volatile pages) and THAT call access-violated inside
+                # kernel32; the vectored handler resumed, the second-chance
+                # killed the process. The dumper now probes with
+                # VirtualQuery, which cannot fault, skips scalar args, and
+                # decodes printf-style format strings.
+                #   ANTS_NR_CALLBACK_RET     stub return value (default 0)
+                #   ANTS_NR_CALLBACK_DUMP=1  inspect the callback arguments
+                ret = int(os.environ.get("ANTS_NR_CALLBACK_RET", "0") or "0")
                 dump = bool(os.environ.get("ANTS_NR_CALLBACK_DUMP"))
                 k32 = ctypes.windll.kernel32
-                cb_type = ctypes.CFUNCTYPE(ctypes.c_int,
-                                           _CVOID, _CVOID, _CVOID, _CVOID)
+
+                class _MBI(ctypes.Structure):
+                    _fields_ = [("BaseAddress", _CVOID),
+                                ("AllocationBase", _CVOID),
+                                ("AllocationProtect", _CI32),
+                                ("_pad", _CI32),
+                                ("RegionSize", ctypes.c_size_t),
+                                ("State", _CI32),
+                                ("Protect", _CI32),
+                                ("Type", _CI32)]
+
+                def _readable(p, n):
+                    mbi = _MBI()
+                    if not k32.VirtualQuery(ctypes.c_void_p(p),
+                                            ctypes.byref(mbi),
+                                            ctypes.sizeof(mbi)):
+                        return False
+                    if mbi.State != 0x1000:      # MEM_COMMIT
+                        return False
+                    if mbi.Protect in (0x01, 0x0100):  # NOACCESS, GUARD
+                        return False
+                    end = (mbi.BaseAddress or 0) + mbi.RegionSize
+                    return p + n <= end          # stay inside one region
+
+                # 8 slots: x64 passes args 1-4 in registers and 5+ on the
+                # stack; the snippet's callback is printf-style (varargs on
+                # the stack), so slots 5-8 capture the first stack integers.
+                # Floats ride in XMM registers and are invisible here - the
+                # format string tells us they exist.
+                cb_type = ctypes.CFUNCTYPE(ctypes.c_int, *([_CVOID] * 8))
                 for name in ("NVSDK_NGX_SetRuntimeParamsCallback",
                              "NVSDK_NGX_SetOverrideStatusCallback",
                              "NVSDK_NGX_SetTelemetryEvaluateCallback"):
@@ -319,20 +349,29 @@ class NgxSession:
                         _log().status(f"[ANTs] snippet callback fired: {_name}")
                         if dump:
                             for i, arg in enumerate(args):
-                                p = arg or 0
-                                if not p:
+                                p = int(arg or 0)
+                                if p < 0x10000:  # scalar (feature id 18...)
+                                    if p:
+                                        _log().status(
+                                            f"[ANTs]   arg{i} = {p}")
                                     continue
-                                try:
-                                    if k32.IsBadReadPtr(ctypes.c_void_p(p), 64):
-                                        raise OSError("unreadable")
-                                    words = struct.unpack("<8Q",
-                                                          ctypes.string_at(p, 64))
+                                if not _readable(p, 64):
+                                    _log().status(
+                                        f"[ANTs]   arg{i}=0x{p:X} <unreadable>")
+                                    continue
+                                raw = ctypes.string_at(p, 64)
+                                text = raw.split(b"\x00", 1)[0]
+                                head = text[:min(len(text), 12)]
+                                if len(text) >= 6 and all(
+                                        32 <= b < 127 for b in head):
+                                    _log().status(
+                                        f"[ANTs]   arg{i}=0x{p:X} "
+                                        f"'{text.decode('ascii', 'replace')}'")
+                                else:
+                                    words = struct.unpack("<8Q", raw)
                                     _log().status(
                                         f"[ANTs]   arg{i}=0x{p:X} " +
                                         " ".join(f"{w:016X}" for w in words))
-                                except Exception:
-                                    _log().status(
-                                        f"[ANTs]   arg{i}=0x{p:X} <unreadable>")
                         return _ret
                     cb = cb_type(_nop)
                     setter = self.module.fn(name, [_CVOID])
