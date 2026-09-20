@@ -18,11 +18,13 @@ Files are only READ and copied into the output folder this tool creates
 from __future__ import annotations
 
 import argparse
+import bisect
 import hashlib
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 import time
 
@@ -63,6 +65,42 @@ def mtime_of(path):
                              time.localtime(os.path.getmtime(path)))
     except OSError:
         return "?"
+
+
+def find_out_root(comfy_root, repo):
+    r"""Where the report folder goes: NEVER inside the checkout.
+
+    GitHub Desktop watches the pack folder; a run dump that lands in
+    ``tools/rig_evidence/`` is one careless "Commit all" away from a pull
+    request. The rig keeps diagnostics next to ComfyUI instead:
+    ``<portable>\NODE_CODING\RIG_EVIDENCE``.
+    """
+    candidates = [os.environ.get("ANTS_EVIDENCE_OUT", "")]
+    bases = []
+    if comfy_root:
+        parent = os.path.dirname(os.path.abspath(comfy_root))
+        bases += [parent, os.path.abspath(comfy_root)]
+    portable = os.environ.get("COMFYUI_PORTABLE")
+    if portable:
+        bases.append(portable)
+    bases.append(os.path.abspath(repo) if repo else "")
+    for base in bases:
+        if base:
+            candidates.append(os.path.join(base, "NODE_CODING", "RIG_EVIDENCE"))
+    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":   # no A:/B: (floppy probing)
+        candidates.append(f"{letter}:\\ComfyUI_PORTABLE\\NODE_CODING\\RIG_EVIDENCE")
+    temp = os.environ.get("TEMP") or os.environ.get("TMP") or tempfile.gettempdir()
+    candidates.append(os.path.join(temp, "ANTs_RIG_EVIDENCE"))
+    for candidate in candidates:
+        path = clean_path(candidate)
+        if not path:
+            continue
+        try:
+            os.makedirs(path, exist_ok=True)
+            return path
+        except OSError:
+            continue                     # drive not present / not writable
+    return os.path.join(temp, "ANTs_RIG_EVIDENCE")
 
 
 def clean_path(value):
@@ -326,6 +364,113 @@ def torch_report(out_lines):
         out_lines.append(f"  cuda query failed ({exc.__class__.__name__})")
 
 
+def load_resolver():
+    """The sibling offset resolver's PE reader (stdlib only)."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "resolve_crash_offset.py")
+    if not os.path.isfile(path):
+        return None
+    spec = importlib.util.spec_from_file_location("ants_resolve_crash_offset",
+                                                  path)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        return None
+    return module
+
+
+# case-insensitive: crash lines write KERNEL32.DLL, the module on disk is
+# kernel32.dll (run 30's report: "KERNEL32.DLL+0x27799" matched nothing)
+OFFSET_RX = re.compile(
+    r"([A-Za-z0-9_.\\:$-]+?\.(?:dll|exe|pyd))\+(0x[0-9A-Fa-f]+)",
+    re.IGNORECASE)
+
+
+def module_search_dirs(comfy_root=""):
+    """Where a bare module name from a crash line may live."""
+    dirs = []
+    windir = os.environ.get("WINDIR", r"C:\Windows")
+    dirs.append(os.path.join(windir, "System32"))
+    for prefix in {sys.prefix, getattr(sys, "base_prefix", ""), 
+                   os.path.dirname(sys.executable)}:
+        if prefix and prefix not in dirs:
+            dirs.append(prefix)
+            dirs.append(os.path.join(prefix, "DLLs"))
+    if comfy_root:
+        dirs.append(os.path.abspath(comfy_root))
+    return [d for d in dirs if d and os.path.isdir(d)]
+
+
+def resolve_offsets(files, out_lines, extra_dirs=()):
+    """Name the function behind every MODULE+0xOFFSET in the crash logs.
+
+    The black box reports faults as ``MODULE.DLL+0x<rva>``; the resolver next
+    to this file already knows how to turn that into an export name. Doing it
+    HERE means the report answers "what was the CPU executing" without a
+    second round trip - the offsets are the whole point of sending it.
+    """
+    resolver = load_resolver()
+    if resolver is None:
+        out_lines.append("  (resolve_crash_offset.py not next to this tool - "
+                         "offsets reported unresolved)")
+        return
+    seen = {}
+    for path in files:
+        try:
+            text = open(path, "r", encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        for module, offset in OFFSET_RX.findall(text):
+            seen.setdefault((os.path.basename(module), int(offset, 16)), path)
+    if not seen:
+        out_lines.append("  (no MODULE+0xOFFSET lines in the collected logs)")
+        return
+    search = list(extra_dirs) or module_search_dirs()
+    cache = {}
+    for (module, offset), source in sorted(seen.items()):
+        if True:
+            path = module if os.path.isfile(module) else None
+            if path is None:
+                # a crash line may carry a full Windows path; split on both
+                # separators so this behaves the same on any host
+                leaf = module.replace("\\", "/").rsplit("/", 1)[-1]
+                for folder in search:
+                    candidate = os.path.join(folder, leaf)
+                    if os.path.isfile(candidate):
+                        path = candidate
+                        break
+                if path is None:
+                    out_lines.append(f"  {module}+0x{offset:X}: module file "
+                                     "not found (searched System32 and the "
+                                     "python folder)")
+                    continue
+            if path not in cache:
+                try:
+                    cache[path] = resolver.export_rvas(path)
+                except Exception as exc:
+                    cache[path] = None
+                    out_lines.append(f"  {module}+0x{offset:X}: cannot read "
+                                     f"the export table ({exc})")
+            entries = cache[path]
+            if not entries:
+                continue
+            rvas = [rva for rva, _n in entries]
+            idx = bisect.bisect_right(rvas, offset) - 1
+            if idx < 0:
+                out_lines.append(f"  {module}+0x{offset:X}: before the first "
+                                 "named export (internal helper?)")
+                continue
+            rva, name = entries[idx]
+            lo, hi = max(0, idx - 2), min(len(entries), idx + 3)
+            near = " | ".join(f"{n}@0x{r:X}" for r, n in entries[lo:hi])
+            out_lines.append(f"  {module}+0x{offset:X} -> {name} "
+                             f"(RVA 0x{rva:X} +0x{offset - rva:X})  "
+                             f"[from {os.path.basename(source)}]")
+            out_lines.append(f"      neighborhood: {near}")
+
+
 def nvidia_smi(out_lines):
     try:
         out = subprocess.run(
@@ -378,8 +523,14 @@ def main(argv=None):
                      "unusual)")
 
     stamp = time.strftime("%Y-%m-%d_%H%M%S")
-    out_root = clean_path(args.out)
-    out_dir = out_root or os.path.join(repo, "tools", "rig_evidence", stamp)
+    out_root = clean_path(args.out) or find_out_root(comfy_root, repo)
+    inside_repo = bool(repo) and os.path.abspath(out_root).lower().startswith(
+        os.path.abspath(repo).lower())
+    if inside_repo:
+        notes.append("the output folder is INSIDE the pack - GitHub Desktop "
+                     "can pick it up; set ANTS_EVIDENCE_OUT to somewhere "
+                     "outside the checkout")
+    out_dir = os.path.join(out_root, stamp)
     logs_dir = os.path.join(out_dir, "files")
     try:
         os.makedirs(logs_dir, exist_ok=True)
@@ -479,6 +630,38 @@ def main(argv=None):
                      "init, or the logs sit outside the scanned folders)")
 
     lines.append("")
+    lines.append("--- CRASH BLACK BOX (native-crash.log, last 60 lines) " + "-" * 20)
+    crash_files = [os.path.join(logs_dir, name)
+                   for name in sorted(os.listdir(logs_dir))
+                   if "crash" in name.lower()]
+    if not crash_files:
+        lines.append("  (no crash file was collected - the black box writes to "
+                     "staged/ANTs/appdata/logs/native-crash.log)")
+    for path in crash_files:
+        lines.append(f"  --- {os.path.basename(path)} ---")
+        try:
+            text = open(path, "r", encoding="utf-8", errors="replace").read()
+        except OSError as exc:
+            lines.append(f"  (unreadable: {exc})")
+            continue
+        tail = text.splitlines()[-60:]
+        for row in tail:
+            lines.append(f"  {row}")
+
+    lines.append("")
+    lines.append("--- CRASH OFFSETS RESOLVED (module+0xrva -> export) " + "-" * 20)
+    copied_files = [os.path.join(logs_dir, name)
+                    for name in sorted(os.listdir(logs_dir))]
+    search = module_search_dirs(comfy_root)
+    if dlss_root:
+        staged = os.path.join(dlss_root, "staged")
+        for entry in (sorted(os.listdir(staged)) if os.path.isdir(staged) else []):
+            folder = os.path.join(staged, entry)
+            if os.path.isdir(folder):
+                search.append(folder)
+    resolve_offsets(copied_files, lines, extra_dirs=search)
+
+    lines.append("")
     lines.append("--- ENVIRONMENT (this window) " + "-" * 45)
     env_report(lines)
 
@@ -502,6 +685,8 @@ def main(argv=None):
         handle.write("\n".join(lines))
 
     print("\n".join(lines))
+    # machine-readable markers the bat parses (folder to open in Explorer)
+    print(f"[ANTs] OUTDIR={out_dir}")
     print(f"[ANTs] report  : {report}")
     print(f"[ANTs] raw logs: {logs_dir}")
     if any(note.startswith("NOT FOUND") for note in notes):

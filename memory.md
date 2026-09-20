@@ -10,8 +10,8 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
 - **Head at last update:** run-28+ NR host layout (core-owned session + caller
   shim with the snippet Init_Ext swap; working tree, commit pending) on top of
   the GPU-acceleration commit (`588f790` DLSS5 hybrid, `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 365 checks + 2 scanners + smoke_import (20 nodes)
-  (`test_nr_schedule` 32, `test_dlssnr_bridge` 65, `test_dlsssr` 80,
+- **Suite:** ALL GREEN — 366 checks + 2 scanners + smoke_import (20 nodes)
+  (`test_nr_schedule` 32, `test_dlssnr_bridge` 65, `test_dlsssr` 81,
   `test_runtime_surface` 58, `test_native_flow` 35, `test_upres` 27,
   `test_pure_helpers` 26, `test_facerestore_routing` 21, `test_swapper_state`
   13, `test_detection_state_dict` 7)
@@ -645,3 +645,43 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   (their work committed before the readback). `nr.py` now drains before
   evaluate and submits right after; two order-sensitive pins in
   `test_native_flow` fail if either goes away.
+
+### 2026-09-20 (later still) — the crash file decoded; the collector moved OUT of the repo and now names crash offsets itself
+- **THE OWNER'S `native-crash.log` CONTAINS THE SILENT-KILL MECHANISM, WITH A
+  FAULTING ADDRESS**: two `NATIVE CRASH: exception 0xC0000005 (access
+  violation) at C:\WINDOWS\System32\KERNEL32.DLL+0x27799`, then two
+  `TERMINATION via ntdll!NtTerminateProcess(handle=0x0 /
+  0xFFFFFFFFFFFFFFFF, status=0x00000002)` with libffi/ctypes/python frames.
+  Reading: the faulting INSTRUCTION was inside KERNEL32 itself (a deref in
+  kernel32-resident code - GetProcAddress-family lives there, unlike most
+  APIs which forward to KernelBase), and the process was then terminated
+  DELIBERATELY (status 2, not a crash unwind). The same offset was already
+  the example in `resolve_offsets.bat`, i.e. this is a RECURRING fault from
+  the earlier runs too. Note the file's mtime (07:30) is a DIFFERENT run
+  from the 07:26 one whose console we saw - and `neuroframe_caller-104960`
+  staging at 07:29 says that run was the LEGACY route, so legacy mode is not
+  clean either (contrary to the 11.37 s run).
+- **Hardware faults now carry a caller chain** (`_stack_chain`, capped at 8
+  emissions): the AV line ends with `from <frames>` - that is what tells us
+  whether the kernel32 fault was entered from our ctypes frame or from the
+  runtime's own code. Cheap, and decisive for the next occurrence.
+- **COLLECTOR MOVED OUT OF THE REPO** (owner instruction: GitHub Desktop kept
+  offering the dumps): the default output root is now
+  `C:\ComfyUI_PORTABLE\NODE_CODING\RIG_EVIDENCE\<timestamp>`, i.e. a
+  sibling of the ComfyUI folder - never inside the checkout. Override with
+  `ANTS_EVIDENCE_OUT`; a `[!]` note is printed if the resolved folder IS
+  inside the pack. (The old `tools/rig_evidence/` stays gitignored as belt
+  and braces.)
+- **The report now names crash offsets itself**: every `MODULE+0xRVA` in the
+  collected logs is resolved to an export through the sibling
+  `resolve_crash_offset.py` (module found in System32, the python folder or
+  the staged runtime folders), with the neighborhood printed. Case-insensitive
+  (crash lines say `KERNEL32.DLL`, the file is `kernel32.dll`), a full path in
+  a crash line is handled, and a non-PE file is reported, never fatal.
+- **The black box is INLINED in the report** (last 60 lines of
+  `native-crash.log`), so the clipboard paste carries the verdict itself.
+- Also confirmed from the owner's inventory: `models/DLSS/NR` holds a file
+  LITERALLY named `nvngx_dlssnr.dll` that is actually the legacy CALLER DLL
+  (104960 bytes, same hash as `neuroframe_caller.dll`) - the legacy route
+  stages it under that name, which is exactly the sibling trap the staging
+  rule warns about.

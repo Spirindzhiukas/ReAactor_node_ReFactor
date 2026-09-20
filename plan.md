@@ -53,6 +53,13 @@ python and never registers callbacks.
       the namespace is confirmed twice, and the proven hosts drain the
       command list before the feature call and submit right after it. Our
       `nr.py` now matches that; pins fail if the hygiene goes away.
+- [x] **Collector relocated + self-answering (owner instruction)**: dumps go to
+      `C:\ComfyUI_PORTABLE\NODE_CODING\RIG_EVIDENCE\`, never inside the
+      checkout; crash offsets are resolved to export names in the report; the
+      black box is inlined. The 07:30 crash file (AV inside KERNEL32 at
+      +0x27799, then a deliberate `NtTerminateProcess(status 2)`) is the
+      recurring silent-kill signature - hardware fault lines now carry a
+      caller chain to name the caller.
 - [ ] **Run 31 (owner): plain re-run** (`set "NVSDK_NGX_LOG_LEVEL=1"`,
       no ANTS_ lines needed) — the first run that should reach CreateFeature +
       evaluate with the full host-parity contract. Console + nvngx.log + crash

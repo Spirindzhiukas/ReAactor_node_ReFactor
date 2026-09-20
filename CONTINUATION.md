@@ -258,6 +258,32 @@ snippet that rejects our frame/parameters. Run `tools\collect_rig_evidence.bat`
 afterwards (it now auto-detects everything and can be run from anywhere) and
 send the report plus `files\`.
 
+## The crash black box (what it told us, 2026-09-20)
+
+The owner's `native-crash.log` (appended across runs; 07:30 entry) holds:
+
+```
+[ANTs] NATIVE CRASH: exception 0xC0000005 (access violation) at
+       C:\WINDOWS\System32\KERNEL32.DLL+0x27799
+[ANTs] TERMINATION via ntdll!NtTerminateProcess(handle=0x0, status=0x00000002);
+       call chain: libffi-8.dll+0x4771 <- ... <- python313.dll+0x6D38F
+```
+
+Two readings, both useful: the faulting instruction was inside **KERNEL32**
+itself (kernel32-resident code - `GetProcAddress`-family; most other APIs
+forward to KernelBase), and the process was then terminated **deliberately**
+with status 2. That offset is the same one `resolve_offsets.bat` uses as its
+example, so this is a recurring fault, not a one-off. Hardware fault lines
+now also carry a caller chain, which is what will say whether the fault was
+entered from our ctypes frame or from the runtime's code.
+
+**The evidence collector now answers this without a second step**: it resolves
+every `MODULE+0xRVA` in the collected logs to an export name (and prints the
+neighbouring exports), inlines the last 60 lines of `native-crash.log` in the
+report, and writes everything to
+`C:\ComfyUI_PORTABLE\NODE_CODING\RIG_EVIDENCE\<timestamp>\` - outside the
+checkout, so GitHub Desktop can never sweep it into a commit.
+
 ## Run 28+ host layout — IMPLEMENTED while run 28 is pending (2026-09-20)
 
 The whole NR host was rebuilt onto the layout the **working** hosts of this

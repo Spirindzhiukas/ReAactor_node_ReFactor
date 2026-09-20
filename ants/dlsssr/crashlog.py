@@ -254,6 +254,12 @@ def arm(crash_file_path):
                     if code == _CXX_CODE:
                         _report_cxx(k32, record)
                     elif code in _INTERESTING:
+                        # Hardware faults get the caller chain too: run 30's
+                        # crash file shows an access violation INSIDE
+                        # KERNEL32 (a faulting GetProcAddress-descended
+                        # dereference), and the chain is what says whether
+                        # the caller was our ctypes frame or the runtime's
+                        # own code.
                         _state["count"] += 1
                         where = ""
                         if address:
@@ -262,8 +268,16 @@ def arm(crash_file_path):
                                 where = f" at {module}+0x{offset:X}"
                             else:
                                 where = f" at 0x{address:X} (unknown module)"
+                        chain = ""
+                        if _state["count"] <= 8:
+                            try:
+                                frames = _stack_chain(k32, 0, 12)[:8]
+                                if frames:
+                                    chain = " from " + " <- ".join(frames)
+                            except Exception:
+                                chain = ""
                         _emit(f"\n[ANTs] NATIVE CRASH: exception 0x{code:08X} "
-                              f"({_INTERESTING[code]}){where}\n")
+                              f"({_INTERESTING[code]}){where}{chain}\n")
             except Exception:
                 pass
         return 0  # EXCEPTION_CONTINUE_SEARCH - the crash proceeds normally

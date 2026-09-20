@@ -430,6 +430,7 @@ def _rig_evidence_check():
     import contextlib
     import importlib.util
     import io
+    import os
     import tempfile
 
     spec = importlib.util.spec_from_file_location(
@@ -456,16 +457,26 @@ def _rig_evidence_check():
         with contextlib.redirect_stdout(io.StringIO()):
             code = module.main(["--repo", str(repo), "--dlss-root", str(dlss),
                                 "--out", str(out), "--comfy-root", str(root)])
-        report = (out / "rig_evidence.txt").read_text()
-        copied = sorted(p.name for p in (out / "files").iterdir())
+        run_dir = sorted(d for d in out.iterdir() if d.is_dir())[-1]
+        report = (run_dir / "rig_evidence.txt").read_text()
+        copied = sorted(p.name for p in (run_dir / "files").iterdir())
         # auto-detection + the mangled-argument guard (the owner's first run
         # of this tool died on --repo "C:\\" - cmd eats the closing quote)
         auto = (module.find_pack("", str(repo)) == str(repo)
                 and module.find_dlss_root("", str(repo)) == str(dlss))
         guard = (module.clean_path('C:\\" --comfy-root C:') == ""
                  and module.clean_path('"C:\\ComfyUI"') == "C:\\ComfyUI")
+        # the dump must land OUTSIDE the pack (GitHub Desktop watches it)
+        out_root = module.find_out_root(str(root / "ComfyUI"), str(repo))
+        outside = (not os.path.abspath(out_root).lower().startswith(
+                       os.path.abspath(repo).lower())
+                   and os.path.dirname(out_root).endswith("NODE_CODING"))
+        # crash offsets are resolved to export names in the report
+        offsets = _collector_offset_check(module, root)
+        # the black box is inlined, so the pasted report carries the verdict
+        inlined = "CRASH BLACK BOX" in report and "int29 site" in report
         return (code == 0
-                and auto and guard
+                and auto and guard and outside and offsets and inlined
                 and "2099-01-01.1" in report          # deployment marker
                 and "nvngx_dlssnr.dll" in report      # runtime inventory
                 and "sha256(first 8)" in report
@@ -475,6 +486,59 @@ def _rig_evidence_check():
     finally:
         import shutil
         shutil.rmtree(root, ignore_errors=True)
+
+
+def _collector_offset_check(module, root):
+    """The report names the function behind a MODULE+0xOFFSET crash line."""
+    import os
+    import struct
+
+    sysdir = root / "System32"
+    sysdir.mkdir(exist_ok=True)
+    buf = bytearray(0x3000)
+
+    def put(off, data):
+        buf[off:off + len(data)] = data
+
+    put(0, b"MZ")
+    put(0x3C, struct.pack("<I", 0x80))
+    put(0x80, b"PE\x00\x00")
+    put(0x84, struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 240, 0x2022))
+    opt = 0x98
+    put(opt, struct.pack("<HBBIIIIIQII", 0x20B, 14, 0, 0x200, 0, 0, 0x1000,
+                         0x1000, 0x400000, 0x1000, 0x200))
+    put(opt + 112, struct.pack("<II", 0x1000, 0x200))
+    put(opt + 120, struct.pack("<II", 0x1200, 0x200))
+    put(opt + 240, b".rdata\x00\x00" + struct.pack("<IIII", 0x1000, 0x1000,
+                                                   0x1C00, 0x400) + b"\x00" * 20)
+
+    def rva(r):
+        return 0x400 + (r - 0x1000)
+
+    put(rva(0x1000), struct.pack("<IIHHIIIIIII", 0, 0, 1, 0, 0x1040, 1, 1, 1,
+                                 0x1180, 0x1080, 0x10A0))
+    put(rva(0x1040), b"probe.dll\x00")
+    put(rva(0x1080), struct.pack("<I", 0x10C0))
+    put(rva(0x10A0), struct.pack("<H", 0))
+    put(rva(0x1180), struct.pack("<I", 0x1500))          # one export @0x1500
+    put(rva(0x10C0), b"GetProcAddress\x00")
+    (sysdir / "KERNEL32.DLL").write_bytes(bytes(buf))
+
+    log = root / "native-crash.log"
+    log.write_text("NATIVE CRASH: access violation at "
+                   "C:\\WINDOWS\\System32\\KERNEL32.DLL+0x1510\n")
+    lines = []
+    old_windir = os.environ.get("WINDIR")
+    os.environ["WINDIR"] = str(root)
+    try:
+        module.resolve_offsets([str(log)], lines)
+    finally:
+        if old_windir is None:
+            os.environ.pop("WINDIR", None)
+        else:
+            os.environ["WINDIR"] = old_windir
+    text = "\n".join(lines)
+    return "(RVA 0x1500 +0x10)" in text and "GetProcAddress" in text
 
 
 def _collector_bat_check():
@@ -862,6 +926,11 @@ def main():
           _resolver_tolerance_check())
     node_src = (REPO / "ants" / "dlssnr" / "node.py").read_text()
     nr_src = (REPO / "ants" / "dlsssr" / "nr.py").read_text()
+    check("crashlog: hardware faults are reported with the caller chain "
+          "(run 30's AV was INSIDE KERNEL32 - the chain says whether our "
+          "ctypes frame or the runtime called it)",
+          "_stack_chain(k32, 0, 12)" in crashlog_src
+          and "NATIVE CRASH: exception" in crashlog_src)
     check("crashlog: the C++ throw reporter is wired into the armed "
           "first-chance handler and still lets the exception unwind",
           "_report_cxx(k32, record)" in crashlog_src
