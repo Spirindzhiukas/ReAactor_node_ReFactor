@@ -282,7 +282,11 @@ def main():
           and "VirtualProtect" in crashlog_src
           and "RtlCaptureStackBackTrace" in crashlog_src
           and "install_termination_trap" in ngx_src
-          and "ANTS_NR_TERMINATION_TRAP" in ngx_src)
+          and "ANTS_NR_TERMINATION_TRAP" in ngx_src
+          # run 27b: the trap install must sit OUTSIDE the callbacks env
+          # block - nesting it there let an env deletion strip the nets.
+          and ngx_src.index("install_termination_trap")
+          < ngx_src.index('os.environ.get("ANTS_NR_RUNTIME_CALLBACKS")'))
     check("crashlog: ntdll!NtTerminateProcess detour ships (run 26: the "
           "death avoided both patched IATs, so the final gate itself is "
           "detoured - stolen syscall stub re-executed after logging)",

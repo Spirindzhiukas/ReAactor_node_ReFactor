@@ -292,6 +292,25 @@ class NgxSession:
                     _log().status(f"[ANTs] NGX core preloaded: {core_path}")
                 except Exception as exc:
                     _log().status(f"[ANTs] NGX core preload skipped: {exc}")
+            # Termination tracer (runs 25-27, see crashlog.py): ARMED ALWAYS
+            # on the NR path - run 27b lesson: nested inside the callbacks
+            # experiment, an env deletion stripped the nets silently and the
+            # run went out instrument-free. Only ANTS_NR_TERMINATION_TRAP=0
+            # opts out. Patches both NGX modules' import tables (static
+            # terminates) and detours ntdll!NtTerminateProcess (dynamic
+            # GetProcAddress terminates - the snippet imports
+            # LoadLibraryW/GetProcAddress, so IATs alone are dodgeable).
+            if os.environ.get("ANTS_NR_TERMINATION_TRAP", "1") != "0":
+                from . import crashlog
+                crashlog.install_termination_trap(
+                    [(self.module.handle,
+                      "snippet " + os.path.basename(str(self.module.path or ""))),
+                     (self._core_handle, "driver core")])
+                # And the final gate: every self-termination funnels
+                # through ntdll!NtTerminateProcess - catch kills made
+                # by modules whose IATs we did not patch (run 26 proved
+                # the death avoids both NGX modules' patched thunks).
+                crashlog.install_ntdll_terminate_detour()
             if os.environ.get("ANTS_NR_RUNTIME_CALLBACKS"):
                 # EXPERIMENT (runs 22-24, env-gated): register callbacks on
                 # the snippet the way a snippet host would. Run 22/23 PROVED
@@ -379,26 +398,6 @@ class NgxSession:
                     self._cb_keep.append(cb)  # pin the trampoline
                     _log().status(f"[ANTs] {name} <- callback registered "
                                   f"(returns {ret})")
-
-                # Termination tracer (run 25, see crashlog.py): run 24 still
-                # died SILENTLY after the params callback - no exception
-                # anywhere, crash file empty. That signature = a deliberate
-                # kill through a no-exception path (CRT abort/fastfail,
-                # ExitProcess family). Patch both NGX modules' import tables
-                # so the killer logs its call chain (module+offset each)
-                # before forwarding to the real function.
-                #   ANTS_NR_TERMINATION_TRAP=0 opts out.
-                if os.environ.get("ANTS_NR_TERMINATION_TRAP", "1") != "0":
-                    from . import crashlog
-                    crashlog.install_termination_trap(
-                        [(self.module.handle,
-                          "snippet " + os.path.basename(str(self.module.path or ""))),
-                         (self._core_handle, "driver core")])
-                    # And the final gate: every self-termination funnels
-                    # through ntdll!NtTerminateProcess - catch kills made
-                    # by modules whose IATs we did not patch (run 26 proved
-                    # the death avoids both NGX modules' patched thunks).
-                    crashlog.install_ntdll_terminate_detour()
 
         app_data = app_data_path or os.path.join(writable_cache_dir("appdata"), "logs")
         os.makedirs(app_data, exist_ok=True)
