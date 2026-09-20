@@ -98,6 +98,58 @@ NVIDIA NGX core + snippet
    anywhere; our host registers three (env-gated). Runs 22–26 all had them
    ON. Run 27 = `ANTS_NR_RUNTIME_CALLBACKS=0`.
 
+## 3b. Name-level listings: the SHIM VERSION-GATE hypothesis (the best fit for every observation)
+
+Key names from the --all dump:
+
+- snippet + dlssg (identical framework): `GetFileVersionInfoA/VerQueryValueA/
+  GetFileVersionInfoSizeA` (file-version queries), `RegOpenKeyExW/
+  RegQueryValueExW/RegCloseKey` (registry), `VerSetConditionMask +
+  VerifyVersionInfoW`, `GetSystemDirectoryW + LoadLibraryW/LoadLibraryExW +
+  GetProcAddress + GetModuleHandleA + GetModuleHandleExA`,
+  `AllocConsole + GetConsoleWindow + SetConsoleTitleA + WriteConsoleA +
+  OutputDebugStringA/W` (self-console diagnostics framework),
+  `FindResourceA/LoadResource/LockResource/SizeofResource` (embedded
+  resources — snippet only, dlssg lacks them), `SetEnvironmentVariableW`.
+  USER32 = `GetWindowThreadProcessId` in both (console self-identification,
+  not a message box).
+- engine: `D3D12SerializeRootSignature` + `D3DCompile` (its own shaders) +
+  `CreateDXGIFactory1` — and NO D3D12CreateDevice: the device is created
+  dynamically (Agility pattern). Static CRT; full crash battery.
+- caller: pure static CRT + GetProcAddress/LoadLibraryExW + VirtualProtect
+  (its per-call slot-repoint mechanics) — consistent with the DVT-parity
+  shim pins.
+
+### The hypothesis
+
+The NGX runtime family normally locates the driver core with
+`GetModuleHandle("nvngx.dll")` and validates the environment with
+file-version queries. In HIS process there is no module named
+`nvngx.dll` (the core file is `_nvngx.dll`), so a missing/failing probe
+falls through to `LoadLibrary` on System32's real driver nvngx.dll —
+which has a valid VERSION resource. In OUR process the name
+`nvngx.dll` is DELIBERATELY occupied by our shim (loaded first, by
+design) — a hand-built PE **with no VERSION resource**. A
+`GetFileVersionInfoSize` on our shim returns 0 / a version gate fails ⇒
+deliberate kill (fastfail class — which is why no trap saw it: our IAT
+patches were verified armed and dodged).
+
+This fits: deliberate death (runs 24–26), no exception, kill after the
+params callback at first evaluate, works in his host, dodges IAT traps.
+
+### Cheap experiments riding run 27, and the follow-ups
+
+1. `set "NVSDK_NGX_LOG_LEVEL=1"` (then 4 if silent) in the launch bat —
+   NVIDIA SDK log-level convention; logs expected under the NGX appdata
+   area (check our staged appdata/logs AND %LOCALAPPDATA%\NVIDIA\NGX).
+2. **E1 direct bind (use_shim=False)** becomes decisive: no shim module in
+   the process at all ⇒ the name nvngx.dll resolves to nothing (his
+   host's exact situation) ⇒ if the death disappears, the gate-vs-shim
+   hypothesis is CONFIRMED.
+3. If confirmed: ship a VS_VERSIONINFO resource inside our hand-built
+   shim (we control the builder — make the shim version-indistinguishable
+   from a real nvngx.dll) — the permanent cure that keeps the shim.
+
 ## 4. The CUDA hypothesis (the next big move if run 27 fails)
 
 His NR bridge calls itself the "D3D12/NGX CUDA bridge" (runtime.py
