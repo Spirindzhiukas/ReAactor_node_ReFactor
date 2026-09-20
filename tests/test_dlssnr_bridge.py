@@ -642,6 +642,15 @@ def main():
     finally:
         discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, \
             discovery.PACKAGE_DLL_DIR = saved
+    check("node: the legacy engine's LUID failure is explained (wedged device "
+          "after a removal -> restart; otherwise the helper pair, plus the "
+          "collector inventory as the next step)",
+          "by LUID" in node_src and "restart ComfyUI" in node_src
+          and "HELPER / ENGINE INVENTORY" in node_src)
+    check("node: a removed device drops the GPU context AND the session (the "
+          "next frame rebuilds both), instead of cascading on a dead device",
+          "REMOVED" in node_src and "_close_native()" in node_src
+          and "fresh device" in node_src)
     check("native: the engine prints the provenance note as STATUS, not a "
           "scary warning, and never refuses the community builds",
           "provenance_note" in node_src

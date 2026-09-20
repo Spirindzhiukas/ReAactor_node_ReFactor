@@ -780,6 +780,26 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - Suite: **397 checks** (dlsssr 89, dlssnr_bridge 99, native_flow 38) +
   pyflakes/scope/smoke green.
 
+### 2026-09-20 (run 20:39/20:40) — DEVICE REMOVED is the root event; cascades removed
+
+- **Reading the log correctly matters**: the two `Close 0x80070057` failures,
+  the successful `EvaluateFeature` (hr=1, internal C++ throw caught) and the
+  fatal `CreateCommandAllocator 0x887A0005` are ONE event -
+  `DXGI_ERROR_DEVICE_REMOVED`. The legacy "Could not create a D3D12 device
+  matching CUDA ordinal 0 by LUID" immediately after, in the same process, is
+  the wedged-driver state; the stage line names the same `Merserk_DLLS` stash
+  as the working 18:16 run, so the staging change is not implicated.
+- **Code**: `device_status()`/`mark_device_removed()`/`device_removed_error()`
+  name the reason (DEVICE_HUNG = ~2 s TDR timeout, DEVICE_RESET,
+  DRIVER_INTERNAL_ERROR) and raise ONE actionable error; dead contexts refuse
+  further submits and build nothing (no more allocator cascade); `node.py`
+  drops the session AND the GPU context so the next frame rebuilds a fresh
+  device; the legacy LUID failure explains itself (restart first, then the
+  helper pair + the collector inventory); the adapter name/LUID we bound is
+  logged; `ANTS_D3D12_CHECKPOINT=1` (diagnostic) closes/executes/waits after
+  every recorded command and names the invalid one.
+- Suite: **403 checks** (dlsssr 89, native_flow 42, dlssnr_bridge 101).
+
 ### 2026-09-20 (run 18:16/18:25) — CUDA regression diagnosed + fixed; the native host's command list isolated
 
 - **Owner rig run 18:16 (legacy engine): the auto picking works** with a

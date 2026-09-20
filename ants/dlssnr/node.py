@@ -293,7 +293,32 @@ class ReFactorDLSS5Enhancer:
                 self.manager = None
             self.manager = DLSSStandaloneManager(dll_dir)
             self._ordinal = self.device.index if getattr(self.device, "index", None) is not None else 0
-            self.manager.initialize(self._ordinal)
+            try:
+                self.manager.initialize(self._ordinal)
+            except Exception as exc:
+                text = str(exc)
+                # The engine matches its CUDA device by adapter LUID. When it
+                # cannot, in practice it is either a wedged process (a D3D12
+                # device was REMOVED earlier in this same ComfyUI session - the
+                # driver then refuses new devices) or a helper build that does
+                # not belong to this GPU generation. Say both, with the fix.
+                if "by LUID" in text or "LUID" in text:
+                    raise RuntimeError(
+                        f"[ANTs] The neuroframe engine could not create a "
+                        f"D3D12 device for CUDA device {self._ordinal}: {text}\n"
+                        "    Most common cause: an earlier run in THIS ComfyUI "
+                        "process lost its D3D12 device (removed/GPU timeout), "
+                        "after which the driver refuses new devices until the "
+                        "process restarts.\n"
+                        "    Fix: restart ComfyUI and run again.\n"
+                        "    If it still fails in a fresh process, the helper "
+                        "pair in models/DLSS/Merserk_DLLS is not the one this "
+                        "GPU needs - run tools\\collect_rig_evidence.bat and "
+                        "send the HELPER / ENGINE INVENTORY section (it lists "
+                        "every helper DLL with its size, hash and exports).\n"
+                        f"    Engine set in use: {dll_dir}") from exc
+                raise
+
             self.manager_dll_dir = dll_dir
             gpu = self.manager.gpu_name() or f"GPU {self._ordinal}"
             logger.status(f"DLSS-5 Bridge initialized on {gpu} using DLL set: "
@@ -588,13 +613,27 @@ class ReFactorDLSS5Enhancer:
                     payload, w_px, h_px = self._frame_to_rgba8(frame_t)
                     try:
                         out = sess.evaluate(payload, reset=do_reset)
-                    except Exception:
+                    except Exception as exc:
                         # A failing evaluate can leave the NGX feature (and the
                         # snippet's internal state) mid-flight; run 30 showed a
                         # C++ throw from the snippet. Drop the session so the
                         # next queue item builds a fresh one instead of
                         # evaluating into a half-dead feature, and keep the
                         # original error as the one the user sees.
+                        #
+                        # A REMOVED device is worse than a failed feature: the
+                        # D3D12 device itself is gone, so the GPU context must
+                        # go too, or every later frame fails on a dead object
+                        # (rig 20:39: two E_INVALIDARGs then CreateCommandAllocator
+                        # 0x887A0005).
+                        if getattr(self.native_gpu, "dead", None) is not None \
+                                or "REMOVED" in str(exc).upper():
+                            self._close_native()
+                            raise RuntimeError(
+                                str(exc) + "\n    The GPU context and the NGX "
+                                "session were dropped; the next queued frame "
+                                "will build a fresh device (if the driver "
+                                "stays wedged, restart ComfyUI).") from exc
                         self._close_native()
                         raise
                     frame_t = self._rgba8_to_frame(out, w_px, h_px, self.device)

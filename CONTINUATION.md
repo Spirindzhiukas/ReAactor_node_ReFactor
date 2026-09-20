@@ -470,6 +470,64 @@ never raises unless `ANTS_D3D12_STRICT_CLOSE=1`. The runtime path warns that
 the frame is stale and increments `gpu.runtime_recoveries`, so the next run
 carries the count.
 
+## Run 20:39 / 20:40 (2026-09-20) — the DEVICE was removed; the legacy error is the same event
+
+**What the log actually shows** (this is the important reading):
+
+1. 20:39 native: the CUDA-capable helper pair was selected and staged
+   correctly; NGX logged the usual unsigned-snippet refusal (unchanged, we
+   host the snippet ourselves); `Init_ProjectID`/`GetCapabilityParameters`/
+   `Init_Ext`/`CreateFeature(18)` all returned `hr=1`.
+2. Then `Close` answered `0x80070057` on our copy list, the first
+   `EvaluateFeature` ran (its internal C++ throw is caught - `hr=1`), the
+   runtime's list also failed `Close`, and then
+   `CreateCommandAllocator` failed with **`0x887A0005` =
+   DXGI_ERROR_DEVICE_REMOVED**. Both `Close` failures are the *same* event
+   seen from different sides: the device was gone.
+3. 20:40/20:41 legacy, same ComfyUI process: `Could not create a D3D12 device
+   matching CUDA ordinal 0 by LUID`. That is the wedged-process state after a
+   device removal (the driver refuses new devices until the process restarts),
+   not a second bug and not caused by the staging change - the stage line
+   names `Merserk_DLLS` in both the 18:16 (working) and 20:40 (failing) runs.
+
+**Code changes (this commit)**:
+
+* `GpuContext.device_status()` / `mark_device_removed()` /
+  `device_removed_error()`: the reason is now reported in plain English
+  (`DEVICE_HUNG` = the driver's ~2 s TDR timeout, `DEVICE_RESET`,
+  `DRIVER_INTERNAL_ERROR`), the "not closable" warnings carry the device
+  status, and a removed device raises ONE loud actionable error instead of
+  cascading into more HRESULTs.
+* A dead context refuses further work and creates no new objects;
+  `node.py` drops the NGX session **and** the GPU context on a removal, so the
+  next queued frame builds a fresh device.
+* The legacy init failure now explains itself: restart ComfyUI first; if it
+  persists in a fresh process, the helper pair is the suspect and the
+  collector's HELPER / ENGINE INVENTORY is the evidence.
+* `ANTS_D3D12_CHECKPOINT=1` (diagnostic, off by default): every recorded
+  command is closed/executed/waited immediately, so a poisoned recording
+  names the exact command (`... failed at command #N (Barrier(...))`)
+  instead of "something in this list".
+* The native host logs the adapter name and LUID it bound (the reference for
+  any "by LUID" failure from the engine).
+
+**Next runs, in order** (each in a FRESH ComfyUI process):
+
+1. **Small frame first, native engine** (e.g. 768x768, 1 pass): proves the
+   whole D3D12 path end to end, and a small evaluate cannot hit the 2 s TDR
+   timeout. If this passes, the device removal is a size/timeout issue.
+2. **Then the 4096x3072 frame, native**: if the device is removed again the
+   error now names the reason; if it says DEVICE_HUNG, the fix is a TDR delay
+   (`HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\TdrDelay`,
+   seconds, reboot) or smaller frames.
+3. **Then legacy (GPU)**: it should initialize normally in a fresh process.
+   If it *still* says "by LUID", send the collector report - the HELPER /
+   ENGINE INVENTORY section will show whether the pair on disk is the one
+   that worked earlier.
+4. If a `Close 0x80070057` appears while the device reports healthy, re-run
+   once with `set ANTS_D3D12_CHECKPOINT=1` - the log will name the invalid
+   command.
+
 ## Rig facts (owner environment)
 
 Windows portable ComfyUI `C:\ComfyUI_PORTABLE\ComfyUI`, RTX 24 GB; node at

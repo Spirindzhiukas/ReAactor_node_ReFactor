@@ -94,6 +94,22 @@ python and never registers callbacks.
       the runtime records into a DEDICATED command list now, and an
       unconclosable recording is dropped + replaced (never reused, never
       fatal; `ANTS_D3D12_STRICT_CLOSE=1` for A/B).
+- [x] **RUN 20:39/20:40 (owner) — the D3D12 device was REMOVED**: both Close
+      failures and the final `CreateCommandAllocator 0x887A0005` are one event
+      (DXGI_ERROR_DEVICE_REMOVED); the legacy "matching CUDA ordinal by LUID"
+      right after is the wedged process. Code: reason codes reported in plain
+      English, dead contexts refuse work and build nothing, node drops session
+      + GPU context for a clean rebuild, legacy init explains the restart
+      rule, adapter name/LUID logged, `ANTS_D3D12_CHECKPOINT=1` names an
+      invalid command if a Close fails on a healthy device.
+- [ ] **Run 33 (owner, fresh process each time)**:
+      1. native engine + a SMALL frame (768x768, 1 pass) → proves the path
+         end-to-end and cannot hit the 2 s TDR timeout;
+      2. native engine + 4096x3072 → if DEVICE_HUNG comes back, it is a TDR
+         (raise `TdrDelay` in the registry / use smaller frames);
+      3. legacy engine (GPU) in a fresh process → must initialize;
+      4. if `Close 0x80070057` appears with a healthy device, re-run with
+         `set ANTS_D3D12_CHECKPOINT=1` and send the console.
 - [ ] **Run 32 (owner)**: legacy engine with the CUDA-capable pair in
       `Merserk_DLLS` → the log must print `exports dlss5nr_init +
       dlss5nr_process_cuda_v6, dlss5nr_cuda_supported` and

@@ -79,6 +79,44 @@ _LIST_COPY_TEXTURE_REGION = 16  # CopyTextureRegion (works across types)
 _LIST_RESOURCE_BARRIER = 26
 
 
+# --- D3D12 device status ---------------------------------------------------
+# The rig runs proved that a "Close failed" message alone is ambiguous: the
+# list can be poisoned while the device is perfectly alive, OR the device can
+# have been REMOVED underneath us (a GPU timeout / TDR, a driver reset, or a
+# driver-internal error) - in which case every later call is meaningless and
+# creating new objects just cascades into more confusing HRESULTs
+# (rig 2026-09-20 20:39: Close 0x80070057 twice, then CreateCommandAllocator
+# 0x887A0005 = DXGI_ERROR_DEVICE_REMOVED).
+DXGI_ERROR_DEVICE_REMOVED = 0x887A0005
+DXGI_ERROR_DEVICE_HUNG = 0x887A0006
+DXGI_ERROR_DEVICE_RESET = 0x887A0007
+DXGI_ERROR_DRIVER_INTERNAL_ERROR = 0x887A0020
+DXGI_ERROR_UNSUPPORTED = 0x887A0004
+DXGI_ERROR_DEVICE_REMOVED_NAMES = {
+    DXGI_ERROR_DEVICE_REMOVED: (
+        "DEVICE_REMOVED (the device is gone; everything recorded is void)"),
+    DXGI_ERROR_DEVICE_HUNG: (
+        "DEVICE_HUNG - the GPU did not finish within the driver's timeout "
+        "(TDR, 2 s by default). A single frame/evaluate that takes longer "
+        "than that resets the device"),
+    DXGI_ERROR_DEVICE_RESET: (
+        "DEVICE_RESET - the driver reset the device (often the same GPU "
+        "timeout, seen from the driver's side)"),
+    DXGI_ERROR_DRIVER_INTERNAL_ERROR: (
+        "DRIVER_INTERNAL_ERROR - the driver itself failed"),
+    DXGI_ERROR_UNSUPPORTED: "UNSUPPORTED - the device does not support the call",
+}
+
+
+def describe_device_reason(hr):
+    """Plain-English name for a GetDeviceRemovedReason HRESULT."""
+    code = hr & 0xFFFFFFFF
+    if code == 0:
+        return "0x00000000 (device present and healthy)"
+    return f"0x{code:08X} - " + DXGI_ERROR_DEVICE_REMOVED_NAMES.get(
+        code, "unknown removal reason")
+
+
 def _align(value, to):
     return -(-value // to) * to
 
@@ -268,6 +306,20 @@ class D3D12Device(ComObject):
     def device_removed_reason(self):
         return self.call(_DEVICE_DEVICE_REMOVED_REASON, [], ctypes.c_int32)
 
+    def device_status(self):
+        """(removed, hr, text): is the device gone, and why.
+
+        ``GetDeviceRemovedReason`` returns S_OK while the device is usable; any
+        error means the device is removed and every recorded/queued call is
+        void. Never raises - a status query must not become the failure.
+        """
+        try:
+            hr = self.device_removed_reason()
+        except Exception as exc:                      # device object itself gone
+            return True, DXGI_ERROR_DEVICE_REMOVED, f"query failed ({exc})"
+        removed = (hr & 0xFFFFFFFF) not in (0, 1)     # S_OK / S_FALSE
+        return removed, hr & 0xFFFFFFFF, describe_device_reason(hr)
+
     def _committed(self, heap_type, desc, initial_state, label, heap_flags=0):
         heap = _heap_properties(heap_type)
         return self._create(_DEVICE_CREATE_COMMITTED_RESOURCE, f"CreateCommittedResource({label})",
@@ -336,7 +388,14 @@ def enumerate_adapters():
         desc = ctypes.create_string_buffer(312)  # DXGI_ADAPTER_DESC1
         adapter.call_hr(10, [_CVOID_P()], desc, what="GetDesc1")  # GetDesc1 = 10
         wide_part = ctypes.wstring_at(ctypes.addressof(desc), 64)
-        adapters.append((adapter, wide_part.split("\x00")[0]))
+        # LUID lives at 0x12C in DXGI_ADAPTER_DESC1 (LowPart, HighPart). NGX
+        # and the neuroframe engine both match their CUDA device by this value,
+        # so printing it is what makes "cannot match CUDA ordinal by LUID"
+        # comparable across the two hosts.
+        luid = ctypes.cast(ctypes.addressof(desc) + 0x12C,
+                           ctypes.POINTER(ctypes.c_uint32 * 2)).contents
+        adapters.append((adapter, wide_part.split("\x00")[0],
+                         (luid[0], luid[1])))
         index += 1
     return factory, adapters
 
@@ -348,6 +407,16 @@ class GpuContext:
         self.device = device
         self.factory, adapters = enumerate_adapters()
         self.adapter = adapters[adapter_index][0] if adapters else None
+        self.adapter_name = adapters[adapter_index][1] if adapters else "?"
+        self.adapter_luid = adapters[adapter_index][2] if adapters else None
+        # Which adapter we bound matters: the neuroframe engine matches its
+        # CUDA device by LUID, so this line is the reference when it reports
+        # "cannot match CUDA ordinal by LUID".
+        from ..log import dlss_logger
+        dlss_logger.status(
+            "[ANTs] D3D12 host adapter %s (index %d, LUID %s)",
+            self.adapter_name, adapter_index,
+            "{%s, %s}" % self.adapter_luid if self.adapter_luid else "?")
         self.queue = device.create_command_queue()
         self.allocator = device.create_command_allocator()
         self.list = device.create_command_list(self.allocator)
@@ -356,6 +425,8 @@ class GpuContext:
         self.fence_value = 0
         self._pending_release = []
         self._parked = []              # objects a poisoned list replaced
+        self.dead = None               # (hr, text) once the device is removed
+        self.recorded = []             # command descriptions, for checkpoints
         self.runtime_allocator = None  # the pair NGX records into (lazy)
         self.runtime_list = None
         self.runtime_recoveries = 0
@@ -377,6 +448,30 @@ class GpuContext:
             self.runtime_list = self.device.create_command_list(
                 self.runtime_allocator)
         return self.runtime_list
+
+    def _cmd(self, description):
+        """Note the command just recorded (and verify it in checkpoint mode).
+
+        Rig runs left one open question: WHICH command poisons the list when
+        Close answers E_INVALIDARG while the device is alive. With
+        ANTS_D3D12_CHECKPOINT=1 every recorded command is closed, executed and
+        waited on immediately, so the first verify failure names the exact
+        command and its index instead of "something in this recording".
+        Diagnostic only (it serializes GPU work), never enabled by default.
+        """
+        self.recorded.append(description)
+        if os.environ.get("ANTS_D3D12_CHECKPOINT") != "1":
+            return
+        index = len(self.recorded) - 1
+        try:
+            self._submit_pair(self.list, self.allocator, 30000, "copy")
+        except DlssSrError as exc:
+            from ..log import dlss_logger
+            dlss_logger.error(
+                "[ANTs] D3D12 checkpoint: the recording failed at command #%d "
+                "(%s) - everything recorded before it was valid. %s",
+                index, description, exc)
+            raise
 
     def transition(self, resource, to):
         if getattr(resource, "heap_type", D3D12_HEAP_TYPE_DEFAULT) in \
@@ -401,6 +496,7 @@ class GpuContext:
         if resource.state == to:
             return  # already there - a redundant barrier only warns the debug layer
         barrier = _transition_barrier(resource.ptr, resource.state, to)
+        self._cmd(f"Barrier({getattr(resource, 'label', '?')} -> {to})")
         self.list.call(_LIST_RESOURCE_BARRIER, [_CVOID_U32(), _CVOID_P()], None,
                        ctypes.c_uint32(1), barrier)
         resource.state = to
@@ -440,6 +536,8 @@ class GpuContext:
         src_loc = _copy_location_footprint(staging.ptr, texture.format,
                                            texture.width, texture.height, row_pitch)
         dst_loc = _copy_location_texture(texture.ptr)
+        self._cmd(f"CopyTextureRegion(upload -> {texture.label} "
+                  f"{texture.width}x{texture.height})")
         self.list.call(_LIST_COPY_TEXTURE_REGION,
                        [_CVOID_P(), _CVOID_U32(), _CVOID_U32(), _CVOID_U32(),
                         _CVOID_P(), _CVOID_P()],
@@ -455,6 +553,8 @@ class GpuContext:
         dst_loc = _copy_location_footprint(readback.ptr, texture.format,
                                            texture.width, texture.height, row_pitch)
         src_loc = _copy_location_texture(texture.ptr)
+        self._cmd(f"CopyTextureRegion({texture.label} -> readback "
+                  f"{texture.width}x{texture.height})")
         self.list.call(_LIST_COPY_TEXTURE_REGION,
                        [_CVOID_P(), _CVOID_U32(), _CVOID_U32(), _CVOID_U32(),
                         _CVOID_P(), _CVOID_P()],
@@ -486,10 +586,50 @@ class GpuContext:
         self._submit_pair(self.command_list(), self.runtime_allocator,
                           timeout_ms, "runtime")
 
+    def device_status(self):
+        """(removed, hr, text) for the device this context runs on."""
+        if self.dead is not None:
+            return True, self.dead[0], self.dead[1]
+        try:
+            return self.device.device_status()
+        except Exception as exc:
+            return False, 0, f"status unavailable ({exc})"
+
+    def mark_device_removed(self, hr, text):
+        """Remember that the device is gone (idempotent)."""
+        if self.dead is None:
+            self.dead = (hr & 0xFFFFFFFF, text)
+
+    def device_removed_error(self, where):
+        """The one loud error for a removed device."""
+        _removed, hr, text = self.device_status()
+        return DlssSrError(
+            f"[ANTs] The D3D12 device was REMOVED while {where}: {text}. "
+            "Everything queued or recorded on it is void, so this frame "
+            "cannot be produced. The pack drops the native session and the "
+            "GPU context; the NEXT frame builds a fresh device. If it keeps "
+            "happening: (1) the usual cause is a single GPU operation longer "
+            "than the driver's ~2 s timeout (a big first evaluate or a huge "
+            "frame) - try a much smaller image once to confirm, and raise the "
+            "TDR delay if you need the big one (Windows registry: "
+            "HKLM\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers\\"
+            "TdrDelay, DWORD seconds, reboot); (2) restart ComfyUI before the "
+            "next run - after a removal the driver can refuse new devices in "
+            "the same process (the legacy engine then reports 'Could not "
+            "create a D3D12 device matching CUDA ordinal ... by LUID', which "
+            "is the same wedged state, not a second bug).")
+
     def _submit_pair(self, command_list, allocator, timeout_ms, tag):
+        if self.dead is not None:
+            raise self.device_removed_error("submitting")
         try:
             command_list.call_hr(_LIST_CLOSE, [], what="Close")
         except DlssSrError as exc:
+            removed, hr, text = self.device_status()
+            if removed:
+                self.mark_device_removed(hr, text)
+                raise self.device_removed_error("closing the command list") \
+                    from exc
             self._drop_recording(tag, exc)
             return
         cell = (_CVOID_P() * 1)(command_list.ptr)
@@ -504,17 +644,25 @@ class GpuContext:
                                ctypes.c_uint64(self.fence_value), ctypes.c_void_p(self.event),
                                what="SetEventOnCompletion")
             if not win32.wait_event(self.event, timeout_ms):
-                reason = self.device.device_removed_reason()
+                removed, hr, text = self.device_status()
+                if removed:
+                    self.mark_device_removed(hr, text)
+                    raise self.device_removed_error(
+                        f"waiting for the GPU ({timeout_ms} ms, tag '{tag}')")
                 raise DlssSrError(
-                    f"[ANTs] GPU did not finish within {timeout_ms} ms "
-                    f"(device removed reason 0x{reason & 0xFFFFFFFF:08X}).")
-        removed = self.device.device_removed_reason()
-        if removed < 0:
-            raise DlssSrError(
-                f"[ANTs] D3D12 device removed: 0x{removed & 0xFFFFFFFF:08X}.")
+                    f"[ANTs] The GPU did not finish within {timeout_ms} ms "
+                    f"(tag '{tag}') while the device itself reports healthy "
+                    f"({text}). A fence wait this long usually means the work "
+                    "queued before it is enormous - try a smaller frame.")
+        removed, hr, text = self.device_status()
+        if removed:
+            self.mark_device_removed(hr, text)
+            raise self.device_removed_error(f"executing the '{tag}' recording")
         allocator.call_hr(_ALLOCATOR_RESET, [], what="Reset")
         command_list.call_hr(_LIST_RESET, [_CVOID_P(), _CVOID_P()],
                              allocator.ptr, None, what="Reset")
+        if command_list is self.list:
+            self.recorded.clear()       # the recording was executed and reset
         # The GPU is idle here, so staging buffers from the recording we just
         # executed can be freed (see upload_texture).
         while self._pending_release:
@@ -542,6 +690,7 @@ class GpuContext:
         if os.environ.get("ANTS_D3D12_STRICT_CLOSE") == "1":
             raise exc
         from ..log import dlss_logger
+        _removed, _hr, status = self.device_status()
         if tag == "runtime":
             self.runtime_recoveries += 1
             dlss_logger.warning(
@@ -551,8 +700,8 @@ class GpuContext:
                 "and its allocator were replaced (recovery #%d). Please send "
                 "this line with the console and the nvngx.log from the "
                 "evidence collector; ANTS_D3D12_STRICT_CLOSE=1 turns this into "
-                "a hard error if you prefer the run to stop here.",
-                exc, self.runtime_recoveries)
+                "a hard error if you prefer the run to stop here. Device "
+                "status: %s", exc, self.runtime_recoveries, status)
             old_list, old_alloc = self.runtime_list, self.runtime_allocator
             self.runtime_list, self.runtime_allocator = None, None
             self._parked += [obj for obj in (old_list, old_alloc)
@@ -564,12 +713,23 @@ class GpuContext:
             "recording and replacing the list. GPU work recorded since the "
             "last submit is LOST; if the output looks stale, send this line "
             "with the rest of the log. ANTS_D3D12_STRICT_CLOSE=1 turns this "
-            "into a hard error.", exc)
+            "into a hard error. Device status: %s", exc, status)
         old_list, old_alloc = self.list, self.allocator
         self._parked += [obj for obj in (old_list, old_alloc) if obj is not None]
         self._pending_release.clear()   # the recording never reached the GPU
-        self.allocator = self.device.create_command_allocator()
-        self.list = self.device.create_command_list(self.allocator)
+        try:
+            self.allocator = self.device.create_command_allocator()
+            self.list = self.device.create_command_list(self.allocator)
+        except DlssSrError as exc:
+            # Creating objects can itself fail when the device went away in
+            # the meantime - report THAT, not the cascade (rig 20:39:
+            # CreateCommandAllocator 0x887A0005 after two E_INVALIDARGs).
+            removed, hr, text = self.device_status()
+            if removed or "887A0005" in str(exc).upper():
+                self.mark_device_removed(hr, text)
+                raise self.device_removed_error("rebuilding the command list") \
+                    from exc
+            raise
 
     def close(self):
         if self._closed:

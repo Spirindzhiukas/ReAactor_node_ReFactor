@@ -40,6 +40,7 @@ RESOURCES = {}       # fake object ptr -> {"buf": bytearray, "bpp": int}
 PARAMS = {}          # fake core parameter dict (SR scenario)
 FAKE_HANDLE = 0xDEADBEEF
 close_failures = {"n": 0}   # how many upcoming Close() calls report failure
+device_state = {"reason": 0}  # GetDeviceRemovedReason return value (0 = alive)
 
 
 def check(name, ok, extra=""):
@@ -297,7 +298,7 @@ def build_device_graph():
                               ctypes.c_void_p], create_committed),
         36: (ctypes.c_int32, [ctypes.c_uint64, ctypes.c_uint32, ctypes.c_void_p,
                               ctypes.c_void_p], create_fence),
-        37: (ctypes.c_int32, [], lambda: 0),
+        37: (ctypes.c_int32, [], lambda: device_state["reason"]),
     }, "ID3D12Device")
 
     device_proto = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_uint32,
@@ -804,6 +805,47 @@ def main():
           gpu.runtime_recoveries == 1
           and gpu.runtime_list is not runtime_list
           and gpu.command_list() is gpu.runtime_list)
+
+    # ---- a REMOVED device is fatal, loud, and never "recovered" in place ----
+    # Rig 2026-09-20 20:39: two E_INVALIDARG Close failures, then
+    # CreateCommandAllocator 0x887A0005 (DXGI_ERROR_DEVICE_REMOVED) - the
+    # device was gone and the recovery just cascaded. Now the reason is
+    # reported, the context is marked dead and no new objects are created.
+    check("d3d12: the device-removal reasons are named in plain English",
+          "DEVICE_HUNG" in d3d12.describe_device_reason(0x887A0006)
+          and "removed" in d3d12.describe_device_reason(0x887A0005).lower()
+          and "healthy" in d3d12.describe_device_reason(0).lower()
+          and "TDR" in d3d12.describe_device_reason(0x887A0006))
+    probe_ctx = d3d12.GpuContext(device, adapter_index=0)
+    check("d3d12: the host logs which adapter (and LUID) it bound - the "
+          "reference when the engine's LUID matching fails",
+          "RTX 4090" in (probe_ctx.adapter_name or ""))
+    device_state["reason"] = 0x887A0006        # DEVICE_HUNG
+    close_failures["n"] = 1
+    probe_ctx.upload_texture(upload_tex, bytes(W * H * 4),
+                             d3d12.D3D12_RESOURCE_STATE_COMMON)
+    try:
+        probe_ctx.submit_and_wait()
+        check("d3d12: a removed device raises the loud removal error", False)
+    except Exception as exc:
+        message = str(exc)
+        check("d3d12: a removed device raises one loud [ANTs] error naming the "
+              "reason and the fix (TDR delay / restart), instead of cascading "
+              "into CreateCommandAllocator 0x887A0005",
+              "[ANTs]" in message and "DEVICE_HUNG" in message
+              and "REMOVED" in message and "TdrDelay" in message
+              and "restart ComfyUI" in message)
+    lists_now = sum(1 for e in RECORD if e[0] == "CreateCommandList")
+    try:
+        probe_ctx.submit_and_wait()
+        check("d3d12: a dead context refuses further submits", False)
+    except Exception as exc:
+        check("d3d12: a dead context refuses further submits without creating "
+              "objects on the dead device",
+              "REMOVED" in str(exc)
+              and sum(1 for e in RECORD if e[0] == "CreateCommandList") == lists_now)
+    probe_ctx.close()
+    device_state["reason"] = 0
 
     # ---- staging lifetime: freed only after the GPU is done ----------------
     recorded = []
