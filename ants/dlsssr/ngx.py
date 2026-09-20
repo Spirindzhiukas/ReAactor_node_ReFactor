@@ -34,6 +34,7 @@ driver core faults after a feature exists and releases the D3D12 device
 objects we own.
 """
 
+import struct
 import tempfile
 import ctypes
 import os
@@ -292,24 +293,53 @@ class NgxSession:
                 except Exception as exc:
                     _log().status(f"[ANTs] NGX core preload skipped: {exc}")
             if os.environ.get("ANTS_NR_RUNTIME_CALLBACKS"):
-                # EXPERIMENT (run 22, env-gated): register no-op callbacks on
-                # the snippet the way a snippet host would. A NULL callback
-                # dereference inside the evaluate path is one candidate cause
-                # of the first-evaluate death; this discriminates cheaply.
-                cb_type = ctypes.CFUNCTYPE(ctypes.c_int)
+                # EXPERIMENT (runs 22-23, env-gated): register callbacks on
+                # the snippet the way a snippet host would. Run 22 PROVED the
+                # hook point: the snippet CALLED the RuntimeParams callback
+                # inside the first evaluate and died right after consuming
+                # our answer - the open question is what the answer must BE.
+                #   ANTS_NR_CALLBACK_RET    int the stubs return (default 1)
+                #   ANTS_NR_CALLBACK_DUMP=1 hex-dump up to 64 bytes behind
+                #     every non-NULL pointer argument - identifies the
+                #     struct/params interface the snippet wants filled.
+                # Prototype: x64 passes extra args in registers harmlessly,
+                # so declaring 4 pointer slots is safe whether the real
+                # callback takes 0 or 4.
+                ret = int(os.environ.get("ANTS_NR_CALLBACK_RET", "1") or "1")
+                dump = bool(os.environ.get("ANTS_NR_CALLBACK_DUMP"))
+                k32 = ctypes.windll.kernel32
+                cb_type = ctypes.CFUNCTYPE(ctypes.c_int,
+                                           _CVOID, _CVOID, _CVOID, _CVOID)
                 for name in ("NVSDK_NGX_SetRuntimeParamsCallback",
                              "NVSDK_NGX_SetOverrideStatusCallback",
                              "NVSDK_NGX_SetTelemetryEvaluateCallback"):
                     if not self.module.has_export(name):
                         continue
-                    def _nop(_name=name):
+                    def _nop(*args, _name=name, _ret=ret):
                         _log().status(f"[ANTs] snippet callback fired: {_name}")
-                        return 1
+                        if dump:
+                            for i, arg in enumerate(args):
+                                p = arg or 0
+                                if not p:
+                                    continue
+                                try:
+                                    if k32.IsBadReadPtr(ctypes.c_void_p(p), 64):
+                                        raise OSError("unreadable")
+                                    words = struct.unpack("<8Q",
+                                                          ctypes.string_at(p, 64))
+                                    _log().status(
+                                        f"[ANTs]   arg{i}=0x{p:X} " +
+                                        " ".join(f"{w:016X}" for w in words))
+                                except Exception:
+                                    _log().status(
+                                        f"[ANTs]   arg{i}=0x{p:X} <unreadable>")
+                        return _ret
                     cb = cb_type(_nop)
                     setter = self.module.fn(name, [_CVOID])
                     setter(ctypes.cast(cb, _CVOID))
                     self._cb_keep.append(cb)  # pin the trampoline
-                    _log().status(f"[ANTs] {name} <- no-op registered")
+                    _log().status(f"[ANTs] {name} <- callback registered "
+                                  f"(returns {ret})")
 
         app_data = app_data_path or os.path.join(writable_cache_dir("appdata"), "logs")
         os.makedirs(app_data, exist_ok=True)

@@ -104,7 +104,9 @@ def main():
           and "classic 4-arg Init accepted" in ngx_src)
     check("ngx: snippet callbacks are an env-gated experiment, pinned",
           "ANTS_NR_RUNTIME_CALLBACKS" in ngx_src and "_cb_keep" in ngx_src
-          and "SetRuntimeParamsCallback" in ngx_src)
+          and "SetRuntimeParamsCallback" in ngx_src
+          and "ANTS_NR_CALLBACK_RET" in ngx_src
+          and "ANTS_NR_CALLBACK_DUMP" in ngx_src)
     check("ngx: session close frees the core AFTER the snippet (reverse order)",
           ngx_src.find("self.module.close()") < ngx_src.find(
               "Reverse load order"))
