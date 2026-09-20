@@ -38,12 +38,22 @@ import sys
 
 SMALL_FILES = [
     ("engine (the proven C++ NGX host)",
-     os.path.join("runtime", "dlssnr", "neuroframe_engine_neural_rendering.dll")),
+     "neuroframe_engine_neural_rendering.dll"),
     ("caller (Python -> engine bridge)",
-     os.path.join("runtime", "dlssnr", "neuroframe_caller.dll")),
+     "neuroframe_caller.dll"),
 ]
 BIG_FILE = ("NR runtime (the RenoDX-derived build under test)",
-            os.path.join("runtime", "dlssnr", "nvngx_dlssnr.dll"))
+            "nvngx_dlssnr.dll")
+# Where the dlls actually live, as seen from the Visual Enhancer root.
+# The owner's folder map says bin/runtime/dlssnr/; other layouts are
+# probed too so a repack cannot silently break the tool.
+DLL_DIR_CANDIDATES = [
+    os.path.join("bin", "runtime", "dlssnr"),
+    os.path.join("runtime", "dlssnr"),
+    os.path.join("bin", "dlssnr"),
+    "dlssnr",
+    ".",  # dlls dropped straight into the root
+]
 
 # String classes we mine from the 158 MB runtime (capped per class).
 BIG_CLASSES = [
@@ -239,29 +249,52 @@ def probe_file(label, path, big=False, full_strings_hook=None):
     return out
 
 
+def find_dll_dir(root):
+    """The dlssnr folder under the Visual Enhancer root, layout-tolerant."""
+    for cand in DLL_DIR_CANDIDATES:
+        if os.path.isfile(os.path.join(root, cand, BIG_FILE[1])):
+            return cand
+    for cand in DLL_DIR_CANDIDATES:
+        if any(os.path.isfile(os.path.join(root, cand, name))
+               for _l, name in SMALL_FILES):
+            return cand
+    return None
+
+
 def main(argv):
     root = argv[1] if len(argv) > 1 else None
     if root is None:
         # No argument: probe the folder this script sits in, if it looks
-        # like a Visual Enhancer root (runtime/dlssnr/... present).
+        # like a Visual Enhancer root (a dlssnr dll dir present).
         here = os.path.dirname(os.path.abspath(__file__))
-        if os.path.isfile(os.path.join(here, BIG_FILE[1])):
+        if find_dll_dir(here) is not None:
             root = here
         else:
             print(__doc__)
             return 2
+    dll_dir = find_dll_dir(root)
     if os.path.isfile(root):  # convenience: probe one dll directly
-        targets = [(os.path.basename(root), root)]
-        small = targets
+        small = [(os.path.basename(root), root)]
         big = None
+        dll_dir = "."
+    elif dll_dir is None:
+        print(f"[ANTs] None of the expected dlls were found under:")
+        print(f"       {root}")
+        print(f"       Looked in: {', '.join(DLL_DIR_CANDIDATES)}")
+        print(f"       for: {BIG_FILE[1]} or {SMALL_FILES[0][1]}")
+        print("       Point me at the Visual Enhancer ROOT (the folder that")
+        print("       contains bin\\runtime\\dlssnr\\nvngx_dlssnr.dll).")
+        return 3
     else:
-        small = [(label, os.path.join(root, rel))
-                 for label, rel in SMALL_FILES]
-        big = (BIG_FILE[0], os.path.join(root, BIG_FILE[1]))
+        small = [(label, os.path.join(root, dll_dir, name))
+                 for label, name in SMALL_FILES]
+        big = (BIG_FILE[0], os.path.join(root, dll_dir, BIG_FILE[1]))
 
     report = []
     report.append("ANTs reference-host probe - what the proven C++ NGX host does")
     report.append(f"source: {root}")
+    if not os.path.isfile(root):
+        report.append(f"dll dir: {dll_dir}")
 
     full_sink = []
 

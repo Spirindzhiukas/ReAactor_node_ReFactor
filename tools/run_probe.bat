@@ -81,6 +81,14 @@ echo.
 "%PYEXE%" %PYARGS% "probe_neuroframe_host.py" "%VE_ROOT%"
 set "RC=%ERRORLEVEL%"
 echo.
+if not "%RC%"=="0" (
+    echo [ANTs] The probe reported a problem - exit code %RC%.
+    echo        Read its message above and paste the console output
+    echo        into the chat so it can be fixed.
+    echo.
+    pause
+    exit /b %RC%
+)
 if exist "probe_neuroframe_host_report.txt" (
     type "probe_neuroframe_host_report.txt" | clip
     echo [ANTs] DONE. The FULL report is already on your CLIPBOARD -
