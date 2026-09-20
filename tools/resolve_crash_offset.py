@@ -98,8 +98,16 @@ def main(argv):
     rvas = [rva for rva, _n in entries]
     size = os.path.getsize(path)
     print(f"[ANTs] {path}: {len(entries)} named exports")
+    offsets = []
     for raw in argv[2:]:
-        off = int(raw, 0)
+        try:
+            offsets.append(int(raw, 0))
+        except ValueError:
+            print(f"  [skip] {raw!r} is not an offset (hex like 0x27799)")
+    if not offsets:
+        print(__doc__)
+        return 2
+    for off in offsets:
         if off >= size:
             print(f"  0x{off:X} -> past end of file (module-based dlls are "
                   "virtual; a raw file offset was likely intended)")

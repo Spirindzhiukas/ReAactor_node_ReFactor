@@ -78,6 +78,56 @@ def _iat_tracer_fixture_check():
             and len(keep) >= 2 * len(names))
 
 
+def _resolver_tolerance_check():
+    """Build a minimal PE (one export at RVA 0x1020) and run the resolver
+    over it with a junk token plus a real offset; the junk must be skipped
+    and the offset resolved."""
+    import struct
+    import subprocess
+    import tempfile
+
+    tool = REPO / "tools" / "resolve_crash_offset.py"
+    buf = bytearray(0x2000)
+
+    def put(off, data):
+        buf[off:off + len(data)] = data
+
+    put(0, b"MZ")
+    put(0x3C, struct.pack("<I", 0x80))
+    put(0x80, b"PE\x00\x00")
+    put(0x84, struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 240, 0x2022))
+    opt = 0x98
+    put(opt, struct.pack("<HBBIIIIIQII", 0x20B, 14, 0, 0x200, 0, 0, 0x1000,
+                         0x1000, 0x400000, 0x1000, 0x200))
+    put(opt + 112, struct.pack("<II", 0x1000, 0x100))
+    put(opt + 120, struct.pack("<II", 0x1200, 0x100))
+    put(opt + 240, b".rdata\x00\x00" + struct.pack("<IIII", 0x1000, 0x1000,
+                                                   0x1C00, 0x400) + b"\x00" * 20)
+
+    def rva(r):
+        return 0x400 + (r - 0x1000)
+
+    # export dir: funcs@0x1180 (clear of the name strings), names@0x1080,
+    # ordinals@0x10A0 (0-based indices into AddressOfFunctions)
+    put(rva(0x1000), struct.pack("<IIHHIIIIIII", 0, 0, 1, 0, 0x1040, 1, 2, 2,
+                                 0x1180, 0x1080, 0x10A0))
+    put(rva(0x1040), b"probe.dll\x00")
+    put(rva(0x1080), struct.pack("<II", 0x10C0, 0x10E0))
+    put(rva(0x10A0), struct.pack("<HH", 0, 1))
+    put(rva(0x1180), struct.pack("<II", 0x1000, 0x1020))
+    put(rva(0x10C0), b"NVSDK_NGX_D3D12_Init\x00")
+    put(rva(0x10E0), b"NVSDK_NGX_D3D12_EvaluateFeature_C\x00")
+
+    with tempfile.NamedTemporaryFile(suffix=".dll", delete=False) as fh:
+        fh.write(bytes(buf))
+        path = fh.name
+    out = subprocess.run(
+        [sys.executable, str(tool), path, "resolve_offsets.bat", "0x1025"],
+        capture_output=True, text=True).stdout
+    return ("[skip] 'resolve_offsets.bat'" in out
+            and "0x1025 -> NVSDK_NGX_D3D12_EvaluateFeature_C" in out)
+
+
 def check(name, cond):
     global PASS, FAIL
     if cond:
@@ -181,12 +231,25 @@ def main():
           and "RtlCaptureStackBackTrace" in crashlog_src
           and "install_termination_trap" in ngx_src
           and "ANTS_NR_TERMINATION_TRAP" in ngx_src)
+    check("crashlog: ntdll!NtTerminateProcess detour ships (run 26: the "
+          "death avoided both patched IATs, so the final gate itself is "
+          "detoured - stolen syscall stub re-executed after logging)",
+          "install_ntdll_terminate_detour" in crashlog_src
+          and "install_ntdll_terminate_detour" in ngx_src
+          and "\\x4c\\x8b\\xd1" in crashlog_src
+          and "\\x0f\\x05\\xc3" in crashlog_src
+          and "jmp rax" in crashlog_src)
     check("crashlog: IAT termination tracer walks imports and patches the "
           "termination APIs (flat-PE fixture, fake kernel32)",
           _iat_tracer_fixture_check())
     check("tools: crash-offset resolver ships (names MODULE+0xRVAs)",
           (REPO / "tools" / "resolve_crash_offset.py").is_file()
           and "bisect" in (REPO / "tools" / "resolve_crash_offset.py").read_text())
+    check("tools: resolver tolerates junk tokens (rig: the bat's own name "
+          "reached int() and tracebacked - now skipped with [skip])",
+          _resolver_tolerance_check())
+
+
     bat = (REPO / "tools" / "resolve_offsets.bat")
     bat_raw = bat.read_bytes() if bat.is_file() else b""
     check("tools: rig diagnostics ship as ready-to-run bat files (owner "

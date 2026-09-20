@@ -394,6 +394,11 @@ class NgxSession:
                         [(self.module.handle,
                           "snippet " + os.path.basename(str(self.module.path or ""))),
                          (self._core_handle, "driver core")])
+                    # And the final gate: every self-termination funnels
+                    # through ntdll!NtTerminateProcess - catch kills made
+                    # by modules whose IATs we did not patch (run 26 proved
+                    # the death avoids both NGX modules' patched thunks).
+                    crashlog.install_ntdll_terminate_detour()
 
         app_data = app_data_path or os.path.join(writable_cache_dir("appdata"), "logs")
         os.makedirs(app_data, exist_ok=True)

@@ -300,3 +300,84 @@ def install_termination_trap(module_targets):
               + ", ".join(absent)
               + " - a silent kill would then be statically linked CRT "
                 "abort/fastfail or an inline syscall.\n")
+
+
+def install_ntdll_terminate_detour():
+    """Final discriminator (shipped after run 26): both NGX modules' import
+    traps were armed and verified, yet the silent death called NEITHER
+    TerminateProcess NOR ExitProcess. Either an unpatched module kills us,
+    or the kill bypasses imports (static CRT abort -> __fastfail/int 29h,
+    or a raw syscall). Every self-termination in the process funnels into
+    ntdll!NtTerminateProcess - so detour THAT function: verify the standard
+    Win10/11 syscall-stub prologue, steal it verbatim into an executable
+    buffer, overwrite the entry with 'mov rax, <trampoline>; jmp rax'. The
+    trampoline logs the call chain, then executes the stolen stub (which
+    performs the real syscall). Never restored - diagnostic-grade by
+    design; skipped loudly on any unexpected prologue."""
+    k32 = _kernel32()
+    if k32 is None or _state.get("ntdll_detoured"):
+        return
+    _state["ntdll_detoured"] = True
+    try:
+        k32.GetProcAddress.restype = ctypes.c_void_p  # 64-bit addresses
+        ntdll = ctypes.WinDLL("ntdll")
+        addr = k32.GetProcAddress(ctypes.c_void_p(ntdll._handle),
+                                  b"NtTerminateProcess")
+        if not addr:
+            _emit("[ANTs] ntdll detour: NtTerminateProcess not found\n")
+            return
+        addr = int(addr)
+        # Win10/11 stub: mov r10,rcx (4C 8B D1); mov eax,<ssn> (B8 ...);
+        # ...; syscall (0F 05); ret (C3). Steal whole instructions only.
+        raw = ctypes.string_at(addr, 20)
+        end = raw.find(b"\x0f\x05\xc3")
+        if raw[:3] != b"\x4c\x8b\xd1" or raw[3] != 0xB8 or end < 8:
+            _emit("[ANTs] ntdll detour SKIPPED: prologue is not the standard "
+                  f"syscall stub ({raw[:8].hex()}) - report this line\n")
+            return
+        stolen = raw[:end + 3]
+        k32.VirtualAlloc.restype = ctypes.c_void_p
+        k32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                     ctypes.c_uint32, ctypes.c_uint32]
+        buf = k32.VirtualAlloc(None, 64, 0x3000, 0x40)  # RWX, never freed
+        if not buf:
+            _emit("[ANTs] ntdll detour SKIPPED: VirtualAlloc failed\n")
+            return
+        buf = int(buf)
+        ctypes.memmove(buf, stolen, len(stolen))
+        proto = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(
+            ctypes.c_long, ctypes.c_void_p, ctypes.c_long)
+        stolen_fn = proto(buf)
+
+        def detour(handle, status):
+            chain = _stack_chain(k32)
+            _emit("\n[ANTs] TERMINATION via ntdll!NtTerminateProcess"
+                  f"(handle=0x{int(handle or 0) & 0xFFFFFFFFFFFFFFFF:X}, "
+                  f"status=0x{status & 0xFFFFFFFF:08X}); call chain: "
+                  + (" <- ".join(chain) or "unresolved") + "\n")
+            return stolen_fn(handle, status)
+
+        detour_cb = proto(detour)
+        keep = _state["trap_keep"]
+        keep.append(detour_cb)
+        keep.append(stolen_fn)
+        keep.append(buf)
+        target = ctypes.cast(detour_cb, ctypes.c_void_p).value
+        patch = (b"\x48\xb8" + int(target).to_bytes(8, "little")
+                 + b"\xff\xe0")  # mov rax, trampoline; jmp rax
+        old = ctypes.c_uint32(0)
+        protect = k32.VirtualProtect
+        protect.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                            ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)]
+        if not protect(ctypes.c_void_p(addr), ctypes.c_size_t(len(patch)),
+                       0x40, ctypes.byref(old)):  # PAGE_EXECUTE_READWRITE
+            _emit("[ANTs] ntdll detour SKIPPED: VirtualProtect denied\n")
+            return
+        ctypes.memmove(addr, patch, len(patch))
+        protect(ctypes.c_void_p(addr), ctypes.c_size_t(len(patch)),
+                old.value, ctypes.byref(old))
+        _emit(f"[ANTs] ntdll detour ARMED on NtTerminateProcess (stolen "
+              f"{len(stolen)}-byte syscall stub; a TERMINATION line right at "
+              "ComfyUI shutdown is normal exit traffic, not a kill)\n")
+    except Exception as exc:
+        _emit(f"[ANTs] ntdll detour failed (diagnostic only): {exc}\n")
