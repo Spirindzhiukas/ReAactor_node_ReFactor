@@ -19,6 +19,14 @@ PASS = 0
 FAIL = 0
 
 
+def raw_exec_lines(bat_bytes):
+    """Executable (non-rem) lines of a CRLF bat, for paren-block checks."""
+    for ln in bat_bytes.split(b"\r\n"):
+        s = ln.strip()
+        if s and not s.lower().startswith(b"rem"):
+            yield s
+
+
 def _iat_tracer_fixture_check():
     """Build a flat (identity-mapped) PE whose only import is KERNEL32!
     {ExitProcess, abort}, run crashlog._patch_iat over it with a fake
@@ -179,6 +187,17 @@ def main():
     check("tools: crash-offset resolver ships (names MODULE+0xRVAs)",
           (REPO / "tools" / "resolve_crash_offset.py").is_file()
           and "bisect" in (REPO / "tools" / "resolve_crash_offset.py").read_text())
+    bat = (REPO / "tools" / "resolve_offsets.bat")
+    bat_raw = bat.read_bytes() if bat.is_file() else b""
+    check("tools: rig diagnostics ship as ready-to-run bat files (owner "
+          "imperative) - resolver bat is CRLF, clipboard-returning, with a "
+          "single marked owner-editable block and zero parens on executable "
+          "lines (rem comments may)",
+          bat_raw.startswith(b"@echo off\r\n")
+          and b"clip <" in bat_raw
+          and b"THE ONLY BLOCK YOU MAY EDIT" in bat_raw
+          and b'if "' in bat_raw
+          and not any(b" (" in ln for ln in raw_exec_lines(bat_raw)))
     check("ngx: session close frees the core AFTER the snippet (reverse order)",
           ngx_src.find("self.module.close()") < ngx_src.find(
               "Reverse load order"))
