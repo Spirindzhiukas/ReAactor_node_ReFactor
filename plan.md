@@ -47,6 +47,12 @@ python and never registers callbacks.
       stack; `nr.py` reports it loudly and the node drops the dead session;
       console de-flooded (ANTS_NR_NGX_ECHO). Collector fixed for a real rig
       (auto-detection, no path arguments, no cmd quote mangling).
+- [x] **Run-30 follow-up (offline)**: public feature-18 corpus swept (6 new
+      sources + 3 design notes; `RESEARCH/NOTES.md`) - the caller check is
+      published (the snippet asks who its caller is and expects `nvngx.dll`),
+      the namespace is confirmed twice, and the proven hosts drain the
+      command list before the feature call and submit right after it. Our
+      `nr.py` now matches that; pins fail if the hygiene goes away.
 - [ ] **Run 31 (owner): plain re-run** (`set "NVSDK_NGX_LOG_LEVEL=1"`,
       no ANTS_ lines needed) — the first run that should reach CreateFeature +
       evaluate with the full host-parity contract. Console + nvngx.log + crash

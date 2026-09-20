@@ -10,9 +10,9 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
 - **Head at last update:** run-28+ NR host layout (core-owned session + caller
   shim with the snippet Init_Ext swap; working tree, commit pending) on top of
   the GPU-acceleration commit (`588f790` DLSS5 hybrid, `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 363 checks + 2 scanners + smoke_import (20 nodes)
+- **Suite:** ALL GREEN — 365 checks + 2 scanners + smoke_import (20 nodes)
   (`test_nr_schedule` 32, `test_dlssnr_bridge` 65, `test_dlsssr` 80,
-  `test_runtime_surface` 58, `test_native_flow` 33, `test_upres` 27,
+  `test_runtime_surface` 58, `test_native_flow` 35, `test_upres` 27,
   `test_pure_helpers` 26, `test_facerestore_routing` 21, `test_swapper_state`
   13, `test_detection_state_dict` 7)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
@@ -618,3 +618,30 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - NEXT: re-run (the new first-chance decode will name the exception type and
   the snippet offset that threw, which is the branch that rejects our frame
   or parameter set). Also still unexecuted: E1 (`ANTS_NR_USE_SHIM=0`).
+
+### 2026-09-20 (run-30 follow-up) — corpus sweep: the caller check is PUBLISHED, and the command-list hygiene we were missing
+- GitHub CODE search works here (`gh api -X GET search/code -f q='"DLSSNR.ScalingRatio"'`)
+  - six more public feature-18 hosts/mirrors are now in
+  `/home/user/ext_research/dlss5_*` (Veyra param header, vapourkit param
+  header, OptiScaler proxy, plus three design notes). Distilled into
+  `RESEARCH/NOTES.md`.
+- Two independent headers confirm our `DLSSNR.*` namespace exactly, and give
+  the reason names had to be recovered from the binary: **NGX silently
+  ignores unknown parameters** - a typo is a no-op, never an error.
+- **The caller check has a published answer**: the host hooks the SNIPPET's
+  own `KERNEL32!GetModuleFileNameW` IAT slot to answer `nvngx.dll` - *"the
+  snippet verifies its caller is `nvngx.dll`"*. That is the mechanism our
+  shim satisfies structurally (real frame + module name containing
+  `nvngx.dll`; the working LQCCS helper does the same from
+  `nvngx.dll_comfy.dll`). Our Init_Ext hr=1 is evidence the check passes;
+  E1 stays the presence test.
+- **Feature 18 never goes through the core** (core CreateFeature(18) →
+  `0xbad0000b`, "core has no NR implementation") - every working host calls
+  the snippet's five exports, which is our route.
+- **BUG FIXED (contract parity)**: `nr.py::evaluate` handed the runtime a
+  command list with our frame copy still pending and never executed the
+  runtime's own recording. The proven hosts close+execute+fence-wait around
+  every copy (before the call, empty list) and right after the feature call
+  (their work committed before the readback). `nr.py` now drains before
+  evaluate and submits right after; two order-sensitive pins in
+  `test_native_flow` fail if either goes away.

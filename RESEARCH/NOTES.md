@@ -176,6 +176,60 @@ tests shim **presence**, while run-29 candidate 1 (`ANTS_NR_SHIM_NAME=nvngx.dll`
 tests the **name** hypothesis on its own. The version-resource variant stays a
 valid cure candidate if E1 outcome 1 fires.
 
+### UPDATE (run-30 follow-up) — the wider DLSS5-NR corpus, and the caller check has a published answer
+
+GitHub CODE search works in this sandbox (`gh api -X GET search/code -f
+q='"DLSSNR.ScalingRatio"'` — 89 hits); `repos/<r>/contents/<p>` with
+`Accept: application/vnd.github.raw` fetches them. Six more hosts/mirrors
+saved to `/home/user/ext_research/dlss5_*`: Veyra-NRVideo
+`DlssNrParameters.h`, vapourkit `dlssnr_params.h`, OptiScaler
+`DlssNr_Proxy.cpp`, plus three design notes (`veyra_playbook.md`,
+`vklayer_notes.md`, `royaltracer_dlss5.md`).
+
+- **The parameter namespace is confirmed independently twice** (Veyra and
+  vapourkit list the same `DLSSNR.*` strings we set, including
+  `Output.Width/Height`, all four subrect families, `MVecScaleX/Y`,
+  `ScalingRatio`, `Hint.Render.Preset`, `UICorrection`, `UseAutoMask`).
+  vapourkit adds the reason the names had to be recovered from the binary:
+  *"NGX silently ignores parameters it does not recognise"* — a misspelling
+  is a no-op, so our set cannot be "wrong" by typo; only by value.
+- **The caller check, stated plainly** (`vklayer_notes.md` §3.2): the host
+  `LoadLibraryEx`es the snippet, `GetProcAddress`es exactly five exports
+  (`NVSDK_NGX_D3D12_{Init_Ext,CreateFeature,EvaluateFeature,ReleaseFeature,
+  Shutdown1}`), and then hooks the SNIPPET's own
+  `KERNEL32!GetModuleFileNameW` IAT slot to answer **`nvngx.dll`** whenever
+  the snippet asks about the host module: *"This is the
+  signature/authorization bypass: the snippet verifies its caller is
+  `nvngx.dll`."* That is the mechanism our caller shim satisfies
+  structurally (real frame, return address inside a module named
+  `nvngx.dll_ants.dll` — the LQCCS helper relies on the same and is named
+  `nvngx.dll_comfy.dll`). Both names contain the `nvngx.dll` prefix; E1
+  (`ANTS_NR_USE_SHIM=0`) remains the presence test.
+- **Feature 18 never goes through the core**: their notes record core
+  `CreateFeature(18)` → `0xbad0000b` ("Core has no NR implementation"), and
+  every working host calls the SNIPPET's own five exports (the same route
+  our shim-routed `_create`/`_evaluate` use). Success code is `0x1`.
+- **Every call is wrapped in SEH** (`__try/__except`, fail-closed, capture
+  the SEH code) — "All Feature-18 calls must be wrapped in SEH/VEH-style
+  guards". Our ctypes calls inherit that: SEH surfaces as a Python
+  exception, which run 30 proved is catchable.
+- **Command-list hygiene (now matched)**: the proven hosts close+execute+
+  fence-wait around every copy and *after* the feature call
+  (`ExecuteAndWait()` in `kos_bridge2.cpp:328`, called before/after
+  `g_shim_eval` at :1182/:1204), so the runtime always receives a freshly
+  reset, empty list and its own recorded work is committed before the
+  readback. Our `nr.py` now does the same (it used to hand over a list with
+  the frame copy still pending and never execute the runtime's recording).
+- **Guides**: their zero-frame provider creates exactly our resources for a
+  host with no motion/depth — `R32_FLOAT` depth, `R16G16_FLOAT` motion,
+  zero-filled (`ZeroFrameGuidanceProvider.cpp`). Ours now rely on D3D12's
+  committed-resource zero-init instead of an upload.
+- **Formats/quality seen across hosts**: Magpie feeds `R8G8B8A8_UNORM`
+  in/out and sets `PerfQualityValue = Balanced` with the scaling-ratio
+  callback forced to 1.0; the OptiScaler proxy sets no `PerfQualityValue` at
+  all; kos maps 5→1.0 (DLAA) and *rejects* 6. Our 1× contract (quality 5,
+  ratio 1.0 + callback, RGBA16F surfaces like kos/gan) stays as is.
+
 ## 4. The CUDA hypothesis (the next big move if run 27 fails)
 
 His NR bridge calls itself the "D3D12/NGX CUDA bridge" (runtime.py

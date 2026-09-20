@@ -175,6 +175,7 @@ class DlssNrSession:
             self.w, self.h, d3d.DXGI_FORMAT_R32_FLOAT, label="nr depth")
 
         self._scaling_cb = None
+        self._contract_logged = False
         self._apply_create_params(int(nr_preset))
         self.ngx.create_feature(FEATURE_NR)
 
@@ -296,7 +297,30 @@ class DlssNrSession:
         self.gpu.upload_texture(self.color,
                                 _rgba8_to_fp16(color_rgba, self.w, self.h), uav)
         self.gpu.transition(self.output, uav)
+        # Drain before the feature call: the proven hosts close, execute and
+        # fence-wait every copy they make, so the runtime always receives a
+        # freshly reset, EMPTY command list. Ours used to hand it a list with
+        # our unexecuted copy and barriers still pending.
+        self.gpu.submit_and_wait()
         self._set_eval_params(reset)
+        if not self._contract_logged:
+            # One-shot contract dump: if the snippet throws on the first
+            # frame, these are the numbers its validation saw. One line per
+            # session, right before the evaluate that may refuse them.
+            self._contract_logged = True
+            from ..log import dlss_logger as _dl
+            _dl.status(
+                "[ANTs] NR contract (first frame): "
+                f"in {self.w}x{self.h} out {self.w}x{self.h} "
+                f"quality {self.perf_quality} scaling {NR_SCALING_RATIO} "
+                f"scale 1.0 mvec_scale 1.0 "
+                f"style {self.settings['style']} "
+                f"intensity {float(self.settings['intensity']):.3f} "
+                f"tone {float(self.settings['tone_preservation']):.3f} "
+                f"uicorr 0 depth_inverted 1 upscaling 0 "
+                f"auto_mask {int(bool(self.settings['auto_mask']))} "
+                f"surfaces color/output RGBA16F mvec R16G16_FLOAT "
+                f"depth R32_FLOAT subrects full-frame")
         try:
             self.ngx.evaluate()
         except Exception as exc:
@@ -316,6 +340,10 @@ class DlssNrSession:
                   "the snippet means it ran and rejected the frame or the\n"
                   "    parameter contract; the type and throw site above name "
                   "the check that refused.") from exc
+        # The runtime records its work into OUR command list (the same list it
+        # was handed), so it has to be closed, executed and waited on before
+        # the output means anything - the proven hosts do exactly this.
+        self.gpu.submit_and_wait()
         return _fp16_to_rgba8(self.gpu.readback_texture(self.output, uav),
                               self.w, self.h)
 

@@ -239,6 +239,19 @@ that file.
 in `nvngx.log`. `ANTS_NR_NGX_ECHO=1` brings the echo back for a debugging
 session.
 
+**Contract parity fix before run 31** (from the wider public corpus swept
+after run 30, see `RESEARCH/NOTES.md`): the proven hosts close+execute+
+fence-wait around every copy they make *and right after* the feature call,
+so the runtime always receives a freshly reset, empty command list and its
+own recorded work is committed before the readback. Our `nr.py::evaluate`
+handed it a list with the frame copy still pending and never executed the
+runtime's recording - now fixed (two order-sensitive pins guard it). Also
+published in that sweep: the caller check answers "is my caller
+`nvngx.dll`" via the snippet's own `GetModuleFileNameW` IAT slot, which is
+what the shim satisfies; feature 18 never goes through the core (core
+`CreateFeature(18)` → `0xbad0000b`); and every working host wraps these
+calls in SEH guards.
+
 **Next run (31)**: plain re-run, no env lines needed. What we want from it
 is the **C++ type + throw site** line - that names the branch inside the
 snippet that rejects our frame/parameters. Run `tools\collect_rig_evidence.bat`

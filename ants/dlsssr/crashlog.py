@@ -375,10 +375,19 @@ def _report_cxx(k32, record):
         frames = frames[:6] or _stack_chain(k32, 0, 6)
     except Exception:
         frames = []
+    # The object's first bytes sometimes carry a code or an inline string;
+    # a bounded hex peek costs nothing and has already paid for itself on
+    # other rig artefacts.
+    peek = ""
+    if len(info) > 1 and info[1]:
+        raw = mem.read_some(info[1], 32)
+        if raw:
+            peek = " object " + raw[:32].hex()
     _state["cxx_count"] += 1
     text = (f"[ANTs] C++ exception 0x{_CXX_CODE:08X} (magic 0x{info[0]:X}) "
             f"type {type_name or '<?> (type descriptor unreadable)'}"
             + (f" message guess {message!r}" if message else "")
+            + peek
             + (f" thrown from {' <- '.join(frames)}" if frames else ""))
     _state["cxx"].append(text)
     _emit("\n" + text + "\n")

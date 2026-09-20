@@ -414,7 +414,8 @@ def _cxx_exception_check():
     reported = (crashlog._state["cxx_count"] == before + 1
                 and "0xE06D7363" in report
                 and ".?AVinvalid_argument@std@@" in report
-                and "DLSSNR: bad parameter: MVec" in report)
+                and "DLSSNR: bad parameter: MVec" in report
+                and "object " in report)
     return good and hostile_a and hostile_b and reported
 
 

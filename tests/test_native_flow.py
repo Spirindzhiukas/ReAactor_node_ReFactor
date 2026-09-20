@@ -686,6 +686,23 @@ def main():
     rng = random.Random(7)
     payload = bytes(rng.randrange(256) for _ in range(W * H * 4))
     out = sess.evaluate(payload, reset=True)
+    # ---- command-list hygiene around the feature call (proven-host parity)
+    eval_idx = max(i for i, e in enumerate(RECORD) if e[0] == "EvaluateFeature")
+    setup = [i for i, e in enumerate(RECORD[:eval_idx])
+             if e[0] in ("CopyTextureRegion", "Barrier")]
+    closes_before = [i for i, e in enumerate(RECORD[:eval_idx]) if e[0] == "Close"]
+    after = RECORD[eval_idx:]
+    closes_after = [i for i, e in enumerate(after) if e[0] == "Close"]
+    readback_at = [i for i, e in enumerate(after)
+                   if e[0] == "CopyTextureRegion"]
+    check("nr: the runtime receives a freshly executed, empty command list "
+          "(our copy + barriers are drained BEFORE the feature call, like the "
+          "proven hosts)",
+          bool(setup) and bool(closes_before) and max(closes_before) > max(setup))
+    check("nr: the runtime's own recorded work is executed after the feature "
+          "call and before the output is read back",
+          bool(closes_after) and bool(readback_at)
+          and min(closes_after) < min(readback_at))
     # color/output are RGBA16F (the HDR-capable domain the runtime renders
     # in), so the frame crosses the float16 boundary in both directions.
     want = (_np.frombuffer(payload, dtype=_np.uint8).reshape(H, W, 4)
