@@ -628,9 +628,51 @@ def _collector_bat_check():
             and not risky)
 
 
+def _predenoise_off_check():
+    """OFF is a real mode: the stage cannot run, whatever is connected."""
+    from ants.dlssnr import node as nr_node
+    modes = nr_node.ReFactorDLSS5Enhancer.INPUT_TYPES()["required"][
+        "pre_denoise_mode"][0]
+    src = (REPO / "ants" / "dlssnr" / "node.py").read_text()
+    js = (REPO / "web" / "dlss5_nr_schedule.js").read_text()
+    return ("OFF (no pre-denoise)" in modes
+            and modes[0] == nr_node.PRE_DENOISE_OFF
+            and modes.index(nr_node.PRE_DENOISE_OFF) == 0
+            and "pre_denoise_mode == PRE_DENOISE_OFF" in src
+            and "denoise_passes = [] if pre_denoise_mode == PRE_DENOISE_OFF" in src
+            and "denoise_this = False" in src
+            and "stage OFF" in js
+            and '"pre_denoise_strength"' in js
+            and "modeDisabled" in js)
+
+
+def _log_stream_check():
+    """The console encoding can no longer swallow a line (cp1251 + U+26A1)."""
+    import io
+    import logging as _logging
+    from ants import log as ants_log
+    buffer = io.TextIOWrapper(io.BytesIO(), encoding="cp1251", errors="strict")
+    probe_log = _logging.getLogger("ants-test-encoding")
+    probe_log.handlers.clear()
+    handler = _logging.StreamHandler(ants_log._SafeStream(buffer))
+    handler.setFormatter(_logging.Formatter("%(message)s"))
+    probe_log.addHandler(handler)
+    probe_log.setLevel(_logging.DEBUG)
+    probe_log.warning("ascii stays, brand \u26a1 becomes safe, emoji \U0001F600 too")
+    buffer.flush()
+    written = buffer.buffer.getvalue().decode("cp1251")
+    return ("ascii stays" in written and "safe" in written
+            and "\u26a1" not in written
+            and "_SafeStream" in (REPO / "ants" / "log.py").read_text()
+            and isinstance(
+                ants_log.dlss_logger.handlers[0].stream,
+                ants_log._SafeStream))
+
+
 def _uav_probe_check():
     """The D3D12 UAV probe: four phases through the pack's own code path, a
     verdict the owner can act on, and it soft-fails anywhere (exit 2)."""
+    import os as _os
     import subprocess
     import sys as _sys
     probe = REPO / "tools" / "check_d3d12_uav.py"
@@ -642,22 +684,32 @@ def _uav_probe_check():
     soft = (out.returncode == 2
             and "is not Windows" in text
             and "UAV probe" in text)
+    child = subprocess.run([_sys.executable, str(probe), "--phase-a"],
+                           capture_output=True, text=True, timeout=120,
+                           env=dict(_os.environ, ANTS_NO_CUDA_FLAG_ARM="1"))
+    child_text = (child.stdout or "") + (child.stderr or "")
+    child_soft = ("[PHASE-A]" in child_text
+                  and "ANTS_NO_CUDA_FLAG_ARM" in child_text)
     src = probe.read_text()
     phases = (all(tag in src for tag in ("phase A - fresh device",
                                          "phase B - fresh device",
                                          "phase C - after plain CUDA work",
-                                         "phase D - after the legacy engine ran"))
+                                         "phase D - after the legacy engine ran",
+                                         "phase A0 - fresh process"))
               and "REPRODUCED" in src
               and "is NOT the trigger" in src
               and "feature level decides" in src
-              and "return 10" in src and "return 11" in src and "return 12" in src)
+              and "is what breaks UAV D3D12 textures" in src
+              and all(code in src for code in ("return 10", "return 11",
+                                               "return 12", "return 13"))
+              and "_plain_control" in src)
     real_path = ("d3d12.D3D12Device.create" in src
                  and "create_texture2d" in src
                  and "cuMemAlloc_v2" in src
                  and "DLSSStandaloneManager" in src)
     read_only = ("READ-ONLY" in src and "never stages" in src
                  and "ANTS_DLSS_MODELS" in src)
-    return soft and phases and real_path and read_only
+    return soft and child_soft and phases and real_path and read_only
 
 
 def _uav_probe_bat_check():
@@ -680,6 +732,8 @@ def _uav_probe_bat_check():
             and b"THE ONLY BLOCK YOU MAY EDIT" in raw
             and b"check_d3d12_uav.py" in raw
             and b"REPRODUCED" in raw
+            and b"13" in raw
+            and b"ANTS_NO_CUDA_FLAG_ARM" in raw
             and b"ants_d3d12_uav.txt" in raw
             and not risky)
 
@@ -1255,6 +1309,14 @@ def main():
           "bat - fresh-process A/B, a pinned host copy round-trip, the "
           "single-GPU child, and a verdict the owner can act on",
           _cuda_multigpu_tool_check())
+    check("predenoise: 'OFF (no pre-denoise)' is a real third mode - the stage "
+          "cannot run even with a model connected and strength > 0 - and the "
+          "JS greys pre_denoise_strength out with it (the owner's request)",
+          _predenoise_off_check())
+    check("log: a cp1251 console can no longer swallow a log line (the pack's "
+          "branding glyph U+26A1 raised UnicodeEncodeError inside emit on the "
+          "owner's machine and killed the message)",
+          _log_stream_check())
     check("tools: the D3D12 UAV probe runs anywhere (soft-fails with exit 2 "
           "off Windows), drives the pack's OWN d3d12 code through four phases "
           "(fresh 11_0, fresh 12_0, after plain CUDA work, after the staged "

@@ -1053,3 +1053,22 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   the level is printed with the adapter pick; the texture error names the workaround.
 - WORKAROUND for the owner: restart ComfyUI, run the NATIVE node FIRST and alone.
 - Suite: **446 checks** (dlsssr 103, native_flow 58, dlssnr_bridge 101, nr_schedule 33).
+
+### 2026-09-21 (owner run 01:06 + the probe) — the legacy engine is CLEARED; the UAV refusal is pack-armed-CUDA-flag or a degraded driver
+- Probe result on the rig: **every phase failed**, including phase A (fresh process, fresh device,
+  256x256 RGBA16F UAV texture at 11_0 -> E_INVALIDARG, device healthy). Phase B (12_0), C (after
+  plain CUDA work) and D (after the legacy engine) failed too. The legacy engine is therefore NOT the
+  trigger - the probe never loads it before phase A.
+- Remaining candidates: (a) the pack's own import-time arming (`cudaSetDeviceFlags(0x04)`) - the probe
+  arms it before phase A, the one successful native run (21:52) predates that code; (b) a driver left
+  degraded by the earlier removals/TDRs (a reboot test).
+- Probe now: **phase A0** = the same test in a fresh CHILD process with `ANTS_NO_CUDA_FLAG_ARM=1`
+  (exit **13** when A0 passes and A fails = the arming is the trigger), plus a **plain-texture control**
+  in every phase. `ANTS_NO_CUDA_FLAG_ARM=1` is a documented knob.
+- **cp1251 console bug (owner-visible)**: the packaging glyph U+26A1 in the logger name made EVERY
+  line raise `UnicodeEncodeError` inside `logging.emit` - the line was lost and a traceback printed
+  instead. `ants/log.py::_SafeStream` encodes with errors="replace" now.
+- **pre-denoise OFF** (owner request): third mode value, stage fully disabled (model/strength ignored
+  and logged), JS greys `pre_denoise_strength` (`(stage OFF)`) and keeps the value; mode greying beats
+  schedule greying.
+- Suite: **449 checks** (dlsssr 105, native_flow 58, dlssnr_bridge 101, nr_schedule 33).

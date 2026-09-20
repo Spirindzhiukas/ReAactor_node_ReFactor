@@ -42,6 +42,11 @@ _NR_PRESET_TO_INT = {"Default": 0, "J - Transformer I Crisp": 10,
                      "L - Transformer II Quality": 12, "M - Transformer II Fast": 13}
 PRE_DENOISE_SR = "SR (DLSS denoise)"
 PRE_DENOISE_MODEL = "Denoise Model"
+# OFF is a real mode (owner request): until it existed, "Denoise Model" without
+# a connected model was the only way to say "no pre-denoise", and a connected
+# model + strength > 0 always ran. OFF disables the stage completely, whatever
+# is connected, and the JS greys `pre_denoise_strength` out with it.
+PRE_DENOISE_OFF = "OFF (no pre-denoise)"
 ENGINE_LEGACY = "Legacy neuroframe DLLs"
 from .hdr_bridge import (
     DIFFUSE_WHITE_NITS_DEFAULT,
@@ -145,11 +150,14 @@ class ReFactorDLSS5Enhancer:
                                      "tooltip": "NR model preset hint (J/K/L/M). Best-effort: the stock NR "
                                                 "runtime ignores unknown preset hints; builds that read the "
                                                 "hint switch transformer models."}),
-                "pre_denoise_mode": ([PRE_DENOISE_SR, PRE_DENOISE_MODEL],
+                "pre_denoise_mode": ([PRE_DENOISE_OFF, PRE_DENOISE_SR, PRE_DENOISE_MODEL],
                                      {"default": PRE_DENOISE_SR,
                                       "tooltip": "What runs as the pre-SR denoise pass: the ANTs DLSS SR host "
-                                                 "(1:1 DLAA with the chosen sr_dll_version + sr_model) or the "
-                                                 "wired upscale/denoise model (SCUNet-style). Default: SR."}),
+                                                 "(1:1 DLAA with the chosen sr_dll_version + sr_model), the "
+                                                 "wired upscale/denoise model (SCUNet-style), or OFF - no "
+                                                 "pre-denoise stage at all, even with a model connected and "
+                                                 "pre_denoise_strength above 0 (the widget greys out). "
+                                                 "Default: SR."}),
                 "gpu_acceleration": ([GPU_AUTO, GPU_FORCE, GPU_OFF],
                                      {"default": GPU_AUTO,
                                       "tooltip": "Auto/Force: frames are processed GPU-resident via the engine's "
@@ -456,7 +464,11 @@ class ReFactorDLSS5Enhancer:
         if fg_dll_version not in ("auto",):
             logger.status(f"FG build '{fg_dll_version}' selected - Frame Generation "
                           "is reserved for a future release; no effect yet.")
-        if pre_denoise_mode == PRE_DENOISE_SR and not native:
+        if pre_denoise_mode == PRE_DENOISE_OFF:
+            logger.status("[ANTs] pre-denoise is OFF - nothing runs before the "
+                          "engine (a connected denoise_model and "
+                          "pre_denoise_strength are ignored for this run).")
+        elif pre_denoise_mode == PRE_DENOISE_SR and not native:
             logger.warning("[ANTs] SR pre-denoise needs the native NGX engine - "
                            "using the denoise_model input for this run.")
 
@@ -548,10 +560,11 @@ class ReFactorDLSS5Enhancer:
                 src_gpu = src_gpu.contiguous()
             torch.cuda.synchronize(cuda_dev)
 
-        denoise_passes = [i + 1 for i, spec in enumerate(plan)
-                          if (spec["denoise_model"] is not None
-                              or pre_denoise_mode == PRE_DENOISE_SR)
-                          and spec["denoise_strength"] > 1e-4]
+        denoise_passes = [] if pre_denoise_mode == PRE_DENOISE_OFF else [
+            i + 1 for i, spec in enumerate(plan)
+            if (spec["denoise_model"] is not None
+                or pre_denoise_mode == PRE_DENOISE_SR)
+            and spec["denoise_strength"] > 1e-4]
         if denoise_passes:
             if pre_denoise_mode == PRE_DENOISE_SR and native:
                 logger.status(f"DLSS5 pre-SR denoise on pass(es) {denoise_passes}: "
@@ -638,7 +651,9 @@ class ReFactorDLSS5Enhancer:
 
                 d_model = pass_spec["denoise_model"]
                 d_strength = pass_spec["denoise_strength"]
-                if pre_denoise_mode == PRE_DENOISE_SR:
+                if pre_denoise_mode == PRE_DENOISE_OFF:
+                    denoise_this = False
+                elif pre_denoise_mode == PRE_DENOISE_SR:
                     denoise_this = d_strength > 1e-4  # SR mode: no model needed
                 else:
                     denoise_this = d_model is not None and d_strength > 1e-4

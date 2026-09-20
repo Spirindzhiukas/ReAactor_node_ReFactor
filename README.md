@@ -146,7 +146,11 @@ fresh process (A/B 11_0 vs 12_0, after plain CUDA work, after the staged legacy 
 settled: restart ComfyUI and run the **native** node first and alone. `ANTS_D3D12_FEATURE_LEVEL=12_0`
 switches the device to the feature level the reference host asks for.
 
-**Pre-SR denoise (optional):** connect a 1x denoising/restoration model — `ANTs Upscale Model Loader` →
+**Pre-SR denoise (optional, and now switchable OFF):** `pre_denoise_mode` has three values — the
+ANTs SR host (`SR (DLSS denoise)`), a wired upscale/denoise model (`Denoise Model`), and
+**`OFF (no pre-denoise)`**, which disables the stage completely: a connected model and a
+`pre_denoise_strength` above zero are ignored (and said so in the console), and the widget greys out in
+the UI while keeping its value. connect a 1x denoising/restoration model — `ANTs Upscale Model Loader` →
 the node's `denoise_model` socket (SCUNet, PureScale2 `1x_PureVision`, …) — it runs through the
 comfy-native tiled pipeline *before* the DLSS-NR engine, with a `pre_denoise_strength` blend.
 

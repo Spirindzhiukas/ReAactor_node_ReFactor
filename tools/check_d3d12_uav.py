@@ -18,6 +18,9 @@ driver's UAV allocations**. This probe answers it in four short phases, using th
 pack's own D3D12 code path (no duplicated bindings, no guessing):
 
   A. fresh device, feature level 11_0 (what the pack asks for today)
+  A0. the SAME test in a FRESH CHILD PROCESS with the pack's CUDA flag arming
+     switched off (ANTS_NO_CUDA_FLAG_ARM=1) - the discriminator for "is it the
+     blocking-sync CUDA context this pack arms at import?"
   B. fresh device, feature level 12_0 (what the proven reference host asks for)
   C. fresh device AFTER plain CUDA work in this process
      (cuInit + cuCtxCreate + 512 MiB cuMemAlloc + memset + free - the cheapest
@@ -26,12 +29,17 @@ pack's own D3D12 code path (no duplicated bindings, no guessing):
      (only when a staged runtime with the helper pair is already on disk - this
      probe never stages or writes anything)
 
+Every phase also creates a PLAIN (no-UAV) texture, so "the driver refuses UAV
+flags" can be told apart from "the driver refuses textures at all".
+
 Verdict lines are printed for the owner; the exit code is:
 
   0  UAV creation worked in every phase that ran
   10 REPRODUCED: works fresh, fails after CUDA work in the same process
   11 UAV creation failed even on a FRESH device (not a CUDA-in-process issue)
   12 only one feature level fails - a feature-level finding
+  13 the CUDA flag arming this pack does at import is the trigger (A0 works,
+     A does not)
   2  not Windows / no usable D3D12 device
 
 READ-ONLY: this tool creates GPU resources, releases them and exits. It writes
@@ -129,11 +137,24 @@ def _staged_legacy_init():
     return True, f"legacy engine initialized from {dirs[-1]}"
 
 
+def _plain_control(device, tag):
+    """Can this device create ANY texture? (plain, no UAV flag)."""
+    from ants.dlsssr import d3d12
+    try:
+        texture = device.create_texture2d(
+            PROBE_W, PROBE_H, d3d12.DXGI_FORMAT_R16G16B16A16_FLOAT,
+            allow_uav=False, label=f"probe plain ({tag})")
+        texture.release()
+        return True, "plain texture OK"
+    except Exception as exc:
+        return False, str(exc).strip()[:200]
+
+
 def _uav_probe(tag, feature_level):
     """Create a FRESH device (at ``feature_level``) and try a UAV texture."""
     from ants.dlsssr import d3d12
     result = {"tag": tag, "ok": None, "why": "", "status": "",
-              "device": None}
+              "plain": None, "device": None}
     try:
         _factory, adapters = d3d12.enumerate_adapters()
         info, reason = d3d12.pick_adapter(adapters, 0)
@@ -157,6 +178,7 @@ def _uav_probe(tag, feature_level):
         result["ok"] = False
         result["why"] = str(exc).strip()
     if not ctx.dead:
+        result["plain"] = _plain_control(device, tag)
         ctx.close()
     return result
 
@@ -167,6 +189,53 @@ def _report(result, feature_level):
                f"{result['why']}")
     if result["status"]:
         _line("      ", f"device status right after: {result['status']}")
+    if result["plain"] is not None:
+        ok, text = result["plain"]
+        _line("      ", f"same device, PLAIN texture: "
+                        f"{'OK' if ok else 'FAILED'} - {text}")
+
+
+def _child_without_cuda_flags():
+    """Run this file again with the pack's CUDA flag arming switched off.
+
+    The child is a genuinely fresh process, so it answers "does the pack's own
+    import-time CUDA flag break UAV textures?" - the only CUDA state this pack
+    sets, and the one difference between the run that worked (21:52, before
+    that flag existed) and every failing run since.
+    """
+    import subprocess
+    env = dict(os.environ)
+    env["ANTS_NO_CUDA_FLAG_ARM"] = "1"
+    env["ANTS_UAV_PROBE_CHILD"] = "1"
+    try:
+        out = subprocess.run([sys.executable, os.path.abspath(__file__),
+                              "--phase-a"],
+                             capture_output=True, text=True, timeout=180,
+                             env=env)
+    except Exception as exc:
+        return None, f"child did not run ({exc.__class__.__name__})"
+    text = f"{out.stdout or ''}{out.stderr or ''}"
+    verdict = ""
+    for line in text.splitlines():
+        if line.startswith("[PHASE-A]") or line.startswith("[OK]") \
+                or line.startswith("[FAIL]"):
+            verdict = line
+    if not verdict:
+        verdict = text.strip().splitlines()[-1] if text.strip() else "(silent)"
+    return out.returncode == 0, verdict
+
+
+def _phase_a_only():
+    """``--phase-a``: one fresh device, one UAV texture, one verdict line."""
+    print("[PHASE-A] child probe: ANTS_NO_CUDA_FLAG_ARM=1 "
+          "(the pack armed nothing)")
+    result = _uav_probe("phase A0 - fresh process, no CUDA flag", 0xB000)
+    _report(result, 0xB000)
+    if result["ok"]:
+        print("[PHASE-A] verdict: UAV texture CREATED without the CUDA flag")
+        return 0
+    print("[PHASE-A] verdict: UAV texture REFUSED without the CUDA flag")
+    return 1
 
 
 def main():
@@ -190,6 +259,11 @@ def main():
         results.append(result)
         _report(result, level)
 
+    child_ok, child_verdict = _child_without_cuda_flags()
+    _line("[INFO]" if child_ok is None else ("[OK]  " if child_ok else "[FAIL]"),
+          "phase A0 - fresh child process WITHOUT the pack's CUDA flag: "
+          + child_verdict)
+
     cuda_ok, cuda_detail = _cuda_work()
     _line("[INFO]" if cuda_ok else "[SKIP]", f"phase C setup: {cuda_detail}")
     if cuda_ok:
@@ -212,6 +286,15 @@ def main():
     fresh_bad = [r for r in fresh if r["ok"] is False]
     after_bad = [r for r in after if r["ok"] is False]
 
+    if child_ok is True and fresh_bad:
+        print("VERDICT: the pack's own CUDA flag arming (cudaSetDeviceFlags "
+              "0x04 at import) is what breaks UAV D3D12 textures in this "
+              "process: the SAME test passed in a fresh child where nothing "
+              "was armed. Until this is fixed, launch ComfyUI with "
+              "ANTS_NO_CUDA_FLAG_ARM=1 - the legacy node will fall back to "
+              "host staging (it needs that flag for its CUDA path), and the "
+              "native node's D3D12 textures work. Send this whole report.")
+        return 13
     if fresh_bad and not fresh_ok:
         print("VERDICT: a FRESH device already refuses UAV textures in this "
               "process, so the legacy engine is NOT the trigger. Send this "
@@ -241,6 +324,8 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--phase-a" in sys.argv:
+        raise SystemExit(_phase_a_only())
     try:
         raise SystemExit(main())
     except SystemExit:

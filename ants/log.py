@@ -41,6 +41,38 @@ class ReFactorLogger(logging.Logger):
             self._log(STATUS_LEVEL, message, args, **kwargs)
 
 
+class _SafeStream:
+    """A console stream that cannot die on a non-CP1251 character.
+
+    Rig 01:06: ComfyUI's console on the owner's machine is cp1251, and the
+    node family logs under a name containing U+26A1 - every single log record
+    raised ``UnicodeEncodeError: 'charmap' codec can't encode character
+    '\u26a1'`` inside ``logging.emit`` and the line was LOST (the traceback
+    went to stderr instead). Branding stays; the text is now encoded with
+    ``errors="replace"`` so a stray glyph can never swallow a diagnostic line.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        try:
+            return self._stream.write(text)
+        except UnicodeEncodeError:
+            encoding = getattr(self._stream, "encoding", None) or "ascii"
+            return self._stream.write(
+                text.encode(encoding, "replace").decode(encoding, "replace"))
+
+    def flush(self):
+        try:
+            self._stream.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
 def _make_logger(name: str) -> logging.Logger:
     # Temporarily swap the global logger class only for OUR logger name —
     # never left installed (other custom nodes must be unaffected).
@@ -52,7 +84,7 @@ def _make_logger(name: str) -> logging.Logger:
         logging.setLoggerClass(previous_class)
     log.propagate = False
     if not log.handlers:
-        handler = logging.StreamHandler(sys.stdout)
+        handler = logging.StreamHandler(_SafeStream(sys.stdout))
         handler.setFormatter(
             _ColoredFormatter("[%(name)s] %(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
         )

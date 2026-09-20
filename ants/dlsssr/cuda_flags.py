@@ -32,6 +32,7 @@ raises - every failure is a reason string, exactly like ``cuda_luid``.
 """
 
 import ctypes
+import os
 
 from . import cuda_luid
 
@@ -215,7 +216,17 @@ def summary():
 
 
 def arm_early(force=False):
-    """(ok, detail) - called once at pack import; never raises."""
+    """(ok, detail) - called once at pack import; never raises.
+
+    ``ANTS_NO_CUDA_FLAG_ARM=1`` skips the arming entirely (A/B: the flag is
+    what the engine's zero-copy gate needs, but it is also the only CUDA state
+    this pack ever sets - rig 01:06 refused UAV D3D12 textures in a FRESH
+    process, so the pack must be able to run without it).
+    """
+    if os.environ.get("ANTS_NO_CUDA_FLAG_ARM", "").strip() in ("1", "true", "yes"):
+        _STATE.update(tried=True, ok=False, route="",
+                      detail="arming disabled by ANTS_NO_CUDA_FLAG_ARM=1")
+        return False, _STATE["detail"]
     if _STATE["tried"] and not force:
         return _STATE["ok"], _STATE["detail"]
     _STATE["tried"] = True

@@ -689,6 +689,61 @@ small ladder of alternatives if the driver refuses the first, and **logs which r
 took** instead of silently swapping it. `ANTS_NR_INPUT_STATE=uav` still restores the old behaviour
 for an A/B.
 
+### Run 01:06 (owner) + the probe — the UAV refusal is NOT about the legacy engine
+
+The probe ran on the rig and **every phase failed**, including phase A, the very
+first thing it does: a brand-new process, a fresh D3D12 device, feature level
+11_0, one 256x256 RGBA16F texture with `ALLOW_UNORDERED_ACCESS` ->
+`E_INVALIDARG`, `Device status: healthy`. Phase B (12_0), phase C (after plain
+CUDA work) and phase D (after the legacy engine) all failed the same way.
+
+That kills the "the legacy engine breaks it" reading: **the legacy engine is NOT
+the trigger** - the probe never loads it before phase A.
+
+What is left, and the reason the probe grew a **phase A0**:
+
+* the one CUDA state this pack sets is the blocking-sync flag armed **at import**
+  (`cudaSetDeviceFlags(0x04)`, rig 22:35 - the thing that opened the engine's
+  zero-copy gate and made frames 1.18 s instead of 15 s). The probe arms it too,
+  before phase A, and the only native run that ever created a UAV texture
+  (21:52) predates that code. So: A0 re-runs the exact phase-A test in a **fresh
+  child process with `ANTS_NO_CUDA_FLAG_ARM=1`** - if A0 passes and A fails, the
+  pack's own arming is the trigger (probe exit code **13**, and the report says
+  to launch ComfyUI with `ANTS_NO_CUDA_FLAG_ARM=1`).
+* everything the probe does before phase A is *nothing but* that arming plus
+  `cuInit`/`cuDeviceGetCount` (identity queries). `ANTS_NO_CUDA_FLAG_ARM=1` is
+  also a supported, documented knob now.
+* each phase additionally creates a **plain (no-UAV) texture** as a control, so
+  "the driver refuses UAV flags" is clearly separated from "the driver refuses
+  textures".
+* and if A0 *also* fails, the machine/driver itself is in the bad state - the
+  next step is a **reboot**, then the probe again (a driver that has survived
+  several device removals/TDRs can stay degraded for the whole boot session).
+
+**The owner's console had a second, quieter bug:** every log line raised
+`UnicodeEncodeError: 'charmap' codec can't encode character '\u26a1'` inside
+`logging.emit` because the console is cp1251 and the node family logs under a
+name containing the branding glyph - the line was **LOST** and a traceback went
+to stderr. `ants/log.py` now wraps the console stream in `_SafeStream`, which
+encodes with `errors="replace"`. Branding kept, diagnostics never lost again.
+
+### pre-denoise OFF (owner request) — and the SR question
+
+`pre_denoise_mode` now has a third value, **`OFF (no pre-denoise)`** (first in
+the list): the stage cannot run, whatever is connected - a `denoise_model` and
+`pre_denoise_strength > 0` are ignored for that run, the console says so, and
+the JS greys `pre_denoise_strength` out (`... (stage OFF)`) while keeping the
+value, so switching back restores it. The schedule's greying and the mode's
+greying cannot fight each other (the mode wins - a disabled stage cannot be
+made active by a schedule).
+
+On the owner's worry ("maybe our half-baked SR pre-denoise is behind this"): the
+23:32 / 23:46 / 23:48 / 01:06 native runs never got as far as a denoise pass
+(the NR session is built first), and the probe - which runs no node code at all
+- reproduces the failure. So the SR pre-denoise is not the cause here, but the
+new OFF mode (and the ability to A/B the whole stage) is exactly the "run it
+controllably" the owner asked for.
+
 ### Run 23:46 / 23:48 (owner) — the UAV refusal is PROCESS STATE, not our description
 
 ```

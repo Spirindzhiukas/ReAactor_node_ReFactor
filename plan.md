@@ -185,6 +185,19 @@ python and never registers callbacks.
       Shipped: `tools\check_d3d12_uav.bat` (4-phase A/B, exit 10 = REPRODUCED,
       READ-ONLY) and `ANTS_D3D12_FEATURE_LEVEL=12_0` (the reference host asks
       for 12_0; the pack default stays 11_0, now printed with the adapter pick).
+- [x] **OWNER EVIDENCE 01:06 + PROBE — the legacy engine is CLEARED**: the
+      probe failed on a FRESH process (phase A: first device, first texture,
+      11_0 -> E_INVALIDARG, device healthy), so a process that never loaded the
+      legacy engine fails the same way. Left: either the pack's own import-time
+      CUDA flag arming (`ANTS_NO_CUDA_FLAG_ARM=1` is now a knob, probe phase A0
+      tests it in a fresh child, exit 13 when it is the trigger) or a driver
+      left degraded by the earlier removals (**reboot**, then probe again).
+      Also fixed: the cp1251 console ate EVERY log line (U+26A1 in the logger
+      name) - `_SafeStream` now encodes with errors="replace".
+- [x] **PRE-DENOISE OFF (owner request)**: a third `pre_denoise_mode` value
+      disables the stage completely (model + strength ignored and logged), the
+      JS greys `pre_denoise_strength` with it, and the mode greying wins over
+      the schedule greying.
 - [ ] **Run 34 (owner, fresh process each time)**: 0) NATIVE NODE FIRST, in a ComfyUI
       just restarted - do not run the legacy node in that process; 1) native +
       a SMALL frame (768x768); 2) if that works, 4096x3072;

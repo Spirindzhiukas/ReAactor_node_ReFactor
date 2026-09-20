@@ -74,6 +74,7 @@ echo.
 if "%RC%"=="10" echo [!!] REPRODUCED - the legacy CUDA path in the process is the trigger. Send the clipboard text.
 if "%RC%"=="11" echo [!!] A fresh device already refuses UAV textures - send the clipboard text.
 if "%RC%"=="12" echo [!!] A feature level decides it - send the clipboard text.
+if "%RC%"=="13" echo [!!] THE PACK'S CUDA FLAG ARMING IS THE TRIGGER - relaunch ComfyUI with ANTS_NO_CUDA_FLAG_ARM=1 and send the clipboard text.
 if "%RC%"=="0" echo [OK] no reproduction in the probe - still send the clipboard text if the node failed.
 if "%RC%"=="2" echo [X] the probe could not run - read the lines above & goto fail
 echo [OK] the report is on your CLIPBOARD - switch to the chat and press Ctrl+V.

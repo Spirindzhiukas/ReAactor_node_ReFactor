@@ -219,6 +219,56 @@ function fitNode(node) {
     app.graph.setDirtyCanvas(true, true);
 }
 
+/* Widgets that only matter for one choice of another widget (owner request:
+ * pre_denoise_strength is meaningless when the pre-denoise stage is OFF).
+ * Values are kept, only the UI is greyed, so switching back restores what the
+ * user had. */
+const MODE_GREY = {
+    pre_denoise_mode: {
+        off_values: ["OFF (no pre-denoise)"],
+        greyed: ["pre_denoise_strength"],
+    },
+};
+
+/* True when `name` is greyed by a MODE widget's choice (not by the schedule). */
+function modeDisabled(node, name) {
+    for (const [modeName, rule] of Object.entries(MODE_GREY)) {
+        if (!rule.greyed.includes(name)) continue;
+        const modeWidget = widgetByName(node, modeName);
+        if (modeWidget && rule.off_values.includes(modeWidget.value)) return true;
+    }
+    return false;
+}
+
+function applyModeGreying(node) {
+    for (const [modeName, rule] of Object.entries(MODE_GREY)) {
+        const modeWidget = widgetByName(node, modeName);
+        if (!modeWidget) continue;
+        const off = rule.off_values.includes(modeWidget.value);
+        for (const name of rule.greyed) {
+            const w = widgetByName(node, name);
+            if (!w) continue;
+            if (w.__antsLabel === undefined) w.__antsLabel = w.label ?? name;
+            w.disabled = off;
+            w.label = off ? `${w.__antsLabel} (stage OFF)` : w.__antsLabel;
+        }
+    }
+}
+
+function hookModeGreying(node, widgetNames) {
+    for (const name of widgetNames) {
+        const w = widgetByName(node, name);
+        if (!w || w.__antsModeHook) continue;
+        const original = w.callback;
+        w.callback = function (...args) {
+            if (original) original.apply(this, args);
+            applyModeGreying(node);
+        };
+        w.__antsModeHook = true;
+    }
+    applyModeGreying(node);
+}
+
 /* A one-line header naming which engine this node drives (not serialized). */
 function addEngineHeader(node, text) {
     if (!text || node.__antsEngineHeader) return;
@@ -268,9 +318,14 @@ function refreshEnhancerControls(node) {
         const w = widgetByName(node, name);
         if (!w) continue;
         if (w.__antsLabel === undefined) w.__antsLabel = w.label ?? name;
-        const next = bypass ? `${w.__antsLabel} ⛓` : w.__antsLabel;
-        if (w.disabled !== bypass || w.label !== next) touched = true;
-        w.disabled = bypass;
+        // a MODE greying (e.g. pre-denoise OFF) wins over the schedule label:
+        // the schedule does not make a disabled stage active again
+        const off = modeDisabled(node, name);
+        const disabled = bypass || off;
+        const next = off ? `${w.__antsLabel} (stage OFF)`
+                         : (bypass ? `${w.__antsLabel} ⛓` : w.__antsLabel);
+        if (w.disabled !== disabled || w.label !== next) touched = true;
+        w.disabled = disabled;
         w.label = next;
     }
     if (touched) app.graph.setDirtyCanvas(true, true);
@@ -325,6 +380,7 @@ app.registerExtension({
             const at = this.widgets.indexOf(btn);
             this.widgets.splice(0, 0, this.widgets.splice(at, 1)[0]);  // top of the UI
             addEngineHeader(this, ENH_HEADER[nodeData.name]);
+            hookModeGreying(this, Object.keys(MODE_GREY));
             return result;
         };
     },
@@ -352,7 +408,8 @@ app.registerExtension({
             };
         }
         if (ENH_CLASSES.includes(node.comfyClass)) {
-            setTimeout(() => refreshEnhancerControls(node), 0);
+            setTimeout(() => { applyModeGreying(node);
+                               refreshEnhancerControls(node); }, 0);
             const originalConnections = node.onConnectionsChange;
             node.onConnectionsChange = function (...args) {
                 if (originalConnections) originalConnections.apply(this, args);
@@ -361,7 +418,8 @@ app.registerExtension({
             const originalConfigure = node.onConfigure;
             node.onConfigure = function (...args) {
                 if (originalConfigure) originalConfigure.apply(this, args);
-                setTimeout(() => refreshEnhancerControls(node), 0);
+                setTimeout(() => { applyModeGreying(node);
+                                   refreshEnhancerControls(node); }, 0);
             };
         }
     },
