@@ -112,10 +112,13 @@ class DlssSrSession:
                                           label="sr depth")
         self.motion = dev.create_texture2d(self.rw, self.rh, d3d.DXGI_FORMAT_R16G16_FLOAT,
                                            label="sr motion")
-        # Depth + motion are unused for stills: zero once.
+        # Depth + motion are unused for stills: zero once. Both are INPUTS, so
+        # they are left in the shader-resource state NGX expects (see
+        # d3d12.input_state) - the same contract as the NR path.
         zeros = bytes(self.rw * self.rh * 4)
-        self.gpu.upload_texture(self.depth, zeros, d3d.D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-        self.gpu.upload_texture(self.motion, zeros, d3d.D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        input_state = d3d.input_state()
+        self.gpu.upload_texture(self.depth, zeros, input_state)
+        self.gpu.upload_texture(self.motion, zeros, input_state)
         self.gpu.submit_and_wait()
 
     def _apply_create_params(self, quality, hdr, preset):
@@ -140,7 +143,7 @@ class DlssSrSession:
             raise DlssSrError(
                 f"[ANTs] DLSS SR expected {expected} color bytes, got {len(color_rgba)}.")
         uav = d3d.D3D12_RESOURCE_STATE_UNORDERED_ACCESS
-        self.gpu.upload_texture(self.color, color_rgba, uav)
+        self.gpu.upload_texture(self.color, color_rgba, d3d.input_state())
         self.gpu.transition(self.output, uav)
         p = self.ngx.params
         p.set_resource("Color", self.color.ptr)

@@ -957,3 +957,45 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   bug and pass with the fix.
 - Suite: **414 checks** (dlsssr 91, native_flow 51, dlssnr_bridge 101) +
   swapper_state 13 + pyflakes/scope/smoke green.
+
+### 2026-09-20 (owner runs 21:47 / 21:52 / 21:53) — the native path's first real evaluate, and the CUDA gate in the engine's own words
+- **21:52 = the furthest the native host has ever got**: Init_ProjectID hr=1,
+  GetCapabilityParameters hr=1, snippet Init_Ext (via shim) hr=1,
+  CreateFeature(18) hr=1, EvaluateFeature returned **hr=1** (with an internal
+  caught C++ throw). Then the frame died in three steps.
+- **Step 1 — our copy list**: `Close 0x80070057` while
+  `Device status: 0x00000000 (device present and healthy)`. So something IN
+  that recording was invalid - not a removal. The log could not say which list
+  it was; it now names the list + its last recorded commands.
+- **Step 2 — the device**: the runtime list's Close reported the device gone
+  with `0x887A0001`, which the pack called "REMOVED ... unknown removal
+  reason". 0x887A0001 is **DXGI_ERROR_INVALID_CALL** (DEVICE_REMOVED is
+  0x887A0005), and it is also what the next frame's `D3D12CreateDevice`
+  answered at 21:53:17 - the process was already finished with D3D12. Now:
+  `describe_hresult()` names every code, a failed CreateDevice in a process
+  that has lost a device says RESTART ComfyUI, `_removal_text` is honest.
+- **Step 3 — the cleanup crashed the driver**: `NATIVE CRASH 0xC0000005 at
+  nvwgf2umx.dll+0x6D3471 [in-flight call: ID3D12GraphicsCommandList]` with the
+  Python stack `com.py release <- d3d12.py close <- _node._close_native`.
+  Releasing a dead device's objects is what crashed. `GpuContext.close()` now
+  releases NOTHING when the device is gone, parks the objects, and logs it;
+  the removal is remembered process-wide (`note_wedged`).
+- **THE LIKELY ROOT CAUSE of the E_INVALIDARG Close (all three runs)**: the
+  colour/guide INPUT textures were in the UNORDERED_ACCESS state. The engine's
+  contract (and the shipped open-source ComfyUI host `lisitskyaa/
+  ComfyUI-DLSS5-NR`, read for technique: same project id, same shim, D3D12,
+  single command list, inputs in NON_PIXEL_SHADER_RESOURCE, output in UAV) is
+  that inputs are SHADER RESOURCES. Fixed in nr.py + sr.py, with
+  `ANTS_NR_INPUT_STATE=uav` as the A/B; the contract line prints both states.
+- **The CUDA gate, decoded** (21:47): the engine's own status text says
+  "active CUDA primary context does not use FFmpeg blocking-sync flags" - it
+  wants `CU_CTX_SCHED_BLOCKING_SYNC` (0x04) on the process's primary context,
+  which PyTorch never sets. New `ants/dlsssr/cuda_flags.py`: read
+  `cuCtxGetFlags`, try `cudaSetDeviceFlags(0x04)` (legal only before the
+  context exists), `cuDevicePrimaryCtxSetFlags`, `cuCtxSetFlags`, report every
+  return code; called at IMPORT from `ants/__init__.py`; one-line summary in
+  the node's CPU-staging warning; `ANTS_NR_CUDA_FORCE=1` tries the CUDA entry
+  point anyway (A/B, crash box armed). Same machine: OreX's node does the same
+  DLL with CUDA zero-copy in 2.65 s vs our 14-18 s.
+- Suite: **434 checks** (dlsssr 93, native_flow 56, dlssnr_bridge 101) +
+  pyflakes/scope/smoke green.

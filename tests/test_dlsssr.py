@@ -686,6 +686,30 @@ def _crash_phase_check():
             and "crashlog.set_phase" in (REPO / "ants" / "dlsssr" / "com.py").read_text())
 
 
+def _cuda_flags_check():
+    """The engine's own gate: "active CUDA primary context does not use FFmpeg
+    blocking-sync flags". Every arming route must be attempted and reported,
+    the arming must happen as early as our code runs, and the A/B force knob
+    must be wired."""
+    from ants.dlsssr import cuda_flags
+    ok, lines = cuda_flags.set_blocking_sync()
+    attempted = (isinstance(ok, bool) and isinstance(lines, list)
+                 and any("cudaSetDeviceFlags" in line for line in lines)
+                 and any("cuDevicePrimaryCtxSetFlags" in line for line in lines)
+                 and any("cuCtxSetFlags" in line for line in lines)
+                 and any("CUDA context flags before" in line for line in lines))
+    naming = (cuda_flags.describe_flags(0x04) == "0x04 (blocking-sync)"
+              and "PRIMARY_CONTEXT_ACTIVE" in cuda_flags.error_name(708)
+              and cuda_flags.describe_flags(0) == "0x00 (auto/spin)")
+    summary = ("blocking-sync" in cuda_flags.summary()
+               and "engine wants" in cuda_flags.summary())
+    early = "cuda_flags.log_early()" in (REPO / "ants" / "__init__.py").read_text()
+    node_src = (REPO / "ants" / "dlssnr" / "node.py").read_text()
+    wired = ("ANTS_NR_CUDA_FORCE" in node_src
+             and "cuda_flags.summary()" in node_src)
+    return attempted and naming and summary and early and wired
+
+
 def _cuda_multigpu_tool_check():
     """The #15255 probe: runnable anywhere, soft-fails with a reason, and it
     really does the A/B (one-GPU child vs all-GPUs-touched copy)."""
@@ -1152,6 +1176,18 @@ def main():
           "bat - fresh-process A/B, a pinned host copy round-trip, the "
           "single-GPU child, and a verdict the owner can act on",
           _cuda_multigpu_tool_check())
+    check("cuda: the engine's blocking-sync gate is attacked by every route "
+          "(runtime flag, primary-context flag, cuCtxSetFlags), the result is "
+          "named in the log, the arming runs at IMPORT (before torch builds "
+          "the context) and ANTS_NR_CUDA_FORCE=1 can try the CUDA entry point "
+          "anyway",
+          _cuda_flags_check())
+    check("nr: the colour/depth/motion INPUTS are handed to NGX in a "
+          "shader-resource state and only the OUTPUT is a UAV - the contract "
+          "the shipped hosts use, with ANTS_NR_INPUT_STATE=uav as the A/B",
+          "d3d.input_state()" in nr_src and "state=input_state" in nr_src
+          and "d3d.state_name(uav)" in nr_src
+          and "d3d.input_state()" in (REPO / "ants" / "dlsssr" / "sr.py").read_text())
     check("tools: import lister flags termination APIs + NGX backend "
           "bindings statically (engine-dll discriminator, no execution)",
           (REPO / "tools" / "list_imports.py").is_file()

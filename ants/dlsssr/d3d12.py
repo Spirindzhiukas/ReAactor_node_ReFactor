@@ -38,6 +38,8 @@ D3D12_RESOURCE_STATE_UNORDERED_ACCESS = 0x8
 D3D12_RESOURCE_STATE_COPY_DEST = 0x400
 D3D12_RESOURCE_STATE_COPY_SOURCE = 0x800
 D3D12_RESOURCE_STATE_GENERIC_READ = 0xAC3
+D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE = 0x40
+D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE = 0x80
 D3D12_RESOURCE_DIMENSION_BUFFER = 1
 D3D12_RESOURCE_DIMENSION_TEXTURE2D = 3  # (2 = TEXTURE1D - rig-proven trap)
 D3D12_TEXTURE_LAYOUT_UNKNOWN = 0
@@ -87,12 +89,18 @@ _LIST_RESOURCE_BARRIER = 26
 # creating new objects just cascades into more confusing HRESULTs
 # (rig 2026-09-20 20:39: Close 0x80070057 twice, then CreateCommandAllocator
 # 0x887A0005 = DXGI_ERROR_DEVICE_REMOVED).
+DXGI_ERROR_INVALID_CALL = 0x887A0001
 DXGI_ERROR_DEVICE_REMOVED = 0x887A0005
 DXGI_ERROR_DEVICE_HUNG = 0x887A0006
 DXGI_ERROR_DEVICE_RESET = 0x887A0007
 DXGI_ERROR_DRIVER_INTERNAL_ERROR = 0x887A0020
 DXGI_ERROR_UNSUPPORTED = 0x887A0004
 DXGI_ERROR_DEVICE_REMOVED_NAMES = {
+    DXGI_ERROR_INVALID_CALL: (
+        "INVALID_CALL - the call or the object state was invalid. A healthy "
+        "device does not report this through GetDeviceRemovedReason, so it "
+        "means the device is already gone and the runtime is refusing calls "
+        "(a fresh D3D12CreateDevice in this process answers the same code)"),
     DXGI_ERROR_DEVICE_REMOVED: (
         "DEVICE_REMOVED (the device is gone; everything recorded is void)"),
     DXGI_ERROR_DEVICE_HUNG: (
@@ -107,6 +115,19 @@ DXGI_ERROR_DEVICE_REMOVED_NAMES = {
     DXGI_ERROR_UNSUPPORTED: "UNSUPPORTED - the device does not support the call",
 }
 
+HRESULT_NAMES = {
+    0x80070057: "E_INVALIDARG",
+    0x80004005: "E_FAIL",
+    0x8007000E: "E_OUTOFMEMORY",
+    0x80004002: "E_NOINTERFACE",
+    DXGI_ERROR_INVALID_CALL: "DXGI_ERROR_INVALID_CALL",
+    DXGI_ERROR_DEVICE_REMOVED: "DXGI_ERROR_DEVICE_REMOVED",
+    DXGI_ERROR_DEVICE_HUNG: "DXGI_ERROR_DEVICE_HUNG",
+    DXGI_ERROR_DEVICE_RESET: "DXGI_ERROR_DEVICE_RESET",
+    DXGI_ERROR_DRIVER_INTERNAL_ERROR: "DXGI_ERROR_DRIVER_INTERNAL_ERROR",
+    DXGI_ERROR_UNSUPPORTED: "DXGI_ERROR_UNSUPPORTED",
+}
+
 
 def describe_device_reason(hr):
     """Plain-English name for a GetDeviceRemovedReason HRESULT."""
@@ -115,6 +136,98 @@ def describe_device_reason(hr):
         return "0x00000000 (device present and healthy)"
     return f"0x{code:08X} - " + DXGI_ERROR_DEVICE_REMOVED_NAMES.get(
         code, "unknown removal reason")
+
+
+def describe_hresult(hr):
+    """``0x887A0001 (DXGI_ERROR_INVALID_CALL)`` - name the code, always.
+
+    The rig logs used to say "HRESULT 0x887A0001" and then, in the same
+    sentence, call it a *removal* - 0x887A0001 is DXGI_ERROR_INVALID_CALL,
+    which is what the runtime answers when the *object state* is wrong or when
+    the whole process is already finished with D3D12 (a fresh
+    D3D12CreateDevice in a process whose device was removed gets exactly this).
+    """
+    code = hr & 0xFFFFFFFF
+    name = HRESULT_NAMES.get(code)
+    return f"0x{code:08X} ({name})" if name else f"0x{code:08X}"
+
+
+def input_state():
+    """The D3D12 state NGX expects for its INPUT textures (Color/MVec/Depth).
+
+    Proven-host contract (and the shipped open-source ComfyUI host): the
+    colour input lives in a SHADER-RESOURCE state and only the OUTPUT sits in
+    UNORDERED_ACCESS. This pack used to hand NGX a colour texture in the
+    UNORDERED_ACCESS state - a state the runtime does not record its reads
+    for, which is exactly the kind of thing D3D12 answers with E_INVALIDARG at
+    ``Close()`` (rig 18:25 / 20:39 / 21:52) and the driver can turn into a
+    GPU fault (device removal, 20:39 / 21:52).
+
+    ``ANTS_NR_INPUT_STATE=uav`` restores the old behaviour for an A/B run.
+    """
+    legacy = os.environ.get("ANTS_NR_INPUT_STATE", "").strip().lower()
+    if legacy in ("uav", "unordered_access", "8"):
+        return D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+    return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+
+
+def state_name(state):
+    """Short name for a resource state (log lines)."""
+    return {D3D12_RESOURCE_STATE_COMMON: "COMMON",
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS: "UNORDERED_ACCESS",
+            D3D12_RESOURCE_STATE_COPY_DEST: "COPY_DEST",
+            D3D12_RESOURCE_STATE_COPY_SOURCE: "COPY_SOURCE",
+            D3D12_RESOURCE_STATE_GENERIC_READ: "GENERIC_READ",
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE:
+                "NON_PIXEL_SHADER_RESOURCE",
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE:
+                "PIXEL_SHADER_RESOURCE"}.get(state, f"state {state}")
+
+
+# --- process-wide "this process lost its device" memory --------------------
+# A removed D3D12 device poisons the whole PROCESS, not just our objects:
+#   * a fresh D3D12CreateDevice on the next frame answered 0x887A0001
+#     (DXGI_ERROR_INVALID_CALL) - the driver refuses new devices, and the
+#     message read as a mystery instead of "restart ComfyUI";
+#   * releasing a poisoned command list CRASHED inside the NVIDIA UMD - an
+#     access violation at nvwgf2umx.dll+0x6D3471, right after the removal
+#     (rig 21:52, first frame of a native run).
+# Both are remembered here so the pack can say what happened and stop
+# touching the corpse (see GpuContext.close).
+_WEDGED = {"done": False, "hr": 0, "text": ""}
+
+
+def note_wedged(hr, text=""):
+    """Remember (once) that this process has lost a D3D12 device."""
+    if not _WEDGED["done"]:
+        _WEDGED.update(done=True, hr=(hr or 0) & 0xFFFFFFFF, text=text or "")
+
+
+def wedged():
+    """(True, hr, text) once a D3D12 device was removed in this process."""
+    return _WEDGED["done"], _WEDGED["hr"], _WEDGED["text"]
+
+
+def reset_wedged():
+    """Forget the removal - tests only; the real state cannot be undone."""
+    _WEDGED.update(done=False, hr=0, text="")
+
+
+def _create_device_error(hr):
+    """The loud error for a failed D3D12CreateDevice, with the wedge named."""
+    text = f"[ANTs] D3D12CreateDevice failed: HRESULT {describe_hresult(hr)}."
+    done, w_hr, w_text = wedged()
+    if done:
+        text += (" This process ALREADY LOST a D3D12 device"
+                 + (f" ({w_text})" if w_text else "")
+                 + " and after that the driver refuses to hand out new ones -"
+                 " RESTART ComfyUI; no node can bring the GPU back in this"
+                 " process.")
+    elif (hr & 0xFFFFFFFF) == DXGI_ERROR_INVALID_CALL:
+        text += (" DXGI_ERROR_INVALID_CALL is not a removal reason - the call"
+                 " or the object state was invalid (a stale adapter pointer, or"
+                 " a driver that is still unwinding an earlier device loss).")
+    return text
 
 
 def _align(value, to):
@@ -262,7 +375,8 @@ class D3D12Device(ComObject):
         create.restype = ctypes.c_int32
         out = ctypes.c_void_p()
         hr = create(adapter_ptr, feature_level, IID_ID3D12Device, ctypes.byref(out))
-        hresult_check(hr, "D3D12CreateDevice")
+        if hr < 0:
+            raise DlssSrError(_create_device_error(hr))
         return D3D12Device(out.value)
 
     def _create(self, slot, what, argtypes, *args):
@@ -288,13 +402,13 @@ class D3D12Device(ComObject):
                          IID_ID3D12CommandAllocator),
             "ID3D12CommandAllocator")
 
-    def create_command_list(self, allocator):
+    def create_command_list(self, allocator, label="ID3D12GraphicsCommandList"):
         return ComObject(
             self._create(_DEVICE_CREATE_COMMAND_LIST, "CreateCommandList",
                          [_CVOID_U32(), _CVOID_U32(), _CVOID_P(), _CVOID_P()],
                          ctypes.c_uint32(0), ctypes.c_uint32(D3D12_COMMAND_LIST_TYPE_DIRECT),
                          allocator.ptr, None, IID_ID3D12GraphicsCommandList),
-            "ID3D12GraphicsCommandList")
+            label)
 
     def create_fence(self, initial=0):
         return ComObject(
@@ -338,8 +452,19 @@ class D3D12Device(ComObject):
                     (D3D12_RESOURCE_FLAG_NONE,
                      D3D12_RESOURCE_STATE_COMMON))
 
-    def create_texture2d(self, width, height, fmt, allow_uav=True, label="texture"):
-        if allow_uav:
+    def create_texture2d(self, width, height, fmt, allow_uav=True, label="texture",
+                         state=None):
+        """One committed 2D texture.
+
+        ``state`` pins the INITIAL state (used by the NR/SR inputs, which must
+        be created in a shader-resource state - see :func:`input_state`);
+        without it the UAV recipe cascade picks the first combination the
+        driver accepts and caches it for every later texture.
+        """
+        if state is not None:
+            recipes = ((D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS if allow_uav
+                        else D3D12_RESOURCE_FLAG_NONE, state),)
+        elif allow_uav:
             recipes = (self._texture_recipe,) if self._texture_recipe else self._UAV_RECIPES
         else:
             recipes = ((D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON),)
@@ -351,11 +476,38 @@ class D3D12Device(ComObject):
             except DlssSrError as exc:
                 last = exc
                 continue
-            if self._texture_recipe is None and allow_uav:
+            if self._texture_recipe is None and allow_uav and state is None:
                 self._texture_recipe = (flags, state)
+            self.report_texture_recipe()
             return D3D12Resource(ptr, label, width, height, fmt,
                                  width * height * BPP[fmt], state)
         raise last
+
+    def report_texture_recipe(self):
+        """Name the (flags, state) combo the driver accepted - once.
+
+        The cascade can silently fall back to a texture WITHOUT
+        ALLOW_UNORDERED_ACCESS; NGX feature 18 writes its output through a UAV,
+        so a degraded recipe would be a hard contract violation rather than a
+        harmless fallback. One line in the rig log settles it.
+        """
+        recipe = self._texture_recipe
+        if recipe is None or getattr(self, "_recipe_reported", False):
+            return
+        self._recipe_reported = True
+        flags, state = recipe
+        from ..log import dlss_logger
+        if flags != D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS:
+            dlss_logger.warning(
+                "[ANTs] D3D12 textures were created WITHOUT "
+                "ALLOW_UNORDERED_ACCESS (flags 0x%X, %s) - the NGX runtime "
+                "writes its output through a UAV, so this recipe can only "
+                "fail. Report this line: it means the driver refused every "
+                "UAV-capable recipe.", flags, state_name(state))
+        else:
+            dlss_logger.status(
+                "[ANTs] D3D12 texture recipe: flags ALLOW_UNORDERED_ACCESS, "
+                "initial state %s", state_name(state))
 
     def create_buffer(self, size, heap_type, label="buffer"):
         state = {"upload": D3D12_RESOURCE_STATE_GENERIC_READ,
@@ -570,6 +722,9 @@ class GpuContext:
         self.queue = device.create_command_queue()
         self.allocator = device.create_command_allocator()
         self.list = device.create_command_list(self.allocator)
+        # our copy list keeps its own label: every log line and every kill line
+        # then says WHICH list was in flight (the NGX runtime has its own)
+        self.list.label = "ID3D12GraphicsCommandList (ours)"
         self.fence = device.create_fence()
         self.event = win32.create_event()
         self.fence_value = 0
@@ -597,6 +752,7 @@ class GpuContext:
             self.runtime_allocator = self.device.create_command_allocator()
             self.runtime_list = self.device.create_command_list(
                 self.runtime_allocator)
+            self.runtime_list.label = "ID3D12GraphicsCommandList (NGX runtime)"
         return self.runtime_list
 
     def _cmd(self, description):
@@ -746,9 +902,10 @@ class GpuContext:
             return False, 0, f"status unavailable ({exc})"
 
     def mark_device_removed(self, hr, text):
-        """Remember that the device is gone (idempotent)."""
+        """Remember that the device is gone (idempotent, process-wide)."""
         if self.dead is None:
             self.dead = (hr & 0xFFFFFFFF, text)
+            note_wedged(self.dead[0], text)
 
     def device_removed_error(self, where):
         """The one loud error for a removed device."""
@@ -773,20 +930,23 @@ class GpuContext:
                 "again." % (total, self.ordinal if self.ordinal is not None
                             else 0))
         return (
-            f"[ANTs] The D3D12 device was REMOVED while {where}: {text}. "
-            "Everything queued or recorded on it is void, so this frame "
-            "cannot be produced. The pack drops the native session and the "
-            "GPU context; the NEXT frame builds a fresh device. If it keeps "
+            f"[ANTs] The D3D12 device is unusable - GetDeviceRemovedReason "
+            f"reports {text} - and it failed while {where}. Everything queued "
+            "or recorded on it is void, so this frame cannot be produced. The "
+            "pack drops the native session and the GPU context WITHOUT "
+            "releasing its objects (releasing a dead device's objects crashes "
+            "inside the NVIDIA driver - rig 21:52 died that way), and the next "
+            "frame cannot build a fresh device in this process. If it keeps "
             "happening: (1) the usual cause is a single GPU operation longer "
             "than the driver's ~2 s timeout (a big first evaluate or a huge "
-            "frame) - try a much smaller image once to confirm, and raise the "
+            "frame) - run a much smaller image once to confirm, and raise the "
             "TDR delay if you need the big one (Windows registry: "
             "HKLM\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers\\"
-            "TdrDelay, DWORD seconds, reboot); (2) restart ComfyUI before the "
-            "next run - after a removal the driver can refuse new devices in "
-            "the same process (the legacy engine then reports 'Could not "
-            "create a D3D12 device matching CUDA ordinal ... by LUID', which "
-            "is the same wedged state, not a second bug).") + multi
+            "TdrDelay, DWORD seconds, reboot); (2) RESTART ComfyUI before the "
+            "next run - after a removal the driver refuses new devices in the "
+            "process, and the next frame answers D3D12CreateDevice 0x887A0001 "
+            "(DXGI_ERROR_INVALID_CALL), which is the same wedged state, not a "
+            "second bug.") + multi
 
     def _submit_pair(self, command_list, allocator, timeout_ms, tag):
         if self.dead is not None:
@@ -799,7 +959,7 @@ class GpuContext:
                 self.mark_device_removed(hr, text)
                 raise self.device_removed_error("closing the command list") \
                     from exc
-            self._drop_recording(tag, exc)
+            self._drop_recording(tag, exc, command_list)
             return
         cell = (_CVOID_P() * 1)(command_list.ptr)
         self.queue.call(_QUEUE_EXECUTE_COMMAND_LISTS, [_CVOID_U32(), _CVOID_P()], None,
@@ -840,7 +1000,25 @@ class GpuContext:
             except Exception:
                 pass
 
-    def _drop_recording(self, tag, exc):
+    def _describe_list(self, command_list=None):
+        """Say WHICH recording could not be closed, and what it holds.
+
+        The 21:52 report proved that "ID3D12GraphicsCommandList.Close failed"
+        alone cannot be acted on: it was our own copy list (device healthy, so
+        something IN the recording was invalid) rather than the runtime's list.
+        """
+        if command_list is self.runtime_list:
+            return ("the NGX runtime's command list (the runtime recorded the "
+                    "feature work into it)")
+        entries = self.recorded[-6:]
+        if not entries:
+            return "our copy command list (nothing recorded by us)"
+        more = "" if len(self.recorded) <= 6 else \
+            f", +{len(self.recorded) - 6} more"
+        return (f"our copy command list ({len(self.recorded)} recorded "
+                f"command(s): {', '.join(entries)}{more})")
+
+    def _drop_recording(self, tag, exc, command_list=None):
         """A recording that cannot be closed is VOID - rebuild and carry on.
 
         Two causes are known from the rig:
@@ -860,17 +1038,18 @@ class GpuContext:
             raise exc
         from ..log import dlss_logger
         _removed, _hr, status = self.device_status()
+        who = self._describe_list(command_list)
         if tag == "runtime":
             self.runtime_recoveries += 1
             dlss_logger.warning(
-                "[ANTs] D3D12: the NGX command list could not be closed after "
-                "the feature call (%s) - the runtime's recording is VOID and "
-                "this frame's enhanced output is stale or unchanged. The list "
-                "and its allocator were replaced (recovery #%d). Please send "
-                "this line with the console and the nvngx.log from the "
-                "evidence collector; ANTS_D3D12_STRICT_CLOSE=1 turns this into "
-                "a hard error if you prefer the run to stop here. Device "
-                "status: %s", exc, self.runtime_recoveries, status)
+                "[ANTs] D3D12: %s could not be closed after the feature call "
+                "(%s) - the runtime's recording is VOID and this frame's "
+                "enhanced output is stale or unchanged. The list and its "
+                "allocator were replaced (recovery #%d). Please send this line "
+                "with the console and the nvngx.log from the evidence "
+                "collector; ANTS_D3D12_STRICT_CLOSE=1 turns this into a hard "
+                "error if you prefer the run to stop here. Device status: %s",
+                who, exc, self.runtime_recoveries, status)
             old_list, old_alloc = self.runtime_list, self.runtime_allocator
             self.runtime_list, self.runtime_allocator = None, None
             self._parked += [obj for obj in (old_list, old_alloc)
@@ -878,17 +1057,22 @@ class GpuContext:
             self.command_list()          # fresh pair for the next frame
             return
         dlss_logger.warning(
-            "[ANTs] D3D12 command list not closable (%s) - dropping the "
-            "recording and replacing the list. GPU work recorded since the "
-            "last submit is LOST; if the output looks stale, send this line "
-            "with the rest of the log. ANTS_D3D12_STRICT_CLOSE=1 turns this "
-            "into a hard error. Device status: %s", exc, status)
+            "[ANTs] D3D12 command list not closable (%s) - %s could not be "
+            "closed while the device itself is HEALTHY (%s), so something in "
+            "that recording is invalid. Dropping it and replacing the list: "
+            "GPU work recorded since the last submit is LOST; if the output "
+            "looks stale, send this line with the rest of the log. "
+            "ANTS_NR_INPUT_STATE=uav tests the resource-state contract and "
+            "ANTS_D3D12_CHECKPOINT=1 names the offending command; set "
+            "ANTS_D3D12_STRICT_CLOSE=1 if you prefer the run to stop here.",
+            exc, who, status)
         old_list, old_alloc = self.list, self.allocator
         self._parked += [obj for obj in (old_list, old_alloc) if obj is not None]
         self._pending_release.clear()   # the recording never reached the GPU
         try:
             self.allocator = self.device.create_command_allocator()
-            self.list = self.device.create_command_list(self.allocator)
+            self.list = self.device.create_command_list(
+                self.allocator, "ID3D12GraphicsCommandList (ours)")
         except DlssSrError as exc:
             # Creating objects can itself fail when the device went away in
             # the meantime - report THAT, not the cascade (rig 20:39:
@@ -901,24 +1085,48 @@ class GpuContext:
             raise
 
     def close(self):
+        """Drop the context - or leave the corpse alone if the device is gone.
+
+        Releasing D3D12 objects that belong to a REMOVED device crashes inside
+        the NVIDIA user-mode driver: rig 21:52 died with an access violation at
+        nvwgf2umx.dll+0x6D3471 while ``ComObject.release`` was in flight, one
+        frame after the removal (and the crash box named the command list).
+        Nothing is lost by not releasing them - the process has to be
+        restarted after a removal anyway - so the objects are parked and the
+        console says so.
+        """
         if self._closed:
             return
         self._closed = True
-        for staged in list(self._pending_release):
-            try:
-                staged.release()
-            except Exception:
-                pass
-        self._pending_release.clear()
         win32.close_handle(self.event)
-        for obj in (self.list, self.allocator, self.runtime_list,
-                    self.runtime_allocator, self.queue, self.fence,
-                    *self._parked):
-            if obj is None:
-                continue
+        if self.dead is None:
+            removed, hr, text = self.device_status()
+            if removed:
+                self.mark_device_removed(hr, text)
+        else:
+            # closing a context whose device is gone IS the process-wide
+            # "this process lost its device" fact (idempotent)
+            note_wedged(*self.dead)
+        objects = [obj for obj in (self.list, self.allocator, self.runtime_list,
+                                   self.runtime_allocator, self.queue, self.fence,
+                                   *self._parked, *self._pending_release)
+                   if obj is not None]
+        self._parked.clear()
+        self._pending_release.clear()
+        self.adapter = None
+        if self.dead is not None:
+            _, hr, text = self.device_status()
+            from ..log import dlss_logger
+            dlss_logger.warning(
+                "[ANTs] NOT releasing %d D3D12 object(s): the device is gone "
+                "(%s) and releasing them crashes inside the NVIDIA driver "
+                "(rig 21:52: access violation at nvwgf2umx.dll during "
+                "ID3D12GraphicsCommandList::Release). They are left to the "
+                "process teardown; restart ComfyUI before the next run.",
+                len(objects), text)
+            return
+        for obj in objects:
             try:
                 obj.release()
             except Exception:
                 pass
-        self._parked.clear()
-        self.adapter = None

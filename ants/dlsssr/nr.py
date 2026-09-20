@@ -157,6 +157,13 @@ class DlssNrSession:
                 app_data_path=app_data_path, feature_module_path=runtime)
 
         dev = gpu.device
+        # Input state contract (rig 18:25/20:39/21:52): the colour/guide
+        # INPUTS live in a shader-resource state and only the OUTPUT sits in
+        # UNORDERED_ACCESS - the same split the shipped open-source ComfyUI
+        # host uses. Handing NGX an input in the UAV state is what D3D12
+        # answers with E_INVALIDARG at Close() (and what the driver can turn
+        # into a GPU fault). ANTS_NR_INPUT_STATE=uav restores the old state.
+        input_state = d3d.input_state()
         self.color = dev.create_texture2d(
             self.w, self.h, d3d.DXGI_FORMAT_R16G16B16A16_FLOAT,
             label="nr color")
@@ -168,11 +175,14 @@ class DlssNrSession:
         # CreateCommittedResource is zero-initialized before any copy touches
         # it. Uploading zeros would be a wasted submit (and was the first
         # thing this session recorded, i.e. the first thing that could go
-        # wrong before the feature even exists).
+        # wrong before the feature even exists). They are created straight in
+        # the input state, so no barrier is ever needed for them.
         self.motion = dev.create_texture2d(
-            self.w, self.h, d3d.DXGI_FORMAT_R16G16_FLOAT, label="nr motion")
+            self.w, self.h, d3d.DXGI_FORMAT_R16G16_FLOAT, label="nr motion",
+            state=input_state)
         self.depth = dev.create_texture2d(
-            self.w, self.h, d3d.DXGI_FORMAT_R32_FLOAT, label="nr depth")
+            self.w, self.h, d3d.DXGI_FORMAT_R32_FLOAT, label="nr depth",
+            state=input_state)
 
         self._scaling_cb = None
         self._contract_logged = False
@@ -294,8 +304,11 @@ class DlssNrSession:
             raise DlssSrError(
                 f"[ANTs] DLSS NR expected {expected} color bytes, got {len(color_rgba)}.")
         uav = d3d.D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+        # Colour goes in as a shader-resource read (see the note in __init__):
+        # the upload leaves it in the INPUT state, not in UAV.
         self.gpu.upload_texture(self.color,
-                                _rgba8_to_fp16(color_rgba, self.w, self.h), uav)
+                                _rgba8_to_fp16(color_rgba, self.w, self.h),
+                                d3d.input_state())
         self.gpu.transition(self.output, uav)
         # Drain before the feature call: the proven hosts close, execute and
         # fence-wait every copy they make, so the runtime always receives a
@@ -320,7 +333,8 @@ class DlssNrSession:
                 f"uicorr 0 depth_inverted 1 upscaling 0 "
                 f"auto_mask {int(bool(self.settings['auto_mask']))} "
                 f"surfaces color/output RGBA16F mvec R16G16_FLOAT "
-                f"depth R32_FLOAT subrects full-frame")
+                f"depth R32_FLOAT (inputs {d3d.state_name(d3d.input_state())}, "
+                f"output {d3d.state_name(uav)}) subrects full-frame")
         try:
             self.ngx.evaluate()
         except Exception as exc:

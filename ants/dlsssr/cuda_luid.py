@@ -115,26 +115,56 @@ def _driver_name(lib, ordinal):
         return ""
 
 
-def _cudart():
-    """(cudaDeviceGetLuid, reason) from the CUDA runtime, if we can find it."""
-    import torch  # noqa: F401 - only to locate torch/lib next to it
-    lib_dir = os.path.join(os.path.dirname(torch.__file__), "lib")
+_CUDART = {"tried": False, "lib": None, "path": "", "reason": ""}
+
+
+def cudart_library():
+    """(lib, path, reason): the CUDA runtime next to torch, loaded ONCE.
+
+    Used by the LUID fallback and by the context-flag arming in
+    ``cuda_flags``; caching matters because ``cudaSetDeviceFlags`` must run
+    before the context exists and a second LoadLibrary is pointless work in
+    that window.
+    """
+    if _CUDART["tried"]:
+        return _CUDART["lib"], _CUDART["path"], _CUDART["reason"]
+    _CUDART["tried"] = True
+    try:
+        import torch  # noqa: F401 - only to locate torch/lib next to it
+        lib_dir = os.path.join(os.path.dirname(torch.__file__), "lib")
+    except Exception as exc:                 # torch missing or broken
+        _CUDART["reason"] = f"torch not importable ({exc.__class__.__name__})"
+        return None, "", _CUDART["reason"]
     candidates = sorted(glob.glob(os.path.join(lib_dir, "cudart64_*.dll")))
     cuda_path = os.environ.get("CUDA_PATH", "")
     if cuda_path:
         candidates += sorted(glob.glob(
             os.path.join(cuda_path, "bin", "cudart64_*.dll")))
     if not candidates:
-        return None, "no cudart64_*.dll next to torch and none under CUDA_PATH"
-    lib, why = _load(os.path.basename(candidates[-1]))
-    if lib is None:
-        lib, why = _load(candidates[-1])
+        _CUDART["reason"] = ("no cudart64_*.dll next to torch and none under "
+                             "CUDA_PATH")
+        return None, "", _CUDART["reason"]
+    why = ""
+    for candidate in reversed(candidates):   # newest first
+        lib, why = _load(os.path.basename(candidate))
+        if lib is None:
+            lib, why = _load(candidate)
+        if lib is not None:
+            _CUDART.update(lib=lib, path=candidate, reason="")
+            return lib, candidate, ""
+    _CUDART["reason"] = why
+    return None, "", why
+
+
+def _cudart():
+    """(cudaDeviceGetLuid, reason) from the CUDA runtime, if we can find it."""
+    lib, path, why = cudart_library()
     if lib is None:
         return None, why
     fn = _bind(lib, "cudaDeviceGetLuid",
                [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint), ctypes.c_int])
     if fn is None:
-        return None, f"{os.path.basename(candidates[-1])} has no cudaDeviceGetLuid"
+        return None, f"{os.path.basename(path)} has no cudaDeviceGetLuid"
     return fn, ""
 
 

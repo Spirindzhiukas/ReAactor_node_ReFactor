@@ -132,14 +132,30 @@ python and never registers callbacks.
       export reader was not found → every helper "not a neuroframe engine" +
       a false CUDA alarm; the resolved repo is now passed and the test runs
       the collector the way the bat does.
-- [ ] **Run 34 (owner, fresh process each time)**: the ladder unchanged
-      (small native frame → 4096x3072 → legacy in a fresh process) — but
-      answer ONE question first: did ComfyUI die at ~20:39:50 (status=2 kill)?
-      If it did, the 20:40 "by LUID" failure was a FRESH process = a real bug.
-      If the process dies again: send the `[in-flight call: ...]` line, then
-      re-run once with `set "ANTS_NR_BLOCK_TERMINATION=1"`. Also re-run
-      `tools\collect_rig_evidence.bat` for the real HELPER / ENGINE
-      INVENTORY (the 21:17 verdicts came from a tool bug).
+- [x] **OWNER EVIDENCE 21:52 (native, first real evaluate)** — NGX init /
+      Init_Ext / CreateFeature(18) all hr=1, EvaluateFeature returned hr=1, and
+      then the frame died: our copy list Close 0x80070057 (device HEALTHY),
+      runtime list Close with the device gone, an access violation in
+      nvwgf2umx during `CommandList::Release`, and the next frame's
+      `D3D12CreateDevice 0x887A0001`. Four fixes: (1) inputs (Color/MVec/Depth)
+      now live in NON_PIXEL_SHADER_RESOURCE and only the output is a UAV — the
+      contract the shipped host uses (`ANTS_NR_INPUT_STATE=uav` A/B);
+      (2) `0x887A0001` is named DXGI_ERROR_INVALID_CALL, a
+      `D3D12CreateDevice` failure in a process that lost a device says RESTART
+      ComfyUI, and the removal text no longer calls INVALID_CALL a removal
+      reason; (3) `GpuContext.close()` releases NOTHING once the device is gone
+      (that release is what crashed in the driver) and the process-wide wedge
+      is remembered; (4) the "not closable" line names WHICH list and what it
+      recorded. Plus the CUDA gate: the engine's own text
+      ("active CUDA primary context does not use FFmpeg blocking-sync flags")
+      → `cuda_flags.py` + the three arming routes + import-time attempt +
+      `ANTS_NR_CUDA_FORCE=1`.
+- [ ] **Run 34 (owner, fresh process each time)**: 1) native + a SMALL frame
+      (768x768) — the state fix's real test; 2) if that works, 4096x3072;
+      3) legacy (GPU) in a fresh process; 4) if anything dies: send the
+      `[in-flight call: ...]` line, then once with
+      `set "ANTS_NR_BLOCK_TERMINATION=1"`; 5) always send the new
+      `[ANTs] CUDA context flags ...` block — that is the 20-25x answer.
 - [ ] **Run 33 (owner, fresh process each time)**:
       1. native engine + a SMALL frame (768x768, 1 pass) → proves the path
          end-to-end and cannot hit the 2 s TDR timeout;

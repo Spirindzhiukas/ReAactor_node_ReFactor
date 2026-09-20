@@ -940,8 +940,10 @@ def main():
               "reason and the fix (TDR delay / restart), instead of cascading "
               "into CreateCommandAllocator 0x887A0005",
               "[ANTs]" in message and "DEVICE_HUNG" in message
-              and "REMOVED" in message and "TdrDelay" in message
-              and "restart ComfyUI" in message)
+              and "GetDeviceRemovedReason reports" in message
+              and "TdrDelay" in message and "RESTART ComfyUI" in message
+              and "WITHOUT releasing its objects" in message
+              and "DXGI_ERROR_INVALID_CALL" in message)
     lists_now = sum(1 for e in RECORD if e[0] == "CreateCommandList")
     try:
         probe_ctx.submit_and_wait()
@@ -949,9 +951,62 @@ def main():
     except Exception as exc:
         check("d3d12: a dead context refuses further submits without creating "
               "objects on the dead device",
-              "REMOVED" in str(exc)
+              "GetDeviceRemovedReason reports" in str(exc)
               and sum(1 for e in RECORD if e[0] == "CreateCommandList") == lists_now)
-    probe_ctx.close()
+
+    # ---- the corpse is never touched again (rig 21:52: driver AV) ----------
+    d3d12.reset_wedged()
+    check("d3d12: 0x887A0001 is named DXGI_ERROR_INVALID_CALL instead of "
+          "being called a removal reason (the 21:53 D3D12CreateDevice line)",
+          d3d12.describe_hresult(0x887A0001)
+          == "0x887A0001 (DXGI_ERROR_INVALID_CALL)"
+          and d3d12.describe_hresult(0x80070057) == "0x80070057 (E_INVALIDARG)")
+    d3d12.note_wedged(0x887A0001, "test removal")
+    err = d3d12._create_device_error(0x887A0001)
+    check("d3d12: a D3D12CreateDevice failure in a process that already lost a "
+          "device says RESTART, instead of leaving 0x887A0001 unexplained",
+          "ALREADY LOST" in err and "RESTART ComfyUI" in err
+          and "test removal" in err)
+    d3d12.reset_wedged()
+    os.environ["ANTS_NR_INPUT_STATE"] = "uav"
+    legacy_state = d3d12.input_state()
+    os.environ.pop("ANTS_NR_INPUT_STATE")
+    check("d3d12: NGX INPUT textures sit in a shader-resource state by default "
+          "(only the output is a UAV) and ANTS_NR_INPUT_STATE=uav restores the "
+          "old state for an A/B run",
+          d3d12.input_state()
+          == d3d12.D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+          and legacy_state == d3d12.D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+    probe_ctx.command_list()
+    check("d3d12: the 'not closable' log names WHICH recording failed (the "
+          "21:52 line could not be acted on because both lists looked alike)",
+          "NGX runtime" in probe_ctx._describe_list(probe_ctx.runtime_list)
+          and "copy command list" in probe_ctx._describe_list(probe_ctx.list))
+
+    released = []
+    real_release = d3d12.ComObject.release
+
+    def _spy_release(self):
+        released.append(self.label)
+        return real_release(self)
+
+    d3d12.ComObject.release = _spy_release
+    try:
+        probe_ctx.close()                       # device is DEVICE_HUNG here
+        dead_releases = len(released)
+        device_state["reason"] = 0
+        healthy = d3d12.make_gpu_context(0)
+        healthy.close()
+        healthy_releases = len(released) - dead_releases
+    finally:
+        d3d12.ComObject.release = real_release
+    check("d3d12: a context whose device was removed releases NOTHING (releasing "
+          "a dead device's objects crashed inside the NVIDIA UMD - rig 21:52) "
+          "while a healthy context still releases normally",
+          dead_releases == 0 and healthy_releases > 0 and d3d12.wedged()[0],
+          f"dead={dead_releases} healthy={healthy_releases} "
+          f"wedged={d3d12.wedged()} released={released[:6]}")
+    d3d12.reset_wedged()
     device_state["reason"] = 0
 
     # ---- staging lifetime: freed only after the GPU is done ----------------

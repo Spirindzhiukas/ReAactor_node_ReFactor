@@ -7,6 +7,8 @@ side by side (``models/dlssnr/<version>/``) and be switched per workflow —
 useful as new DLSS 5.x DLL releases appear.
 """
 
+import os
+
 import numpy as np
 import torch
 
@@ -491,6 +493,17 @@ class ReFactorDLSS5Enhancer:
                               "the connected mask is ignored (Auto Mask still applies).")
         else:
             engine_ok, engine_why = self.manager.cuda_available()
+            # The engine's own gate is the "FFmpeg blocking-sync" context-flag
+            # check; name what the process's CUDA context carries and, if the
+            # operator asks for it, try the CUDA entry point anyway (A/B - the
+            # crash box is armed on this path, so a refusal is captured).
+            from ..dlsssr import cuda_flags
+            cuda_flags.log_early()
+            if os.environ.get("ANTS_NR_CUDA_FORCE", "") == "1" and not engine_ok:
+                engine_ok = True
+                engine_why = (engine_why + " - FORCED by ANTS_NR_CUDA_FORCE=1: "
+                              "the engine's own gate refused, the CUDA entry "
+                              "point is tried anyway")
             use_cuda, cuda_why = decide_cuda_acceleration(
                 gpu_acceleration, torch.cuda.is_available(), engine_ok,
                 engine_why)
@@ -509,7 +522,8 @@ class ReFactorDLSS5Enhancer:
                 "and whether it exports the CUDA entry points; if it does not, "
                 "replace the neuroframe pair in models/DLSS/Merserk_DLLS with "
                 "a build that carries dlss5nr_process_cuda_v6 "
-                "(Gourieff's neuroframe_dlls.zip has the current one).")
+                "(Gourieff's neuroframe_dlls.zip has the current one). "
+                "Context flags: " + cuda_flags.summary())
 
         if use_cuda:
             cuda_dev = torch.device(f"cuda:{self._ordinal}")

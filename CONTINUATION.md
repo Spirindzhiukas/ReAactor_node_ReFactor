@@ -651,11 +651,99 @@ restarted before the 20:40 legacy run, then "cannot match CUDA ordinal 0 by
 LUID" happened in a **fresh** process and is a real bug worth chasing; if it
 was the same window, it is the wedged-process state as assumed.
 
+### Run 21:52 / 21:53 (owner) — the first native evaluate, decoded
+
+The 21:52 run got FURTHER than any run before it: NGX initialized, the feature
+was created and the first evaluate RETURNED SUCCESS.
+
+```
+21:52:10  Init_ProjectID hr=0x1   GetCapabilityParameters hr=0x1
+          snippet Init_Ext (via shim) hr=0x1   CreateFeature(18) hr=0x1
+21:52:11  [ANTs] D3D12 command list not closable (Close 0x80070057) ...
+          Device status: 0x00000000 (device present and healthy)   <-- OURS
+21:52:11  NGX EvaluateFeature -> ... [ANTs] C++ exception 0xE06D7363
+          [in-flight call: EvaluateFeature] ... <- hr=0x00000001  (SUCCESS)
+21:52:11  [ANTs] NATIVE CRASH: exception 0xC0000005 at
+          nvwgf2umx.dll+0x6D3471 [in-flight call: ID3D12GraphicsCommandList]
+          -> Python stack: com.py release <- d3d12.py close <- _close_native
+[ERROR]   The D3D12 device was REMOVED while closing the command list:
+          0x887A0001   (then the node's own recovery message)
+21:53:17  next frame: D3D12CreateDevice failed: HRESULT 0x887A0001
+```
+
+Four facts come out of it, and each one is now code:
+
+**1. The colour input was in the wrong D3D12 state.** The engine's contract -
+and what the shipped open-source ComfyUI host does - is that the INPUT
+textures (Color/MVec/Depth) live in a **shader-resource** state and only the
+OUTPUT is in UNORDERED_ACCESS. We handed it a colour texture in UAV state.
+That is exactly the kind of thing D3D12 answers with `E_INVALIDARG` at
+`Close()` (the 18:25, 20:39 and 21:52 lines) and what a driver can turn into a
+GPU fault. Fixed: inputs are created in / uploaded to
+`NON_PIXEL_SHADER_RESOURCE`, output stays a UAV, and the contract line prints
+both states. `ANTS_NR_INPUT_STATE=uav` restores the old behaviour for an A/B.
+
+**2. 0x887A0001 is not a "removal reason".** It is
+`DXGI_ERROR_INVALID_CALL`, and it is also what the *next* frame's
+`D3D12CreateDevice` answered - i.e. the process was already finished with
+D3D12. Every HRESULT in the pack now prints its name
+(`describe_hresult`), a failed `D3D12CreateDevice` in a process that has
+already lost a device says **RESTART ComfyUI**, and the removal message no
+longer says "REMOVED ... unknown removal reason".
+
+**3. Releasing a dead device's objects crashes in the NVIDIA driver.** The
+access violation at `nvwgf2umx.dll+0x6D3471` happened while
+`ID3D12GraphicsCommandList::Release` was in flight, one breath after the
+removal. `GpuContext.close()` now detects that the device is gone and
+**releases nothing** (the objects are left to process teardown), and it says so
+in the console. This is the "crash inside the cleanup" that made the 21:52
+report look like two bugs.
+
+**4. We still do not know which recording was invalid at 21:52:11** - the
+"not closable" line came from **our own copy list** (device healthy!) before
+the feature call, and the two lists looked identical in the log. The message
+now names the list and its last recorded commands, so the next occurrence is
+readable; `ANTS_D3D12_CHECKPOINT=1` names the offending command and
+`ANTS_D3D12_STRICT_CLOSE=1` stops the run there.
+
+### The CUDA gate, decoded from the engine's own words (21:47 run)
+
+```
+DLSS5 processing via host staging (CPU) - engine has no CUDA interop:
+engine reports CUDA interoperability unavailable: active CUDA primary context
+does not use FFmpeg blocking-sync flags
+```
+
+Same machine, same DLL: OreX's node runs the same NR runtime with
+`CUDA zero-copy` in 2.65 s while our CPU staging needs 14-18 s. The engine is
+telling us the requirement verbatim: it joins the process's CUDA **primary
+context** (torch's) and it wants `CU_CTX_SCHED_BLOCKING_SYNC` (0x04) - the flag
+FFmpeg sets when it creates a context for D3D<->CUDA interop. PyTorch never
+sets it.
+
+`ants/dlsssr/cuda_flags.py` (new) now:
+* reads `cuCtxGetFlags()` and names what the context carries;
+* tries all three routes to the flag, in order, and reports the return code of
+  each: `cudaSetDeviceFlags(0x04)` (runtime; only legal before the context
+  exists), `cuDevicePrimaryCtxSetFlags(device, 0x04)`, `cuCtxSetFlags(0x04)`
+  (may accept an active context - that is the open question);
+* runs once at IMPORT (`ants/__init__.py` -> `log_early`), i.e. the earliest
+  moment our code runs, because that is the only window in which the runtime
+  route can work;
+* prints a one-line summary next to the "GPU acceleration is ON but this run
+  uses CPU staging" warning, so the reason is never a bare bool again;
+* `ANTS_NR_CUDA_FORCE=1` (A/B, opt-in) tries the CUDA entry point even when the
+  engine's own gate refuses - the crash box is armed on that path, so a refusal
+  is captured rather than lost.
+
 **Next runs, in order** (each in a FRESH ComfyUI process):
 
 1. **Small frame first, native engine** (e.g. 768x768, 1 pass): proves the
    whole D3D12 path end to end, and a small evaluate cannot hit the 2 s TDR
-   timeout. If this passes, the device removal is a size/timeout issue.
+   timeout. If this passes, the device removal is a size/timeout issue. The
+   colour input is now in the shader-resource state the runtime expects, so
+   this run also tests the 21:52 fix - the contract line now prints
+   `inputs NON_PIXEL_SHADER_RESOURCE, output UNORDERED_ACCESS`.
 2. **Then the 4096x3072 frame, native**: if the device is removed again the
    error now names the reason; if it says DEVICE_HUNG, the fix is a TDR delay
    (`HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\TdrDelay`,
@@ -669,10 +757,18 @@ was the same window, it is the wedged-process state as assumed.
    re-run once with `set "ANTS_NR_BLOCK_TERMINATION=1"` in the launch bat:
    the trap will not let the runtime kill the process, the node fails loudly
    instead, and ComfyUI survives to print the reason.
-5. If a `Close 0x80070057` appears while the device reports healthy, re-run
-   once with `set ANTS_D3D12_CHECKPOINT=1` - the log will name the invalid
-   command.
-6. Re-run `tools\collect_rig_evidence.bat` (the 21:17 report's helper
+5. If a `Close 0x80070057` appears, the line now says WHICH list failed and
+   what it had recorded. While the device reports healthy, re-run once with
+   `set ANTS_D3D12_CHECKPOINT=1` - the log names the invalid command; to stop
+   the run right there use `set ANTS_D3D12_STRICT_CLOSE=1`.
+6. **CUDA zero-copy (the 20-25x)**: after the sync, look for
+   `[ANTs] CUDA context flags ...` in the ComfyUI startup log. If it says the
+   flag could not be armed (normally `cudaErrorSetOnActiveProcess`, because
+   torch created the context first), send that whole block - it is the answer
+   to why this node is 6x slower than OreX's on the same DLL. Then, once, with
+   the GPU path: `set "ANTS_NR_CUDA_FORCE=1"` in the launch bat (A/B; the
+   crash box is armed, so a refusal is captured).
+7. Re-run `tools\collect_rig_evidence.bat` (the 21:17 report's helper
    verdicts came from a tool bug - the reader had not loaded) and send the
    HELPER / ENGINE INVENTORY section.
 
