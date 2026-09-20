@@ -4,6 +4,12 @@ One adapter, one device, one direct queue + allocator + command list + fence
 ("record, submit, wait"), committed textures/buffers, staging upload and
 readback. Vtable slots are 0-based including IUnknown and match the public
 d3d12.h / dxgi.h declarations.
+
+ONE BIT IS LOAD-BEARING: a texture the NGX runtime writes through a UAV must be
+created with ``D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS``, which d3d12.h
+defines as **0x4**. Read the flag table below before touching any resource
+flag - this pack shipped 0x8 (= DENY_SHADER_RESOURCE) for it, and that single
+byte was the whole native-UAV wall of 2026-09-20/21.
 """
 
 import ctypes
@@ -33,7 +39,32 @@ D3D12_HEAP_TYPE_UPLOAD = 2
 D3D12_HEAP_TYPE_READBACK = 3
 D3D12_HEAP_FLAG_NONE = 0
 D3D12_RESOURCE_FLAG_NONE = 0
-D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS = 0x8
+# d3d12.h (and learn.microsoft.com/windows/win32/api/d3d12/
+# ne-d3d12-d3d12_resource_flags), the five bits this pack can send:
+#   ALLOW_RENDER_TARGET 0x1, ALLOW_DEPTH_STENCIL 0x2,
+#   ALLOW_UNORDERED_ACCESS 0x4, DENY_SHADER_RESOURCE 0x8,
+#   ALLOW_CROSS_ADAPTER 0x10, ALLOW_SIMULTANEOUS_ACCESS 0x20.
+# This pack shipped 0x8 for ALLOW_UNORDERED_ACCESS: a pre-rig edit "fixed" the
+# constant from 0x4 to 0x8 believing 0x4 was ALLOW_RENDER_TARGET. 0x8 is
+# DENY_SHADER_RESOURCE, and a driver refuses it on a texture that carries no
+# usage flag at all - the rig answered E_INVALIDARG for the same 256x256
+# RGBA16F description with flags 0x8 while the identical description with flags
+# 0x0 was accepted, on one device, in one process.
+# What that cost, all of it ours: every "UAV" texture this pack ever created was
+# UAV-LESS (the recipe ladder hid it by silently degrading to flags 0x0 until
+# 0db946a stopped it), NGX was handed an output it could not write through, and
+# the barriers we recorded into UNORDERED_ACCESS on those resources were invalid
+# commands - the Close() E_INVALIDARG of 18:25 / 20:39 / 21:52 / 23:08 and the
+# GPU faults. The A0/B/C/D probe exonerated the legacy engine, the CUDA flag
+# arming and the feature level; the byte was the bug.
+D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS = 0x4
+D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE = 0x8  # NOT the UAV flag
+RESOURCE_FLAG_NAMES = ((0x1, "ALLOW_RENDER_TARGET"),
+                       (0x2, "ALLOW_DEPTH_STENCIL"),
+                       (0x4, "ALLOW_UNORDERED_ACCESS"),
+                       (0x8, "DENY_SHADER_RESOURCE"),
+                       (0x10, "ALLOW_CROSS_ADAPTER"),
+                       (0x20, "ALLOW_SIMULTANEOUS_ACCESS"))
 D3D12_RESOURCE_STATE_COMMON = 0
 D3D12_RESOURCE_STATE_UNORDERED_ACCESS = 0x8
 D3D12_RESOURCE_STATE_COPY_DEST = 0x400
@@ -153,15 +184,27 @@ def describe_hresult(hr):
     return f"0x{code:08X} ({name})" if name else f"0x{code:08X}"
 
 
+def resource_flag_name(flags):
+    """``0x4 (ALLOW_UNORDERED_ACCESS)`` - a recipe line that cannot lie.
+
+    The rig logs used to print "flags ALLOW_UNORDERED_ACCESS" from the
+    *constant's name* while the byte in the descriptor was 0x8
+    (DENY_SHADER_RESOURCE). That is how a wrong bit survived a whole night of
+    evidence: every reader, including us, believed the name instead of
+    checking the value. Names now always travel with their bytes.
+    """
+    known = [name for bit, name in RESOURCE_FLAG_NAMES if flags & bit]
+    return f"0x{flags:X} ({', '.join(known) if known else 'no flags'})"
+
+
 def feature_level():
     """The level D3D12CreateDevice asks for (``ANTS_D3D12_FEATURE_LEVEL``).
 
-    Default 11_0 - the level this host has always used, and the one that
-    created every texture up to and including the 21:52 run. The shipped
-    reference host asks for **12_0**, so the knob exists to A/B exactly that
-    when a driver starts refusing resource descriptions (rig 23:32/23:46:
-    `CreateCommittedResource(ALLOW_UNORDERED_ACCESS)` -> E_INVALIDARG with a
-    healthy device, in a process where the legacy CUDA engine had run).
+    Default 11_0 - the level this host has always used. The shipped reference
+    host asks for **12_0**, so the knob exists to A/B exactly that. It is a
+    plain A/B: the 23:32/23:46 E_INVALIDARG that once looked feature-level
+    related was the flags byte (see the flag table at the top of this file),
+    not the level - phase B of the probe fails and passes exactly like A.
     """
     raw = os.environ.get("ANTS_D3D12_FEATURE_LEVEL", "").strip().lower()
     if raw in ("12", "12_0", "12.0", "0xc000", "c000"):
@@ -178,15 +221,16 @@ def feature_level_name(level):
 def input_state():
     """The D3D12 state NGX expects for its INPUT textures (Color/MVec/Depth).
 
-    Proven-host contract (and the shipped open-source ComfyUI host): the
-    colour input lives in a SHADER-RESOURCE state and only the OUTPUT sits in
-    UNORDERED_ACCESS. This pack used to hand NGX a colour texture in the
-    UNORDERED_ACCESS state - a state the runtime does not record its reads
-    for, which is exactly the kind of thing D3D12 answers with E_INVALIDARG at
-    ``Close()`` (rig 18:25 / 20:39 / 21:52) and the driver can turn into a
-    GPU fault (device removal, 20:39 / 21:52).
+    Reference-host contract: the colour input lives in a SHADER-RESOURCE state
+    and only the OUTPUT sits in UNORDERED_ACCESS. The inputs stay PLAIN
+    resources (no UAV flag) - the 23:08 refusal we read as "the UAV flag must
+    not ride along with a shader-resource state" was really the wrong flag byte
+    (see the flag table at the top of this file), but the resulting recipe is
+    the one the reference host uses and the rig accepts, so it stays.
 
     ``ANTS_NR_INPUT_STATE=uav`` restores the old behaviour for an A/B run.
+    Careful with the number: ``0x8`` is UNORDERED_ACCESS as a *state* bit and
+    DENY_SHADER_RESOURCE as a *flag* bit - the state is what this knob means.
     """
     legacy = os.environ.get("ANTS_NR_INPUT_STATE", "").strip().lower()
     if legacy in ("uav", "unordered_access", "8"):
@@ -466,25 +510,30 @@ class D3D12Device(ComObject):
 
     # (resource_flags, initial_state) combos for UAV-capable textures, most
     # permissive first. NVIDIA's own NGX hosts create them in the UAV state;
-    # DVT's rig-validated host uses COMMON. The first combo the driver
+    # the shipped reference host uses COMMON. The first combo the driver
     # accepts is cached on the device and reused for every later texture.
+    # The flag byte is ALLOW_UNORDERED_ACCESS = 0x4 (d3d12.h). This pack used
+    # to send 0x8 here, which is DENY_SHADER_RESOURCE: a texture the runtime
+    # will not let anyone write through a UAV, and (rig-proven) a flags byte
+    # the driver refuses outright when no usage flag accompanies it.
     # NOTE: a UAV-less fallback is deliberately NOT in this list. Rig 23:32
-    # showed what it costs: the driver refused the UAV recipe for 'nr output',
-    # the pack silently took (FLAG_NONE, COMMON), the NR path then recorded a
-    # barrier to UNORDERED_ACCESS on that resource - an INVALID COMMAND - and
-    # the next Close() answered E_INVALIDARG, which looked like a fresh bug.
-    # A texture the runtime writes through a UAV must carry the flag, or the
-    # creation has to FAIL LOUDLY right here.
+    # showed what it costs: the pack silently took (FLAG_NONE, COMMON), the NR
+    # path then recorded a barrier to UNORDERED_ACCESS on that resource - an
+    # INVALID COMMAND - and the next Close() answered E_INVALIDARG, which
+    # looked like a fresh bug for the rest of the evening. That silent fallback
+    # was also what hid the wrong flag byte from every log we read. A texture
+    # the runtime writes through a UAV must carry the flag, or the creation has
+    # to FAIL LOUDLY right here.
     _UAV_RECIPES = ((D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
                     (D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                      D3D12_RESOURCE_STATE_COMMON))
-    # INPUT textures (what the runtime reads). Rig 23:08: the driver answered
-    # E_INVALIDARG for (ALLOW_UNORDERED_ACCESS, NON_PIXEL_SHADER_RESOURCE), so
-    # the UAV flag must not ride along with a shader-resource initial state -
-    # the proven host creates its inputs as PLAIN shader resources, and so do
-    # we. ``common`` is the emergency landing spot (a barrier from COMMON into
-    # the shader state is always legal).
+    # INPUT textures (what the runtime reads). Rig 23:08 answered E_INVALIDARG
+    # for (0x8, NON_PIXEL_SHADER_RESOURCE) - a UAV flag with a shader-resource
+    # initial state looked like the culprit, but 0x8 is DENY_SHADER_RESOURCE
+    # (see the flag table). The reference host creates its inputs as PLAIN
+    # shader resources and so do we; ``common`` is the emergency landing spot
+    # (a barrier from COMMON into the shader state is always legal).
     _INPUT_RECIPES = ((D3D12_RESOURCE_FLAG_NONE,
                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
                       (D3D12_RESOURCE_FLAG_NONE,
@@ -537,28 +586,29 @@ class D3D12Device(ComObject):
         if accepted is None:
             from ..log import dlss_logger
             _removed, _hr, status = self.device_status()
+            tried = "; ".join(f"{resource_flag_name(f)} + {state_name(s)}"
+                              for f, s in candidates)
             dlss_logger.error(
                 "[ANTs] D3D12 cannot create the texture '%s' (%dx%d) in any "
                 "recipe this path needs: %s. Device status right now: %s. "
                 "A UAV-capable texture is not optional - NGX feature 18 "
                 "writes its output through one - so the creation path stops "
-                "here instead of recording an illegal barrier later. With a "
-                "HEALTHY device this is the rig 23:32/23:46 state: the same "
-                "description was accepted in a process where the native node "
-                "ran alone and is refused here. Until that is settled: "
-                "(1) RESTART ComfyUI and run the native node FIRST, without "
-                "the legacy (ReShade based) node in the same process - its "
-                "CUDA path is the prime suspect; (2) if you want the answer in "
-                "20 seconds, run tools\check_d3d12_uav.bat (it reproduces or "
-                "clears it without ComfyUI); (3) "
-                "set ANTS_D3D12_FEATURE_LEVEL=12_0 to ask for the level the "
-                "proven reference host uses. Feature level in use: %s.",
+                "here instead of recording an illegal barrier later. "
+                "Recipes tried: %s. Feature level in use: %s. Check the "
+                "flags byte first: a texture is UAV-capable only with "
+                "d3d12.h's 0x4 (ALLOW_UNORDERED_ACCESS) - 0x8 is "
+                "DENY_SHADER_RESOURCE, and this pack shipped that byte for "
+                "every 'UAV' texture it ever created, which is what a whole "
+                "night of rig logs was really showing. "
+                "tools\\check_d3d12_uav.bat bisects the byte on this device "
+                "(0x4 vs 0x8 vs 0x0) and prints a one-line verdict.",
                 label, int(width), int(height), str(last).strip(), status,
-                feature_level_name(feature_level()))
+                tried, feature_level_name(feature_level()))
             raise DlssSrError(
                 "[ANTs] Could not create the D3D12 texture '%s' (%dx%d): %s. "
-                "Device status: %s." % (label, int(width), int(height),
-                                        str(last).strip(), status)) from last
+                "Device status: %s. Recipes tried: %s." % (
+                    label, int(width), int(height), str(last).strip(), status,
+                    tried)) from last
         flags, initial, index = accepted
         if state is None and self._texture_recipe is None and allow_uav:
             # only the recipe the caller WANTED is cached; a fallback would
@@ -570,17 +620,42 @@ class D3D12Device(ComObject):
             _removed, _hr, status = self.device_status()
             dlss_logger.warning(
                 "[ANTs] D3D12: the driver REFUSED the intended texture recipe "
-                "for '%s' (flags 0x%X, initial state %s; it answered %s) and "
-                "accepted (flags 0x%X, initial state %s) instead. Device "
-                "status at the refusal: %s. The contract still holds (the "
-                "fallback keeps the required flags), but send this line: a "
-                "driver that refuses the exact recipe the proven host uses is "
-                "usually a process that already lost its D3D12 device.",
-                label, wanted[0], state_name(wanted[1]),
-                str(last).strip()[:120], flags, state_name(initial), status)
+                "for '%s' (%s, initial state %s; it answered %s) and accepted "
+                "(%s, initial state %s) instead. Device status at the "
+                "refusal: %s. The UAV flag is kept either way - only the "
+                "initial state differs - so the runtime contract still holds, "
+                "but send this line: a driver that prefers a different "
+                "initial state is worth knowing about.",
+                label, resource_flag_name(wanted[0]), state_name(wanted[1]),
+                str(last).strip()[:120], resource_flag_name(flags),
+                state_name(initial), status)
         self.report_texture_recipe()
         return D3D12Resource(ptr, label, width, height, fmt,
                              width * height * BPP[fmt], initial)
+
+    def create_texture2d_with_flags(self, width, height, fmt, flags,
+                                    state=D3D12_RESOURCE_STATE_COMMON,
+                                    label="texture"):
+        """ONE exact (flags, state) recipe - no ladder, no caching.
+
+        ``create_texture2d`` answers "can this device make the texture this
+        path needs?"; this answers "what does THIS byte do?", the question the
+        rig needed and could not get while a silent cascade stood between the
+        caller and ``CreateCommittedResource``. Errors propagate (the loud
+        ``[ANTs]`` refusal from ``_committed``). Name the byte in the label so
+        no log line can be read as the wrong flag.
+        """
+        desc = _resource_desc_texture(width, height, fmt, flags)
+        ptr = self._committed(D3D12_HEAP_TYPE_DEFAULT, desc, state, label)
+        return D3D12Resource(ptr, label, width, height, fmt,
+                             int(width) * int(height) * BPP[fmt], state)
+
+    def texture_recipe_text(self):
+        """The (flags, state) combo the cached recipe holds - with its byte."""
+        if not self._texture_recipe:
+            return "no recipe registered yet"
+        flags, state = self._texture_recipe
+        return f"{resource_flag_name(flags)}, initial state {state_name(state)}"
 
     def create_input_texture2d(self, width, height, fmt, label="texture"):
         """An NGX INPUT texture: plain shader resource, no UAV flag.
@@ -609,17 +684,23 @@ class D3D12Device(ComObject):
         self._recipe_reported = True
         flags, state = recipe
         from ..log import dlss_logger
-        if flags != D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS:
+        if flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE:
+            dlss_logger.warning(
+                "[ANTs] D3D12 texture recipe: %s, initial state %s - this "
+                "carries DENY_SHADER_RESOURCE, NOT a UAV flag. Nothing the "
+                "NGX runtime writes through a UAV can work on it. Report "
+                "this line.", resource_flag_name(flags), state_name(state))
+        elif flags != D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS:
             dlss_logger.warning(
                 "[ANTs] D3D12 textures were created WITHOUT "
-                "ALLOW_UNORDERED_ACCESS (flags 0x%X, %s) - the NGX runtime "
-                "writes its output through a UAV, so this recipe can only "
-                "fail. Report this line: it means the driver refused every "
-                "UAV-capable recipe.", flags, state_name(state))
+                "ALLOW_UNORDERED_ACCESS (%s, %s) - the NGX runtime writes its "
+                "output through a UAV, so this recipe can only fail. Report "
+                "this line: it means the driver refused every UAV-capable "
+                "recipe.", resource_flag_name(flags), state_name(state))
         else:
             dlss_logger.status(
-                "[ANTs] D3D12 texture recipe: flags ALLOW_UNORDERED_ACCESS, "
-                "initial state %s", state_name(state))
+                "[ANTs] D3D12 texture recipe: %s, initial state %s",
+                resource_flag_name(flags), state_name(state))
 
     def create_buffer(self, size, heap_type, label="buffer"):
         state = {"upload": D3D12_RESOURCE_STATE_GENERIC_READ,

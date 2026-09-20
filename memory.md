@@ -31,7 +31,7 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
 
 | Commit | What |
 |---|---|
-| dlsssr commit | ants/dlsssr/ SHIPPED: pure-Python NGX host (no 3rd-party helper dlls): shim.py generates the caller-check nvngx.dll thunk PE in pure bytes (pefile-validated); com/win32/d3d12.py minimal D3D12 layer (device/queue/allocator/list/fence, committed tex/buffers, staging upload+readback, vtable slots per public headers); ngx.py session (Init_Ext sdk 0x15, create/evaluate/release via shim-routed fn, NO Shutdown1 per DLT#75); parameters.py = our own 17-slot MSVC vtable over a dict (snippet-direct) + core-allocated wrapper; sr.py = feature 1 (DLAA/Quality/Balanced/Performance/UltraPerf + J/K/L/M artist presets, per-mode DLSS.Hint.Render.Preset.*); nr.py = feature 18 snippet-direct (DLSSNR.* raw params + best-effort extras); NEW NODE ANTsDLSSSRUpscaler (20 nodes; render->ratio->resize back; SR selector: each flat dll in models/DLSS/SR = own set); DLSS5 'engine' widget: native (default) / Legacy neuroframe (fallback until rig-validated, then removed per owner directive; masks unsupported on native - logged); RIG-CRASH FIXES pre-rig: RESOURCE_DESC was mis-packed (12 args/10 codes, 38B) -> correct 56B "<I4xQQIHHIIIIQ" + sizeof asserts; ALLOW_UNORDERED_ACCESS flag was 0x4 (=ALLOW_RENDER_TARGET) -> 0x8; shim+appData defaults moved off the DriverStore (admin-only) to %LOCALAPPDATA%/ANTs/<tag> with probe fallbacks; 22-check test_dlsssr.py |
+| dlsssr commit | ants/dlsssr/ SHIPPED: pure-Python NGX host (no 3rd-party helper dlls): shim.py generates the caller-check nvngx.dll thunk PE in pure bytes (pefile-validated); com/win32/d3d12.py minimal D3D12 layer (device/queue/allocator/list/fence, committed tex/buffers, staging upload+readback, vtable slots per public headers); ngx.py session (Init_Ext sdk 0x15, create/evaluate/release via shim-routed fn, NO Shutdown1 per DLT#75); parameters.py = our own 17-slot MSVC vtable over a dict (snippet-direct) + core-allocated wrapper; sr.py = feature 1 (DLAA/Quality/Balanced/Performance/UltraPerf + J/K/L/M artist presets, per-mode DLSS.Hint.Render.Preset.*); nr.py = feature 18 snippet-direct (DLSSNR.* raw params + best-effort extras); NEW NODE ANTsDLSSSRUpscaler (20 nodes; render->ratio->resize back; SR selector: each flat dll in models/DLSS/SR = own set); DLSS5 'engine' widget: native (default) / Legacy neuroframe (fallback until rig-validated, then removed per owner directive; masks unsupported on native - logged); RIG-CRASH FIXES pre-rig: RESOURCE_DESC was mis-packed (12 args/10 codes, 38B) -> correct 56B "<I4xQQIHHIIIIQ" + sizeof asserts; ALLOW_UNORDERED_ACCESS flag "corrected" 0x4 -> 0x8 (*WRONG*: 0x4 IS ALLOW_UNORDERED_ACCESS, 0x8 is DENY_SHADER_RESOURCE - reverted 2026-09-21, this one byte was the entire native-UAV wall); shim+appData defaults moved off the DriverStore (admin-only) to %LOCALAPPDATA%/ANTs/<tag> with probe fallbacks; 22-check test_dlsssr.py |
 | stash commit | discovery v3: helper stash (models/DLSS/HELPERS or *merserk*/hlp-named, apostrophes ignored) excluded from the NR selector + exposed via helper_dll_dirs(); engine fallback searches set dir then stash (loud error lists everything searched); generic folders without an nvngx_dlssnr runtime = OTHER category (out of NR selector); dlss5nr_shutdown called on bridge replacement; authoritative what-goes-where + naming guide in dll_README; pure-Python neuroframe replacement verdict: YES phased (SR host first in ants/dlsssr, then port feature 18 onto it - pair becomes optional legacy; RESEARCH_dlss_sr_upscaler §7) |
 | layout commit | package renamed rfactor/ -> ants/ (last pre-rebrand artifact, suite-guarded); discovery v2: models/DLSS/<NR|SR|FG>/<version>/ category sets (NR selector excludes SR/FG; SR/FG reserved for future nodes), dlssnr_<version>/ legacy kept, flat models/DLSS labeled after the nvngx_dlssnr* runtime inside (owner's RenoDX-named dll now visible in the selector); probe v2 hardened (any-root arg + NGX [scan] diagnosis); "Nature"->"Natural" display rename (Merserk's runtime.py maps style 1 to Natural; OreX agrees; ABI ints unchanged); dll_README rebuilt (clobbered in 11074ed) |
 | SR research commit | Regular DLSS SR verdict: feasible WITHOUT a compiled bridge — DVT (HicirTech/DLSS-Video-Transcoder, no LICENSE — reference technique only, never copy code) hosts NGX via pure FFI (LoadLibraryExW driver _nvngx.dll + nvngx.dll loader) and runs sr in.png --preset L on stills; presets are HOST-settable on nvngx_dlss.dll via DLSS.Hint.Render.Preset.<Mode> params (enum Default 0, A-F 1-6, J 10, K 11, L 12, M 13, N/O reserved; DLAA variant needs in==out); THE upscaler dll = nvngx_dlss.dll (user-procured, models/DLSS/dlss_<version>/); NGX core is driver-shipped, never bundled; our route = pure-Python ctypes NGX host (ants/dlsssr/) + D3D12 COM plumbing, modes DLAA/1.5/1.724/2/3 + output resized back to input; bonus route: neuroframe frame path (process_cuda_video_frame) has separate output dims (NV12/P010, RGBA8 in descriptors). Probe: tools/probe_dlss_rig.py |
@@ -1024,8 +1024,9 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - Suite: **440 checks** (dlsssr 98, native_flow 56, dlssnr_bridge 101) + pyflakes/scope/smoke green.
 
 ### 2026-09-20 (owner run 23:32) — the third layer, and it was our own fallback
-- **The driver refused `(ALLOW_UNORDERED_ACCESS, UNORDERED_ACCESS)` for `nr output`** (the recipe that
-  worked at 21:52), our recipe ladder silently degraded to `(FLAG_NONE, COMMON)`, and the NR path then
+- **The driver refused `(ALLOW_UNORDERED_ACCESS, UNORDERED_ACCESS)` for `nr output`** (never a working
+  recipe: the byte was 0x8 = DENY_SHADER_RESOURCE and 21:52 was the silent flags-0x0 fallback - see the
+  2026-09-21 root-cause block), our recipe ladder silently degraded to `(FLAG_NONE, COMMON)`, and the NR path then
   recorded `Barrier(nr output -> 8)` on a resource WITHOUT the UAV flag = an INVALID COMMAND. That is
   the E_INVALIDARG that shows up as "command list not closable" — the 18:25 / 20:39 / 21:52 mystery
   was, at least in part, our own degraded fallback.
@@ -1072,3 +1073,27 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   and logged), JS greys `pre_denoise_strength` (`(stage OFF)`) and keeps the value; mode greying beats
   schedule greying.
 - Suite: **449 checks** (dlsssr 105, native_flow 58, dlssnr_bridge 101, nr_schedule 33).
+
+### 2026-09-21 (ROOT CAUSE) — the native UAV wall was ONE WRONG BIT: 0x8 is DENY_SHADER_RESOURCE, the UAV flag is 0x4
+- **`d3d12.h` / `D3D12_RESOURCE_FLAGS` docs**: ALLOW_RENDER_TARGET 0x1, ALLOW_DEPTH_STENCIL 0x2,
+  **ALLOW_UNORDERED_ACCESS 0x4**, **DENY_SHADER_RESOURCE 0x8**, ALLOW_CROSS_ADAPTER 0x10,
+  ALLOW_SIMULTANEOUS_ACCESS 0x20. `ants/dlsssr/d3d12.py` had defined 0x8 as the UAV flag since the
+  first commit: the pre-rig line in the shipped-history table below records that edit as a FIX (0x4 ->
+  0x8) - it was the bug. Every texture this pack meant as a UAV carried DENY_SHADER_RESOURCE instead.
+- **Owner-run probe, one variable**: same device, same 256x256 RGBA16F description, same
+  `D3D12_HEAP_TYPE_DEFAULT`, same initial state COMMON -> flags **0x8 REFUSED** (0x80070057, device
+  healthy), flags **0x0 accepted**. 0x4 was never sent. That single comparison explains the 21:52
+  silent fallback to a flagless texture (and its `Close 0x80070057` + NGX C++ exception + AV + device
+  removal), the 18:25 / 20:39 / 23:08 Close mystery, and the 23:46 -> 01:22 loud creation refusal.
+- **Only the byte and the process-state theories die with it**: A0 (pack CUDA flag arming), B (feature
+  level 12_0), A/C/D (legacy engine) were all cleared by the probe, and the owner's 3ds Max / 10 GB VRAM
+  observation is consistent - a plain texture is always fine because it has no flags at all.
+- **Shipped**: `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS = 0x4`; `DENY_SHADER_RESOURCE` named;
+  `RESOURCE_FLAG_NAMES` + `resource_flag_name()` so every recipe/log line prints the BYTE next to the
+  name (`0x4 (ALLOW_UNORDERED_ACCESS), initial state ...`); `create_texture2d_with_flags()` (one exact
+  recipe, no ladder) for this kind of bisect; the probe's **FLAGS MATRIX first** (0x4 / 0x8 / 0x0) with
+  exit **14** = "THE FLAGS BYTE WAS THE BUG" and exit 11 = "even the correct byte is refused fresh ->
+  reboot, then probe"; the refusal text and README no longer blame the legacy CUDA path.
+- Tests: the whole flag table is pinned against d3d12.h (the old check pinned `== 0x8` with the comment
+  "(0x4 = render target)" - the suite was holding the bug in place). Suite: **450 checks** (dlsssr 106,
+  native_flow 58, dlssnr_bridge 101, nr_schedule 33).

@@ -670,8 +670,9 @@ def _log_stream_check():
 
 
 def _uav_probe_check():
-    """The D3D12 UAV probe: four phases through the pack's own code path, a
-    verdict the owner can act on, and it soft-fails anywhere (exit 2)."""
+    """The D3D12 UAV probe: the flags matrix first (0x4 / 0x8 / 0x0 on one
+    device, one description), then the historical phases through the pack's own
+    code path, a verdict the owner can act on, and a soft failure (exit 2)."""
     import os as _os
     import subprocess
     import sys as _sys
@@ -697,19 +698,34 @@ def _uav_probe_check():
                                          "phase D - after the legacy engine ran",
                                          "phase A0 - fresh process"))
               and "REPRODUCED" in src
-              and "is NOT the trigger" in src
               and "feature level decides" in src
               and "is what breaks UAV D3D12 textures" in src
               and all(code in src for code in ("return 10", "return 11",
                                                "return 12", "return 13"))
               and "_plain_control" in src)
+    # The flags matrix is what actually settled it: 0x4 accepted, 0x8 refused,
+    # same device, same description. It must run BEFORE the phases and it must
+    # own exit code 14.
+    matrix = ("FLAG_MATRIX" in src
+              and "create_texture2d_with_flags" in src
+              and "0x8, \"DENY_SHADER_RESOURCE" in src
+              and "THE FLAGS BYTE WAS THE BUG" in src
+              and "return 14" in src
+              and src.index("_flag_matrix()") < src.index("phase A - fresh device")
+              and "refuses the UAV recipe here even though" in src)
     real_path = ("d3d12.D3D12Device.create" in src
                  and "create_texture2d" in src
                  and "cuMemAlloc_v2" in src
                  and "DLSSStandaloneManager" in src)
     read_only = ("READ-ONLY" in src and "never stages" in src
                  and "ANTS_DLSS_MODELS" in src)
-    return soft and child_soft and phases and real_path and read_only
+    # The stale story must be gone: 21:52 never created a UAV texture (the
+    # ladder fell back to flags 0x0 and said nothing), so no line may claim it.
+    honest = ("was created fine" not in src
+              and "prime suspect" not in src
+              and "the same recipe that succeeded at 21:52" not in src)
+    return (soft and child_soft and phases and matrix and real_path
+            and read_only and honest)
 
 
 def _uav_probe_bat_check():
@@ -733,6 +749,9 @@ def _uav_probe_bat_check():
             and b"check_d3d12_uav.py" in raw
             and b"REPRODUCED" in raw
             and b"13" in raw
+            and b"14" in raw
+            and b"THE FLAGS BYTE WAS THE BUG" in raw
+            and b"ALLOW_UNORDERED_ACCESS = 0x4" in raw
             and b"ANTS_NO_CUDA_FLAG_ARM" in raw
             and b"ants_d3d12_uav.txt" in raw
             and not risky)
@@ -1362,9 +1381,10 @@ def main():
           and "ANTS_D3D12_FEATURE_LEVEL" in d3d_src
           and "feature level {feature_level_name(level)}" in d3d_src)
     check("d3d12: the INPUT recipe tries (FLAG_NONE, shader-resource) FIRST - "
-          "the driver answered E_INVALIDARG for ALLOW_UNORDERED_ACCESS + "
-          "shader-resource (rig 23:08) - and a refused recipe is logged, not "
-          "silently swapped",
+          "the reference host creates its inputs as plain shader resources, "
+          "and the rig refused the 0x8 byte with a shader-resource initial "
+          "state (23:08) - and a refused recipe is logged, not silently "
+          "swapped",
           "_INPUT_RECIPES" in d3d_src
           and "D3D12_RESOURCE_FLAG_NONE,\n                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE" in d3d_src
           and "REFUSED the intended texture recipe" in d3d_src
@@ -1596,10 +1616,39 @@ def main():
     check("d3d12: buffer desc is BUFFER(1) + ROW_MAJOR layout (driver rule)",
           buf[0:4] == (1).to_bytes(4, "little")
           and buf[44:48] == (1).to_bytes(4, "little"))
-    check("d3d12: UAV resource flag is 0x8 (0x4 = render target)",
-          d12.D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS == 0x8
-          and tex[-8:] == (0x8).to_bytes(8, "little"))
+    # The bug that cost a night of rig runs: this constant was 0x8, with a
+    # comment claiming 0x4 was ALLOW_RENDER_TARGET. d3d12.h (microsoft/
+    # DirectX-Headers, include/directx/d3d12.h) and the D3D12_RESOURCE_FLAGS
+    # docs both say 0x1 = ALLOW_RENDER_TARGET, 0x4 = ALLOW_UNORDERED_ACCESS,
+    # 0x8 = DENY_SHADER_RESOURCE. Pin the whole table, not one bit: a test that
+    # pins a single wrong byte is how this shipped.
+    flag_table = dict(d12.RESOURCE_FLAG_NAMES)
+    check("d3d12: the resource-flag table matches d3d12.h - 0x4 IS "
+          "ALLOW_UNORDERED_ACCESS and 0x8 is DENY_SHADER_RESOURCE (the pack "
+          "sent 0x8 for a whole evening, so every 'UAV' texture it created was "
+          "a UAV-less one)",
+          d12.D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS == 0x4
+          and d12.D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE == 0x8
+          and flag_table[0x1] == "ALLOW_RENDER_TARGET"
+          and flag_table[0x2] == "ALLOW_DEPTH_STENCIL"
+          and flag_table[0x4] == "ALLOW_UNORDERED_ACCESS"
+          and flag_table[0x8] == "DENY_SHADER_RESOURCE"
+          and flag_table[0x10] == "ALLOW_CROSS_ADAPTER"
+          and flag_table[0x20] == "ALLOW_SIMULTANEOUS_ACCESS"
+          and tex[-8:] == (0x4).to_bytes(8, "little"))
     d3d12_src = (REPO / "ants" / "dlsssr" / "d3d12.py").read_text()
+    check("d3d12: every recipe and recipe-log line carries the flags BYTE next "
+          "to the name, and a DENY_SHADER_RESOURCE texture says so out loud "
+          "(the log read 'ALLOW_UNORDERED_ACCESS' while the descriptor said "
+          "0x8 - a name without its byte is how the wrong flag survived)",
+          d12.resource_flag_name(0x4) == "0x4 (ALLOW_UNORDERED_ACCESS)"
+          and d12.resource_flag_name(0x8) == "0x8 (DENY_SHADER_RESOURCE)"
+          and d12.resource_flag_name(0) == "0x0 (no flags)"
+          and "def resource_flag_name" in d3d12_src
+          and "D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE" in d3d12_src
+          and "def create_texture2d_with_flags" in d3d12_src
+          and "def texture_recipe_text" in d3d12_src
+          and "prime suspect" not in d3d12_src)
     check("d3d12: staging heaps are never transitioned (barriers on "
           "UPLOAD/READBACK heaps are invalid commands - rig Close 0x80070057)",
           "UPLOAD_READBACK_HEAPS" in d3d12_src

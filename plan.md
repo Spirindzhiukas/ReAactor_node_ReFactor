@@ -177,15 +177,18 @@ python and never registers callbacks.
 - [x] **NODE PARITY (owner rule)**: both focused processors now drop ONLY the
       `engine` selector — `set(proc) == set(enh) - {"engine"}` is pinned by a
       test; the engine-only widgets stay visible and say what they mean.
-- [x] **OWNER EVIDENCE 23:46/23:48 — the UAV refusal is PROCESS STATE**: the
-      description is valid (a plain texture in the same call sequence succeeds,
-      and the same UAV description worked at 21:52), the device is healthy, and
+- [x] **OWNER EVIDENCE 23:46/23:48 — the UAV refusal read as PROCESS STATE
+      (SUPERSEDED — the flag byte was wrong; see the ROOT CAUSE item below)**:
+      the description is valid (a plain texture in the same call sequence
+      succeeds; the "same UAV description worked at 21:52" was a silent
+      fallback to flags 0x0), the device is healthy, and
       every UAV recipe is refused. Every failing run had the LEGACY CUDA path
       active in the same process seconds earlier; every succeeding run did not.
       Shipped: `tools\check_d3d12_uav.bat` (4-phase A/B, exit 10 = REPRODUCED,
       READ-ONLY) and `ANTS_D3D12_FEATURE_LEVEL=12_0` (the reference host asks
       for 12_0; the pack default stays 11_0, now printed with the adapter pick).
-- [x] **OWNER EVIDENCE 01:06 + PROBE — the legacy engine is CLEARED**: the
+- [x] **OWNER EVIDENCE 01:06 + PROBE — the legacy engine is CLEARED (the A0 /
+      reboot branch below it is SUPERSEDED by the ROOT CAUSE item)**: the
       probe failed on a FRESH process (phase A: first device, first texture,
       11_0 -> E_INVALIDARG, device healthy), so a process that never loaded the
       legacy engine fails the same way. Left: either the pack's own import-time
@@ -198,6 +201,24 @@ python and never registers callbacks.
       disables the stage completely (model + strength ignored and logged), the
       JS greys `pre_denoise_strength` with it, and the mode greying wins over
       the schedule greying.
+- [x] **ROOT CAUSE (2026-09-21) — the UAV flag byte was wrong: 0x8 is
+      DENY_SHADER_RESOURCE, the UAV flag is 0x4.** `d3d12.h` +
+      `D3D12_RESOURCE_FLAGS` docs: ALLOW_RENDER_TARGET 0x1, ALLOW_DEPTH_STENCIL
+      0x2, ALLOW_UNORDERED_ACCESS **0x4**, DENY_SHADER_RESOURCE 0x8. A pre-rig
+      edit "fixed" the constant from 0x4 to 0x8 believing 0x4 was
+      ALLOW_RENDER_TARGET, so every texture this pack intended as a UAV was a
+      UAV-LESS one: the ladder hid it by silently degrading to flags 0x0 (the
+      21:52 "success", the 18:25/20:39/21:52/23:08 Close E_INVALIDARG, the GPU
+      faults), and once `0db946a` forbade the degradation the driver's refusal
+      of the 0x8 byte surfaced at creation (23:46 -> 01:22). Owner-run probe,
+      one variable: same device + same 256x256 RGBA16F desc + same DEFAULT heap
+      + same initial state -> flags 0x8 REFUSED, flags 0x0 accepted.
+      Shipped: the constant 0x4 (+ DENY_SHADER_RESOURCE named, + the flag table
+      and `resource_flag_name()` so every recipe line carries its BYTE), the
+      probe's FLAGS MATRIX first with exit 14 ("THE FLAGS BYTE WAS THE BUG"),
+      `create_texture2d_with_flags()`, stale "legacy CUDA is the prime suspect"
+      text removed everywhere, and the flag table pinned against d3d12.h by a
+      test (the old test pinned == 0x8, which is how it survived).
 - [ ] **Run 34 (owner, fresh process each time)**: 0) NATIVE NODE FIRST, in a ComfyUI
       just restarted - do not run the legacy node in that process; 1) native +
       a SMALL frame (768x768); 2) if that works, 4096x3072;

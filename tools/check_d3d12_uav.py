@@ -1,42 +1,60 @@
 """Why does this process refuse a UAV-capable D3D12 texture?
 
-Rig history (2026-09-20), same pack, same DLLs, same machine:
+ANSWER (2026-09-21) - it was ONE BIT. d3d12.h (and the D3D12_RESOURCE_FLAGS
+docs) define ALLOW_UNORDERED_ACCESS = 0x4. This pack defined 0x8 for it, and
+0x8 is DENY_SHADER_RESOURCE. A driver refuses that byte on a texture that has
+no usage flag at all, so the recipe ladder silently fell back to flags 0x0 -
+a texture the NGX runtime cannot write through - until 0db946a forbade the
+fallback and the refusal surfaced at creation. The pack now sends 0x4, and the
+FLAGS MATRIX below is the proof in three lines: same device, same 256x256
+RGBA16F description, same D3D12_HEAP_TYPE_DEFAULT, same initial state, ONLY
+the flags byte changes.
 
-  * 21:52 native run, native node ONLY in the process:
-      'nr output' RGBA16F **with ALLOW_UNORDERED_ACCESS was created fine**,
-      NGX CreateFeature(18) succeeded, EvaluateFeature ran.
-  * 23:32 / 23:46 / 23:48 native runs, where the LEGACY engine (its CUDA
-      zero-copy path) had run in the SAME ComfyUI process a few seconds
-      earlier:
-      CreateCommittedResource('nr output', ALLOW_UNORDERED_ACCESS) answered
-      E_INVALIDARG, GetDeviceRemovedReason said "device present and healthy",
-      and a plain (no-UAV) texture in the same process was created fine.
+What the rig logs really showed (2026-09-20, same pack, same DLLs, same box),
+read as process state at the time - this is the question the probe was built
+to settle and no longer needs to:
 
-So the open question is not "is our resource description valid" (it demonstrably
-is - it worked in a clean process) but **what a process-global state does to the
-driver's UAV allocations**. This probe answers it in four short phases, using the
-pack's own D3D12 code path (no duplicated bindings, no guessing):
+  * 21:52 native run: NGX initialized and evaluated, then Close() answered
+    E_INVALIDARG and NGX threw. 'nr output' was NOT a UAV texture: the byte
+    was 0x8, the ladder degraded to flags 0x0 and (before d2ef17b) said
+    nothing about it.
+  * 23:32 / 23:46 / 23:48 / 01:06 native runs: the driver refused the intended
+    recipe outright; from 0db946a on the ladder may not drop the flag, so the
+    refusal stopped being hidden.
 
+Phases, in run order:
+
+  0. FLAGS MATRIX - one device, one description, three bytes: 0x4
+     (ALLOW_UNORDERED_ACCESS), 0x8 (DENY_SHADER_RESOURCE - the byte this pack
+     used to send) and 0x0 (control). Runs FIRST: it decides everything below.
   A. fresh device, feature level 11_0 (what the pack asks for today)
   A0. the SAME test in a FRESH CHILD PROCESS with the pack's CUDA flag arming
      switched off (ANTS_NO_CUDA_FLAG_ARM=1) - the discriminator for "is it the
      blocking-sync CUDA context this pack arms at import?"
-  B. fresh device, feature level 12_0 (what the proven reference host asks for)
+  B. fresh device, feature level 12_0 (what the reference host asks for)
   C. fresh device AFTER plain CUDA work in this process
-     (cuInit + cuCtxCreate + 512 MiB cuMemAlloc + memset + free - the cheapest
-     reproduction of "the legacy engine ran here")
+     (cuInit + cuCtxCreate + 512 MiB cuMemAlloc + memset + free)
   D. fresh device AFTER the already-staged legacy engine was initialized
      (only when a staged runtime with the helper pair is already on disk - this
      probe never stages or writes anything)
 
-Every phase also creates a PLAIN (no-UAV) texture, so "the driver refuses UAV
-flags" can be told apart from "the driver refuses textures at all".
+A/A0/B/C/D are kept because they are what cleared the process-state theories
+(A0 the CUDA flag arming, B the feature level, A and C/D the legacy engine):
+if they ever disagree with the matrix, that is news.
+
+Every phase also creates a PLAIN (no-UAV) texture, so "this device refuses
+this flags byte" can be told apart from "this device refuses textures at all".
 
 Verdict lines are printed for the owner; the exit code is:
 
+  14 THE FLAGS BYTE was the bug: 0x4 is accepted and 0x8 is refused on the
+     same device. The pack's UAV constant is fixed (0x4) - run the native
+     node. Nothing about the legacy engine, the CUDA flag, the feature level
+     or the driver was involved.
   0  UAV creation worked in every phase that ran
   10 REPRODUCED: works fresh, fails after CUDA work in the same process
-  11 UAV creation failed even on a FRESH device (not a CUDA-in-process issue)
+  11 UAV creation failed even on a FRESH device, with the correct byte too -
+     that points at the device/driver state, not at our descriptors
   12 only one feature level fails - a feature-level finding
   13 the CUDA flag arming this pack does at import is the trigger (A0 works,
      A does not)
@@ -49,6 +67,7 @@ touch ComfyUI.
 
 import ctypes
 import os
+import re
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -66,6 +85,49 @@ PROBE_H = 256
 
 def _line(prefix, text):
     print(f"{prefix} {text}", flush=True)
+
+
+FLAG_MATRIX = ((0x4, "ALLOW_UNORDERED_ACCESS (d3d12.h)"),
+               (0x8, "DENY_SHADER_RESOURCE - what this pack used to send"),
+               (0x0, "no flags at all - the control"))
+
+
+def _flag_matrix():
+    """One device, one texture description, one differing byte.
+
+    ``CreateCommittedResource`` reads the flags out of the descriptor, and the
+    first entry of this pack's ladder said ALLOW_UNORDERED_ACCESS while the
+    byte was 0x8. Three creations later the whole evening makes sense; this is
+    that comparison, on the rig, in one run.
+    """
+    from ants.dlsssr import d3d12
+    try:
+        _factory, adapters = d3d12.enumerate_adapters()
+        info, reason = d3d12.pick_adapter(adapters, 0)
+        device = d3d12.D3D12Device.create(info.ptr if info else None,
+                                          d3d12.D3D_FEATURE_LEVEL_11_0)
+    except Exception as exc:
+        _line("[FAIL]", f"flags matrix: device creation failed ({exc})")
+        return None
+    rows = []
+    for flags, name in FLAG_MATRIX:
+        try:
+            texture = device.create_texture2d_with_flags(
+                PROBE_W, PROBE_H, d3d12.DXGI_FORMAT_R16G16B16A16_FLOAT,
+                flags, state=d3d12.D3D12_RESOURCE_STATE_COMMON,
+                label=f"probe flags 0x{flags:X}")
+            texture.release()
+            ok, detail = True, "CREATED"
+        except Exception as exc:
+            ok = False
+            match = re.search(r"0x[0-9A-Fa-f]{8}", str(exc))
+            detail = (f"REFUSED {match.group(0)}" if match
+                      else f"REFUSED ({str(exc).strip()[:60]})")
+        rows.append((flags, name, ok, detail))
+        _line("[OK]  " if ok else "[FAIL]",
+              f"flags 0x{flags:X} ({name}) -> {detail}")
+    _line("      ", f"device status after the matrix: {device.device_status()[2]}")
+    return rows
 
 
 def _cuda_work():
@@ -172,7 +234,7 @@ def _uav_probe(tag, feature_level):
             label=f"probe uav ({tag})")
         result["ok"] = True
         result["why"] = (f"UAV texture {PROBE_W}x{PROBE_H} RGBA16F created "
-                         f"(flags ALLOW_UNORDERED_ACCESS)")
+                         f"({device.texture_recipe_text()})")
         texture.release()
     except Exception as exc:
         result["ok"] = False
@@ -250,7 +312,31 @@ def main():
     total, why = cuda_luid.count()
     print(f"CUDA     : {total} device(s) visible ({why or 'ok'})")
     print(f"ctx flags: {cuda_flags.summary()}")
+    _line("[INFO]", "pack flag byte: ALLOW_UNORDERED_ACCESS = "
+                    f"0x{d3d12.D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS:X}"
+                    " (d3d12.h says 0x4 - if this is anything else, that "
+                    "is the bug)")
     print()
+
+    _line("[INFO]", "flags matrix: one device, one description, three bytes")
+    rows = _flag_matrix()
+    print()
+    if rows and rows[0][2] and not rows[1][2]:
+        print("VERDICT: THE FLAGS BYTE WAS THE BUG, and it is already fixed. "
+              "flags 0x4 (ALLOW_UNORDERED_ACCESS, d3d12.h) is ACCEPTED on this "
+              "device; flags 0x8 (DENY_SHADER_RESOURCE - the byte this pack "
+              "sent for every 'UAV' texture it ever created) is REFUSED with "
+              "exactly the E_INVALIDARG our native runs kept reporting, while "
+              "0x0 is accepted. Nothing about the legacy engine, the CUDA "
+              "flag, the feature level or the driver state was ever wrong. Run "
+              "the native node: its output texture is a real UAV texture now. "
+              "Send this whole report.")
+        return 14
+    if rows and not rows[0][2]:
+        _line("[WARN]", "flags 0x4 (ALLOW_UNORDERED_ACCESS) is refused too - "
+                        "the byte is not the whole story here, running the "
+                        "historical phases.")
+        print()
 
     results = []
     for tag, level in (("phase A - fresh device", 0xB000),
@@ -296,9 +382,13 @@ def main():
               "native node's D3D12 textures work. Send this whole report.")
         return 13
     if fresh_bad and not fresh_ok:
-        print("VERDICT: a FRESH device already refuses UAV textures in this "
-              "process, so the legacy engine is NOT the trigger. Send this "
-              "whole report.")
+        print("VERDICT: a FRESH device refuses the UAV recipe here even though "
+              "the flags byte is now the correct one (0x4) - and the flags "
+              "matrix above says what this device does with 0x8 and 0x0. The "
+              "legacy engine, the CUDA flag and the feature level are all "
+              "cleared, so this points at the device/driver state itself: "
+              "REBOOT and run this probe again before touching the pack. Send "
+              "this whole report.")
         return 11
     if fresh_bad and fresh_ok:
         print("VERDICT: the feature level decides it - one of A/B works and "

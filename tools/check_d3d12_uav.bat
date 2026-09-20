@@ -7,10 +7,19 @@ rem
 rem  WHY: the native NGX node answered
 rem     CreateCommittedResource('nr output', ALLOW_UNORDERED_ACCESS)
 rem     -> E_INVALIDARG            device status: healthy
-rem  while the SAME call worked in a process where the native node had
-rem  run alone. This probe finds out which process state does it, in
-rem  four short phases, using the pack's own D3D12 code:
+rem  because the BYTE it sent was 0x8. d3d12.h says
+rem     ALLOW_UNORDERED_ACCESS = 0x4,   DENY_SHADER_RESOURCE = 0x8
+rem  and this pack had defined 0x8 as the UAV flag - so every "UAV"
+rem  texture it ever created was a UAV-LESS one. This probe proves it on
+rem  THIS machine in one run. The flags matrix comes first - one device,
+rem  one 256x256 RGBA16F description, one DEFAULT heap, one initial
+rem  state, only the byte changes:
+rem     0x4  ALLOW_UNORDERED_ACCESS     the correct UAV flag
+rem     0x8  DENY_SHADER_RESOURCE        what the pack used to send
+rem     0x0  no flags at all             the control
+rem  then the historical phases, through the pack's own D3D12 code:
 rem     A  fresh device, feature level 11_0   (what the pack asks today)
+rem     A0 the same in a fresh CHILD process, CUDA flag arming switched off
 rem     B  fresh device, feature level 12_0   (what the proven host asks)
 rem     C  fresh device after plain CUDA work in this process
 rem     D  fresh device after the already-staged legacy engine ran
@@ -21,10 +30,14 @@ rem  and it does not touch ComfyUI. Run it while ComfyUI is CLOSED for
 rem  the cleanest answer, or right after a failure for the useful one.
 rem
 rem  THE VERDICT LINE AT THE END is the answer:
+rem    THE FLAGS BYTE WAS THE BUG -> the pack's UAV flag constant is
+rem                                 fixed @0x4 - nothing else was wrong,
+rem                                 run the native node
 rem    REPRODUCED ...            -> legacy CUDA work in the process is the
 rem                                 trigger: run the native node in a fresh
 rem                                 ComfyUI process, without the legacy node
-rem    a FRESH device already... -> not CUDA: send the whole report
+rem    a FRESH device refuses... -> not CUDA and not the byte: reboot and
+rem                                 re-run this probe
 rem    the feature level decides -> send the whole report
 rem
 rem  ============== THE ONLY BLOCK YOU MAY EDIT ==============
@@ -62,7 +75,7 @@ if defined DLSSROOT set "ANTS_DLSS_MODELS=%DLSSROOT%"
 echo [ANTs] python : %PYEXE% %PYARGS%
 echo [ANTs] tool   : %SCRIPT%
 echo [ANTs] DLSS   : %DLSSROOT%
-echo [ANTs] probing - four phases, no ComfyUI involved...
+echo [ANTs] probing - the flags matrix first, then the phases, no ComfyUI...
 echo.
 
 "%PYEXE%" %PYARGS% "%SCRIPT%" > "%TEMP%\ants_d3d12_uav.txt" 2>&1
@@ -72,7 +85,8 @@ clip < "%TEMP%\ants_d3d12_uav.txt"
 
 echo.
 if "%RC%"=="10" echo [!!] REPRODUCED - the legacy CUDA path in the process is the trigger. Send the clipboard text.
-if "%RC%"=="11" echo [!!] A fresh device already refuses UAV textures - send the clipboard text.
+if "%RC%"=="14" echo [OK] THE FLAGS BYTE WAS THE BUG - 0x4 accepted, 0x8 refused: the pack UAV flag is fixed, run the native node, send the clipboard text.
+if "%RC%"=="11" echo [!!] A fresh device refuses UAV textures even with the correct byte - reboot and re-run this probe, send the clipboard text.
 if "%RC%"=="12" echo [!!] A feature level decides it - send the clipboard text.
 if "%RC%"=="13" echo [!!] THE PACK'S CUDA FLAG ARMING IS THE TRIGGER - relaunch ComfyUI with ANTS_NO_CUDA_FLAG_ARM=1 and send the clipboard text.
 if "%RC%"=="0" echo [OK] no reproduction in the probe - still send the clipboard text if the node failed.

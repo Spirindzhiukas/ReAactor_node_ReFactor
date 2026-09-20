@@ -689,7 +689,70 @@ small ladder of alternatives if the driver refuses the first, and **logs which r
 took** instead of silently swapping it. `ANTS_NR_INPUT_STATE=uav` still restores the old behaviour
 for an A/B.
 
-### Run 01:06 (owner) + the probe — the UAV refusal is NOT about the legacy engine
+### THE ROOT CAUSE (2026-09-21): one wrong bit - `0x8` is DENY_SHADER_RESOURCE, the UAV flag is `0x4`
+
+The whole native wall - the `Close()` E_INVALIDARG of 18:25 / 20:39 / 21:52 / 23:08, the device
+removals, the "UAV refusal" of 23:32 -> 01:22, the degraded fallback, and every theory built on top of
+them (process state, the legacy engine's CUDA path, the import-time CUDA flag, the feature level, a
+driver degraded by the removals) - comes down to one byte in `ants/dlsssr/d3d12.py`:
+
+| flag | d3d12.h / learn.microsoft.com | this pack until now |
+|---|---|---|
+| `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS` | **0x4** | **0x8** |
+| `D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE` | 0x8 | - |
+| `D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET` | 0x1 | - |
+
+`memory.md` records how it happened: a pre-rig edit "fixed" `ALLOW_UNORDERED_ACCESS` from 0x4 to 0x8
+believing 0x4 was ALLOW_RENDER_TARGET. The value it replaced was the correct one. Since that edit every
+texture this pack *intended* to be a UAV carried `DENY_SHADER_RESOURCE` instead - a flag that does not
+make a resource UAV-capable, and that the rig's driver refuses outright when no usage flag accompanies
+it (measured, one variable at a time, in the owner's own probe run):
+
+* same device, same 256x256 RGBA16F description, same `D3D12_HEAP_TYPE_DEFAULT`, same initial state
+  COMMON:  flags **0x8** -> `E_INVALIDARG (0x80070057)`, device healthy;  flags **0x0** -> accepted
+  ("same device, PLAIN texture: OK");  flags **0x4** -> the byte the reference host uses, never sent.
+
+What it explains without a single new theory:
+
+* **21:52 "created 'nr output' fine"** - it did NOT create a UAV texture. The ladder tried 0x8, the
+  driver refused it, and the ladder silently fell back to flags 0x0 (the refusal log only arrived with
+  `d2ef17b`, so the fallback was invisible). NGX then got an output it could not write through: hence
+  the `Close 0x80070057`, the `C++ exception 0xE06D7363`, the AV in `nvwgf2umx.dll` and the device
+  removal in the same second.
+* **the "degraded fallback" of 23:32** - never a driver mood: the *intended* recipe was the wrong one
+  all along, and `Barrier(nr output -> UNORDERED_ACCESS)` on the flagless texture it settled for is
+  exactly the "invalid command" we attributed to the fallback.
+* **the loud refusal from 23:46 on** - `0db946a` forbade dropping the UAV flag, so the ladder had
+  nothing left to degrade to and the refusal surfaced at `CreateCommittedResource`.
+* **why a fresh process reproduces it (probe A/A0/B/C/D)** - nothing to do with process state: the byte
+  is wrong in every process, including the child that armed no CUDA flag (A0) and the device at 12_0
+  (B). A0 failing is what finally ruled out the pack's own `cudaSetDeviceFlags` arming.
+* **why a plain texture is always fine** - it has no flags. Device, heap, descriptor packing, format
+  and driver are all healthy; the owner's 3ds Max observation (working, ~10 GB allocated, present or
+  not, scene loaded or not) was right for exactly that reason.
+
+The fix, in this build:
+
+* `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS = 0x4`, with `D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE`
+  (0x8) named explicitly and a `RESOURCE_FLAG_NAMES` table - so nobody has to remember that `0x8` is
+  also `D3D12_RESOURCE_STATE_UNORDERED_ACCESS` as a *state* bit, which is what made the number look
+  familiar in every log.
+* `resource_flag_name()` puts the byte next to the name on every recipe line:
+  `0x4 (ALLOW_UNORDERED_ACCESS), initial state UNORDERED_ACCESS`. A log line can no longer say
+  ALLOW_UNORDERED_ACCESS while the descriptor says 0x8.
+* `create_texture2d_with_flags()` - one exact (flags, state) recipe, no ladder, no caching: the entry
+  point this bisect needed and did not have.
+* the probe runs a **FLAGS MATRIX** first (0x4 / 0x8 / 0x0, one device, one description) and exits
+  **14** with "THE FLAGS BYTE WAS THE BUG" when 0x4 is accepted and 0x8 refused; exit 11 now means
+  "even the correct byte is refused on a fresh device", the only case where a reboot is still the
+  next step.
+* the stale claims are gone from code and docs: the refusal text no longer names the legacy CUDA path
+  as a suspect, and nothing says 21:52 created a UAV texture.
+
+Tests: the whole flag table is pinned against d3d12.h - the old test pinned `== 0x8` with the comment
+"(0x4 = render target)", i.e. the suite was holding the bug in place. Battery **450**.
+
+### Run 01:06 (owner) + the probe — the UAV refusal is NOT about the legacy engine (the A0 / reboot branch below: SUPERSEDED - see THE ROOT CAUSE above)
 
 The probe ran on the rig and **every phase failed**, including phase A, the very
 first thing it does: a brand-new process, a fresh D3D12 device, feature level
@@ -705,8 +768,8 @@ What is left, and the reason the probe grew a **phase A0**:
 * the one CUDA state this pack sets is the blocking-sync flag armed **at import**
   (`cudaSetDeviceFlags(0x04)`, rig 22:35 - the thing that opened the engine's
   zero-copy gate and made frames 1.18 s instead of 15 s). The probe arms it too,
-  before phase A, and the only native run that ever created a UAV texture
-  (21:52) predates that code. So: A0 re-runs the exact phase-A test in a **fresh
+  before phase A, and the one native run we *believed* created a UAV texture
+  (21:52 - it did not, see THE ROOT CAUSE) predates that code. So: A0 re-runs the exact phase-A test in a **fresh
   child process with `ANTS_NO_CUDA_FLAG_ARM=1`** - if A0 passes and A fails, the
   pack's own arming is the trigger (probe exit code **13**, and the report says
   to launch ComfyUI with `ANTS_NO_CUDA_FLAG_ARM=1`).
@@ -744,7 +807,7 @@ On the owner's worry ("maybe our half-baked SR pre-denoise is behind this"): the
 new OFF mode (and the ability to A/B the whole stage) is exactly the "run it
 controllably" the owner asked for.
 
-### Run 23:46 / 23:48 (owner) — the UAV refusal is PROCESS STATE, not our description
+### Run 23:46 / 23:48 (owner) — the UAV refusal read as PROCESS STATE (SUPERSEDED: it was our own flag byte - THE ROOT CAUSE above)
 
 ```
 23:46:41  the legacy (ReShade based) node runs: "DLSS5 processing via CUDA -
@@ -759,7 +822,8 @@ controllably" the owner asked for.
 The important part is what the new loud line proves:
 
 * the **description is valid** - `nr color` (a plain shader resource) was created
-  a moment earlier, and the very same UAV description was accepted at 21:52;
+  a moment earlier, and the very same UAV description was accepted at 21:52 (it was NOT: the ladder
+  fell back to flags 0x0 - see THE ROOT CAUSE);
 * the device is **healthy** right then;
 * and every UAV recipe is refused while non-UAV textures are fine.
 
@@ -795,9 +859,10 @@ Two things ship with this commit:
    The texture-creation error also names this whole route instead of just saying
    "restart ComfyUI".
 
-**The immediate workaround for the owner:** restart ComfyUI and run the
-**native** node FIRST and alone (the split nodes make that easy). That is the
-configuration in which the native path has always got past texture creation.
+**The immediate workaround for the owner (SUPERSEDED 2026-09-21):** ~~restart ComfyUI and run the
+native node first and alone~~ - that read "the native path has always got past texture creation" out
+of a silent fallback to a flagless texture, which is the bug itself (see THE ROOT CAUSE). With the
+flag byte corrected the native node creates a real UAV output in any process, legacy node or not.
 
 ### Run 23:32 (owner) — the 23:08 fix exposed the NEXT layer, and it was ours
 
@@ -813,8 +878,10 @@ configuration in which the native path has always got past texture creation.
 Read the two lines together and the whole cascade is OURS, not the driver's:
 
 1. the driver refused the one recipe the proven host uses
-   **(ALLOW_UNORDERED_ACCESS, UNORDERED_ACCESS)** for the OUTPUT texture - the
-   same recipe that succeeded at 21:52, so something about this process was
+   **(ALLOW_UNORDERED_ACCESS, UNORDERED_ACCESS)** for the OUTPUT texture - read at the time as "the
+   same recipe that succeeded at 21:52", which was wrong twice over: the byte was 0x8 (not the UAV
+   flag) and 21:52 was a silent fallback to flags 0x0 (see THE ROOT CAUSE). What was left of the
+   puzzle, then: something about this process was
    already off (the device is created on the right adapter with the right LUID,
    and the run right before it in that session was the legacy CUDA zero-copy
    one);

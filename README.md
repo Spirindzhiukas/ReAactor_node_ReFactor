@@ -138,13 +138,19 @@ node's widgets when on), per-pass pre-SR denoise with dedicated model slots. Dyn
 node (pack's `web/` folder), which re-fits the node size when the per-pass rows come and go; the
 Python side validates everything and works headless without it.
 
-**If the native node reports `CreateCommittedResource ... 0x80070057` while the device says "healthy"**
-(rig 23:32/23:46): the pack refuses to silently fall back to a texture without the UAV flag (that only
-moves the failure to an illegal barrier later), so it stops and names the state. Run
-`tools\check_d3d12_uav.bat` once - it answers in ~20 s, without ComfyUI, whether UAV textures work in a
-fresh process (A/B 11_0 vs 12_0, after plain CUDA work, after the staged legacy engine). Until it is
-settled: restart ComfyUI and run the **native** node first and alone. `ANTS_D3D12_FEATURE_LEVEL=12_0`
-switches the device to the feature level the reference host asks for.
+**If the native node ever reports `CreateCommittedResource ... 0x80070057` while the device says
+"healthy"** - that wall is solved (rig 23:32 -> 01:22, fixed 2026-09-21), and the answer was one wrong
+bit: the pack sent `0x8` for `ALLOW_UNORDERED_ACCESS`, but `d3d12.h` defines the UAV flag as **`0x4`**
+- `0x8` is `DENY_SHADER_RESOURCE`, so every texture this pack intended as a UAV was a UAV-less one
+(the ladder hid it by silently degrading to *no flags*, which is what produced the `Close()` E_INVALIDARG
+and the GPU faults of the previous evening, and once the degradation was forbidden the driver's refusal
+of that byte surfaced at creation). The constant is fixed, the ladder may no longer drop the UAV flag,
+and every recipe line prints the flags **byte** next to its name so a log can never again say
+"ALLOW_UNORDERED_ACCESS" while the descriptor says `0x8`. `tools\check_d3d12_uav.bat` re-proves it on
+the machine in ~20 s without ComfyUI: it runs a **flags matrix** first (0x4 vs 0x8 vs 0x0 - one device,
+one texture description, only the byte changes) and exits **14** = "THE FLAGS BYTE WAS THE BUG", then
+the historical phases (fresh 11_0 vs 12_0, after plain CUDA work, after the staged legacy engine).
+`ANTS_D3D12_FEATURE_LEVEL=12_0` switches the device to the feature level the reference host asks for.
 
 **Pre-SR denoise (optional, and now switchable OFF):** `pre_denoise_mode` has three values — the
 ANTs SR host (`SR (DLSS denoise)`), a wired upscale/denoise model (`Denoise Model`), and
