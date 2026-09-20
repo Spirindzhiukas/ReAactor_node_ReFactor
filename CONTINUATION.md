@@ -704,9 +704,12 @@ driver degraded by the removals) - comes down to one byte in `ants/dlsssr/d3d12.
 
 `memory.md` records how it happened: a pre-rig edit "fixed" `ALLOW_UNORDERED_ACCESS` from 0x4 to 0x8
 believing 0x4 was ALLOW_RENDER_TARGET. The value it replaced was the correct one. Since that edit every
-texture this pack *intended* to be a UAV carried `DENY_SHADER_RESOURCE` instead - a flag that does not
-make a resource UAV-capable, and that the rig's driver refuses outright when no usage flag accompanies
-it (measured, one variable at a time, in the owner's own probe run):
+texture this pack *intended* to be a UAV carried `DENY_SHADER_RESOURCE` instead - and Microsoft's own
+documentation states the rule that makes that byte illegal on its own: **"Must be used with
+`D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL`."** So 0x8 alone is not merely "not a UAV flag": it is an
+*invalid resource description*, which is why the runtime answers it with E_INVALIDARG on any machine,
+in any process, at any feature level, with no CUDA involved - the environment theories never had a
+chance (measured, one variable at a time, in the owner's own probe run):
 
 * same device, same 256x256 RGBA16F description, same `D3D12_HEAP_TYPE_DEFAULT`, same initial state
   COMMON:  flags **0x8** -> `E_INVALIDARG (0x80070057)`, device healthy;  flags **0x0** -> accepted
@@ -748,6 +751,25 @@ The fix, in this build:
   next step.
 * the stale claims are gone from code and docs: the refusal text no longer names the legacy CUDA path
   as a suspect, and nothing says 21:52 created a UAV texture.
+* **the instrument that would have ended it in one run** (Claude Sonnet 5's step 4): the D3D12 debug
+  layer, opt-in via `ANTS_D3D12_DEBUG_LAYER=1` (`ANTS_D3D12_DEBUG_MESSAGES` caps how many messages are
+  printed). With it armed - needs the Windows **"Graphics Tools"** optional feature - a refused
+  description is followed by the runtime's own sentence, read straight out of `ID3D12InfoQueue`
+  (`GetMessage` slot 5, `GetNumStoredMessages` slot 8, the 32-byte `D3D12_MESSAGE` header, all pinned
+  against `d3d12sdklayers.h`). The reader is bounds-checked and capped and can never become the failure
+  it is explaining; the probe arms it by default (`ANTS_D3D12_DEBUG_LAYER=0` opts out) and prints the
+  state line. Off in the pack: it is a validation layer and most machines do not have it.
+* the probe's **DOC control row** shows the rule positively: the same 0x8 byte *with* 0x2
+  (`ALLOW_DEPTH_STENCIL`) on a `D32_FLOAT` texture - accepted exactly where the docs allow it, i.e. the
+  byte is not poison, the *combination* was illegal.
+
+The same conclusion was reached independently (owner asked Claude Sonnet 5 with the same log and the
+exported `d3d12.py`): wrong constant, not a driver/CUDA/process-state problem, and "the agent's three
+suggestions chased the wrong axis, and its own probe already refutes them" - which is fair, and is why
+the probe exists. One detail of that analysis does not hold: the *format* is irrelevant (`RGBA8`,
+`RGBA16F`, `D32_FLOAT` - the refusal is about the flags combination, never the channel layout), and
+the `_fwd_stub` fix it also mentions was already applied and credited in `ngx.py` (raw thunk address
+instead of a ctypes callable, pinned by a test).
 
 Tests: the whole flag table is pinned against d3d12.h - the old test pinned `== 0x8` with the comment
 "(0x4 = render target)", i.e. the suite was holding the bug in place. Battery **450**.

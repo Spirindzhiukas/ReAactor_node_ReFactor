@@ -757,6 +757,145 @@ def _uav_probe_bat_check():
             and not risky)
 
 
+def _d3d12_debug_layer_check():
+    """The D3D12 debug layer (Sonnet's step 4, 2026-09-21): opt-in, header
+    exact, and it reads the runtime's OWN reason for a refused description.
+
+    With the layer armed the runtime says why in words - the sentence this
+    pack needed for a whole night of rig runs ("DENY_SHADER_RESOURCE can only
+    be set with ALLOW_DEPTH_STENCIL" is the docs' rule; the runtime uses its
+    own wording). It stays OFF by default: it needs the Windows "Graphics
+    Tools" feature and it changes what the runtime checks.
+    """
+    import ctypes
+    import os as _os
+    from ants.dlsssr import d3d12 as d12
+    src = (REPO / "ants" / "dlsssr" / "d3d12.py").read_text()
+    win_src = (REPO / "ants" / "dlsssr" / "win32.py").read_text()
+    com_src = (REPO / "ants" / "dlsssr" / "com.py").read_text()
+
+    # d3d12sdklayers.h: ID3D12Debug slot 3 = EnableDebugLayer; ID3D12InfoQueue
+    # 5 = GetMessage, 8 = GetNumStoredMessages; D3D12_MESSAGE is a 32-byte
+    # header (Category, Severity, ID, pDescription @16, length @24) + string.
+    header = (d12._DEBUG_ENABLE_LAYER == 3
+              and d12._INFOQUEUE_GET_MESSAGE == 5
+              and d12._INFOQUEUE_NUM_STORED == 8
+              and d12._MESSAGE_HEADER == 32
+              and d12._MESSAGE_SEVERITY[1] == "ERROR"
+              and d12._MESSAGE_SEVERITY[2] == "WARNING")
+
+    class _Queue:
+        """A tiny ID3D12InfoQueue - only the two slots the reader uses."""
+
+        def __init__(self, kind="ok", text="DENY_SHADER_RESOURCE can only be "
+                                          "set with ALLOW_DEPTH_STENCIL"):
+            self.kind, self.text = kind, text
+            self.released, self.asked = False, 0
+
+        def call(self, slot, argtypes, restype, *args):
+            self.asked += 1
+            if self.kind == "boom":
+                raise RuntimeError("runtime exploded")
+            if slot == d12._INFOQUEUE_NUM_STORED:
+                return 1
+            size = args[2]._obj
+            if args[1] is None:                      # the sizing call
+                size.value = 0 if self.kind == "zero" else 32 + len(self.text) + 1
+                return 0
+            base = ctypes.addressof(args[1])
+            body = bytearray(size.value)
+            body[4:8] = (2).to_bytes(4, "little")    # WARNING
+            text = self.text.encode() + b"\x00"
+            ctypes.memmove(base + 32, text, len(text))
+            where = base + 32 if self.kind == "ok" else base + (1 << 30)
+            body[16:24] = where.to_bytes(8, "little")
+            body[24:32] = len(text).to_bytes(8, "little")
+            ctypes.memmove(base, bytes(body[:32]), 32)
+            return 0
+
+        def release(self):
+            self.released = True
+
+    class _Device:
+        def __init__(self, queue):
+            self.queue, self.asked = queue, False
+
+        def query_interface(self, iid, label=None):
+            self.asked = True
+            return self.queue
+
+    state = dict(d12.DEBUG_LAYER_STATE)
+    gated = drained = garbage = rehooked = armed_on = False
+    try:
+        _os.environ.pop("ANTS_D3D12_DEBUG_LAYER", None)
+        d12.DEBUG_LAYER_STATE.update(armed=False, tried=False, detail="x")
+        off = d12.enable_debug_layer()
+        again = d12.enable_debug_layer()
+        gated = (off[0] is False and "ANTS_D3D12_DEBUG_LAYER" in off[1]
+                 and again == off and isinstance(d12.debug_layer_report(), str))
+        d12.DEBUG_LAYER_STATE.update(armed=True, tried=True, detail="test")
+        queue = _Queue()
+        device = _Device(queue)
+        texts = d12.drain_debug_messages(device)
+        drained = (texts == ["WARNING: DENY_SHADER_RESOURCE can only be set "
+                             "with ALLOW_DEPTH_STENCIL"]
+                   and queue.released and device.asked)
+        bad = []
+        for kind in ("zero", "outside", "boom"):
+            queue = _Queue(kind)
+            bad.append(d12.drain_debug_messages(_Device(queue)) == [])
+        empty = d12.drain_debug_messages(_Device(None))
+        garbage = all(bad) and empty == []
+
+        class _Refusing:
+            """Only what create_texture2d_with_flags touches."""
+
+            def __init__(self):
+                self.asked = False
+
+            def _committed(self, heap_type, desc, state, label):
+                raise d12.DlssSrError("[ANTs] CreateCommittedResource(%s) "
+                                      "failed: HRESULT 0x80070057" % label)
+
+            def query_interface(self, iid, label=None):
+                self.asked = True
+                return _Queue()
+
+        refusing, raised = _Refusing(), False
+        try:
+            d12.D3D12Device.create_texture2d_with_flags(
+                refusing, 64, 64, d12.DXGI_FORMAT_R16G16B16A16_FLOAT, 0x8)
+        except d12.DlssSrError:
+            raised = True
+        rehooked = raised and refusing.asked
+
+        _os.environ["ANTS_D3D12_DEBUG_LAYER"] = "1"
+        d12.DEBUG_LAYER_STATE.update(armed=False, tried=False, detail="x")
+        on = d12.enable_debug_layer()          # knob on, this host: a warning
+        armed_on = on[0] is False and d12.DEBUG_LAYER_STATE["tried"]
+    finally:
+        _os.environ.pop("ANTS_D3D12_DEBUG_LAYER", None)
+        d12.DEBUG_LAYER_STATE.update(state)
+
+    probe = (REPO / "tools" / "check_d3d12_uav.py")
+    probe_src = probe.read_text() if probe.is_file() else ""
+    instruments = ('os.environ.setdefault("ANTS_D3D12_DEBUG_LAYER", "1")'
+                   in probe_src
+                   and "enable_debug_layer()" in probe_src
+                   and "doc flags 0x" in probe_src
+                   and "Must be used with" in probe_src
+                   and "d3d12_get_debug_interface_symbol" in win_src
+                   and "def query_interface" in com_src
+                   and "def enable_debug_layer" in src
+                   and "def drain_debug_messages" in src
+                   and "drain_debug_messages(self)" in src
+                   and d12.DXGI_FORMAT_D32_FLOAT == 40
+                   and d12.BPP[d12.DXGI_FORMAT_D32_FLOAT] == 4)
+
+    return (header and gated and drained and garbage and rehooked and armed_on
+            and instruments)
+
+
 def _crash_phase_check():
     """set_phase/phase + the label reaching every kill line, and the wires
     that set it around the NGX / engine / vtable calls."""
@@ -1342,6 +1481,11 @@ def main():
           "legacy engine), and turns them into one verdict the owner can act "
           "on",
           _uav_probe_check())
+    check("d3d12: the debug layer is opt-in and header-exact, its message "
+          "reader is bounds-checked (a garbage D3D12_MESSAGE can never fault "
+          "it), and a refused description drains the runtime's own reason "
+          "before the loud error is raised",
+          _d3d12_debug_layer_check())
     check("tools: the UAV probe bat is CRLF, clipboard-returning, marked "
           "READ-ONLY and has no parens on executable lines",
           _uav_probe_bat_check())
@@ -1579,6 +1723,14 @@ def main():
           bytes(_d3d12.IID_ID3D12Resource)
           == bytes([0xbe, 0x42, 0x64, 0x69, 0x2e, 0xa7, 0x59, 0x40,
                     0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad]))
+    check("iid: ID3D12Debug / ID3D12InfoQueue wire bytes match the canonical "
+          "literals (the debug layer's door and its message queue)",
+          bytes(_guid("{344488b7-6846-474b-b989-f027448245e0}"))
+          == bytes([0xb7, 0x88, 0x44, 0x34, 0x46, 0x68, 0x4b, 0x47,
+                    0xb9, 0x89, 0xf0, 0x27, 0x44, 0x82, 0x45, 0xe0])
+          and bytes(_guid("{0742a90b-c387-483f-b946-30a7e4e61458}"))
+          == bytes([0x0b, 0xa9, 0x42, 0x07, 0x87, 0xc3, 0x3f, 0x48,
+                    0xb9, 0x46, 0x30, 0xa7, 0xe4, 0xe6, 0x14, 0x58]))
     check("iid: IDXGIFactory1 wire bytes match the canonical literal",
           bytes(_guid("{770aae78-f26f-4dba-a829-253c83d1b387}"))
           == bytes([0x78, 0xae, 0x0a, 0x77, 0x6f, 0xf2, 0xba, 0x4d,

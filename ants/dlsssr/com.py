@@ -79,3 +79,18 @@ class ComObject:
     def vtable_method(self, slot, argtypes, restype):
         """Bind a slot once for repeated calls (parameter objects, hot loops)."""
         return self._slot_proto(slot, argtypes, restype)
+
+    def query_interface(self, iid, label=None):
+        """``QueryInterface`` (slot 0) for a secondary interface, or None.
+
+        A diagnostic query is *expected* to fail on some systems (asking a
+        release runtime for the debug layer's ``ID3D12InfoQueue`` answers
+        E_NOINTERFACE), so this returns ``None`` instead of raising - a probe
+        must never turn "this machine has no such interface" into an error.
+        """
+        out = ctypes.c_void_p()
+        hr = self.call(0, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
+                       ctypes.c_int32, iid, ctypes.byref(out))
+        if (hr & 0xFFFFFFFF) not in (0, 1) or not out.value:
+            return None
+        return ComObject(out.value, label or self.label)

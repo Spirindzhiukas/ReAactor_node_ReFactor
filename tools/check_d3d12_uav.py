@@ -1,14 +1,18 @@
 """Why does this process refuse a UAV-capable D3D12 texture?
 
-ANSWER (2026-09-21) - it was ONE BIT. d3d12.h (and the D3D12_RESOURCE_FLAGS
-docs) define ALLOW_UNORDERED_ACCESS = 0x4. This pack defined 0x8 for it, and
-0x8 is DENY_SHADER_RESOURCE. A driver refuses that byte on a texture that has
-no usage flag at all, so the recipe ladder silently fell back to flags 0x0 -
-a texture the NGX runtime cannot write through - until 0db946a forbade the
-fallback and the refusal surfaced at creation. The pack now sends 0x4, and the
-FLAGS MATRIX below is the proof in three lines: same device, same 256x256
-RGBA16F description, same D3D12_HEAP_TYPE_DEFAULT, same initial state, ONLY
-the flags byte changes.
+ANSWER (2026-09-21) - it was ONE BIT, and the docs name the rule. d3d12.h (and
+the D3D12_RESOURCE_FLAGS docs) define ALLOW_UNORDERED_ACCESS = 0x4; 0x8 is
+DENY_SHADER_RESOURCE, and the docs say of that flag: "Must be used with
+D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL." So 0x8 alone is not merely "not a
+UAV flag" - it is an INVALID resource description, refused on any machine, in
+any process, at any feature level, with no CUDA involved. (The pack's ladder
+used to hide it by silently falling back to flags 0x0 - a texture the NGX
+runtime cannot write through - until 0db946a forbade the fallback and the
+refusal surfaced at creation. The pack now sends 0x4.)
+The FLAGS MATRIX below is the proof: same device, same 256x256 RGBA16F
+description, same D3D12_HEAP_TYPE_DEFAULT, same initial state, ONLY the flags
+byte changes - and one DOC control row shows the byte is legal exactly where
+the docs say it is (0x8 together with 0x2, on a depth format).
 
 What the rig logs really showed (2026-09-20, same pack, same DLLs, same box),
 read as process state at the time - this is the question the probe was built
@@ -27,6 +31,11 @@ Phases, in run order:
   0. FLAGS MATRIX - one device, one description, three bytes: 0x4
      (ALLOW_UNORDERED_ACCESS), 0x8 (DENY_SHADER_RESOURCE - the byte this pack
      used to send) and 0x0 (control). Runs FIRST: it decides everything below.
+     Then the DOC row: the same 0x8 byte TOGETHER with 0x2
+     (ALLOW_DEPTH_STENCIL) on a D32_FLOAT texture - accepted exactly where the
+     documented rule allows it, informational only, never part of the verdict.
+     The debug layer is armed for this run when the machine has it (Graphics
+     Tools), so a refused description prints the runtime's own reason.
   A. fresh device, feature level 11_0 (what the pack asks for today)
   A0. the SAME test in a FRESH CHILD PROCESS with the pack's CUDA flag arming
      switched off (ANTS_NO_CUDA_FLAG_ARM=1) - the discriminator for "is it the
@@ -257,6 +266,37 @@ def _report(result, feature_level):
                         f"{'OK' if ok else 'FAILED'} - {text}")
 
 
+DOC_RULE = ('d3d12.h docs: DENY_SHADER_RESOURCE (0x8) "Must be used with '
+            'D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL"')
+
+DOC_CONTROL = (0x8 | 0x2, "DENY_SHADER_RESOURCE + ALLOW_DEPTH_STENCIL",
+               "D32_FLOAT")
+
+
+def _doc_control(device):
+    """The documented rule, demonstrated on THIS machine (informational).
+
+    The matrix shows 0x8 refused alone; this creates the same byte WITH
+    ALLOW_DEPTH_STENCIL (0x2) on a depth format, which the rule allows. Two
+    rows, one byte: it is the *combination* the runtime rejects, not the byte
+    being poison - which is why every environment theory was doomed.
+    """
+    from ants.dlsssr import d3d12
+    flags, name, fmt_name = DOC_CONTROL
+    fmt = getattr(d3d12, "DXGI_FORMAT_" + fmt_name)
+    try:
+        texture = device.create_texture2d_with_flags(
+            PROBE_W, PROBE_H, fmt, flags,
+            state=d3d12.D3D12_RESOURCE_STATE_COMMON,
+            label=f"probe doc flags 0x{flags:X}")
+        texture.release()
+        return True, f"ACCEPTED ({name} on {fmt_name}) - the rule holds here"
+    except Exception as exc:
+        match = re.search(r"0x[0-9A-Fa-f]{8}", str(exc))
+        return False, (f"REFUSED {match.group(0)}" if match
+                       else f"REFUSED ({str(exc).strip()[:60]})")
+
+
 def _child_without_cuda_flags():
     """Run this file again with the pack's CUDA flag arming switched off.
 
@@ -306,6 +346,10 @@ def main():
     if os.name != "nt":
         _line("[SKIP]", "this host is not Windows - the probe needs D3D12.")
         return 2
+    # This probe WANTS the runtime's own words: it arms the debug layer (unless
+    # the owner set ANTS_D3D12_DEBUG_LAYER=0), which needs the "Graphics Tools"
+    # optional feature. Without it nothing changes - the line says so.
+    os.environ.setdefault("ANTS_D3D12_DEBUG_LAYER", "1")
     from ants.dlsssr import d3d12, cuda_flags, cuda_luid
     _factory, adapters = d3d12.enumerate_adapters()
     print("adapter  : " + (adapters[0].describe() if adapters else "none"))
@@ -316,10 +360,26 @@ def main():
                     f"0x{d3d12.D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS:X}"
                     " (d3d12.h says 0x4 - if this is anything else, that "
                     "is the bug)")
+    d3d12.enable_debug_layer()
+    _line("[INFO]", f"debug layer: {d3d12.debug_layer_report()}")
     print()
 
     _line("[INFO]", "flags matrix: one device, one description, three bytes")
     rows = _flag_matrix()
+    print()
+    _line("[DOC] ", DOC_RULE)
+    if rows:
+        from ants.dlsssr import d3d12 as _d12
+        try:
+            _factory, adapters = _d12.enumerate_adapters()
+            info, _reason = _d12.pick_adapter(adapters, 0)
+            _dev = _d12.D3D12Device.create(info.ptr if info else None,
+                                           _d12.D3D_FEATURE_LEVEL_11_0)
+            _ok, detail = _doc_control(_dev)
+            _line("[DOC] ", f"control: flags 0x{(0x8 | 0x2):X} "
+                            f"({DOC_CONTROL[1]}) on {DOC_CONTROL[2]} -> {detail}")
+        except Exception as exc:
+            _line("[DOC] ", f"control could not run ({exc})")
     print()
     if rows and rows[0][2] and not rows[1][2]:
         print("VERDICT: THE FLAGS BYTE WAS THE BUG, and it is already fixed. "
@@ -327,9 +387,13 @@ def main():
               "device; flags 0x8 (DENY_SHADER_RESOURCE - the byte this pack "
               "sent for every 'UAV' texture it ever created) is REFUSED with "
               "exactly the E_INVALIDARG our native runs kept reporting, while "
-              "0x0 is accepted. Nothing about the legacy engine, the CUDA "
-              "flag, the feature level or the driver state was ever wrong. Run "
-              "the native node: its output texture is a real UAV texture now. "
+              "0x0 is accepted. The docs name the rule that makes this "
+              "inevitable: DENY_SHADER_RESOURCE 'must be used with "
+              "ALLOW_DEPTH_STENCIL', so 0x8 alone is an invalid resource "
+              "description - refused on any machine, in any process, at any "
+              "feature level. Nothing about the legacy engine, the CUDA flag, "
+              "the feature level or the driver state was ever wrong. Run the "
+              "native node: its output texture is a real UAV texture now. "
               "Send this whole report.")
         return 14
     if rows and not rows[0][2]:

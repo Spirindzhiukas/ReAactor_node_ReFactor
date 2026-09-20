@@ -213,12 +213,19 @@ python and never registers callbacks.
       of the 0x8 byte surfaced at creation (23:46 -> 01:22). Owner-run probe,
       one variable: same device + same 256x256 RGBA16F desc + same DEFAULT heap
       + same initial state -> flags 0x8 REFUSED, flags 0x0 accepted.
-      Shipped: the constant 0x4 (+ DENY_SHADER_RESOURCE named, + the flag table
-      and `resource_flag_name()` so every recipe line carries its BYTE), the
-      probe's FLAGS MATRIX first with exit 14 ("THE FLAGS BYTE WAS THE BUG"),
-      `create_texture2d_with_flags()`, stale "legacy CUDA is the prime suspect"
-      text removed everywhere, and the flag table pinned against d3d12.h by a
-      test (the old test pinned == 0x8, which is how it survived).
+      The docs state the rule that makes 0x8 illegal on its own: "Must be used
+      with D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL" - so it is an invalid
+      description, refused on any machine, which is why every environment
+      theory was doomed. Shipped: the constant 0x4 (+ DENY_SHADER_RESOURCE
+      named, + the flag table and `resource_flag_name()` so every recipe line
+      carries its BYTE), the probe's FLAGS MATRIX first with exit 14 ("THE
+      FLAGS BYTE WAS THE BUG"), a DOC control row (0x8 + 0x2 on D32_FLOAT =
+      accepted, the rule demonstrated), `create_texture2d_with_flags()`, the
+      opt-in D3D12 debug layer (`ANTS_D3D12_DEBUG_LAYER=1`, Graphics Tools,
+      ID3D12InfoQueue message drain - the instrument that would have named the
+      rule in one run), stale "legacy CUDA is the prime suspect" text removed
+      everywhere, and the flag table pinned against d3d12.h by a test (the old
+      test pinned == 0x8, which is how it survived).
 - [ ] **Run 34 (owner, fresh process each time)**: 0) NATIVE NODE FIRST, in a ComfyUI
       just restarted - do not run the legacy node in that process; 1) native +
       a SMALL frame (768x768); 2) if that works, 4096x3072;

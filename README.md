@@ -151,6 +151,14 @@ the machine in ~20 s without ComfyUI: it runs a **flags matrix** first (0x4 vs 0
 one texture description, only the byte changes) and exits **14** = "THE FLAGS BYTE WAS THE BUG", then
 the historical phases (fresh 11_0 vs 12_0, after plain CUDA work, after the staged legacy engine).
 `ANTS_D3D12_FEATURE_LEVEL=12_0` switches the device to the feature level the reference host asks for.
+The rule that made the wrong byte fail is in the docs, not in a driver: `DENY_SHADER_RESOURCE` "must be
+used with `ALLOW_DEPTH_STENCIL`", so `0x8` alone is an invalid description that any D3D12 runtime
+refuses. For the next wall of this kind there is now an instrument: `ANTS_D3D12_DEBUG_LAYER=1` arms the
+D3D12 debug layer (needs the Windows "Graphics Tools" optional feature) and a refused description is
+followed by the runtime's own explanation, read from `ID3D12InfoQueue` (`ANTS_D3D12_DEBUG_MESSAGES`
+caps how many lines are printed). The probe arms it automatically, because that is exactly the run in
+which a sentence like "DENY_SHADER_RESOURCE can only be set with ALLOW_DEPTH_STENCIL" ends an
+investigation instead of starting one.
 
 **Pre-SR denoise (optional, and now switchable OFF):** `pre_denoise_mode` has three values — the
 ANTs SR host (`SR (DLSS denoise)`), a wired upscale/denoise model (`Denoise Model`), and

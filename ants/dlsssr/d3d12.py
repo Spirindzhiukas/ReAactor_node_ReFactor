@@ -28,6 +28,9 @@ IID_ID3D12CommandAllocator = guid("{6102dee4-af59-4b09-b999-b44d73f09b24}")
 IID_ID3D12GraphicsCommandList = guid("{5b160d0f-ac1b-4185-8ba8-b3ae42a5a455}")
 IID_ID3D12Resource = guid("{696442be-a72e-4059-bc79-5b5c98040fad}")
 IID_ID3D12Fence = guid("{0a753dcf-c4d8-4b91-adf6-be5a60d95a76}")
+# the debug layer (opt-in; see enable_debug_layer) - IIDs from d3d12sdklayers.h
+IID_ID3D12Debug = guid("{344488b7-6846-474b-b989-f027448245e0}")
+IID_ID3D12InfoQueue = guid("{0742a90b-c387-483f-b946-30a7e4e61458}")
 
 # --- enums / constants (d3d12.h) ---
 D3D_FEATURE_LEVEL_11_0 = 0xB000
@@ -46,10 +49,13 @@ D3D12_RESOURCE_FLAG_NONE = 0
 #   ALLOW_CROSS_ADAPTER 0x10, ALLOW_SIMULTANEOUS_ACCESS 0x20.
 # This pack shipped 0x8 for ALLOW_UNORDERED_ACCESS: a pre-rig edit "fixed" the
 # constant from 0x4 to 0x8 believing 0x4 was ALLOW_RENDER_TARGET. 0x8 is
-# DENY_SHADER_RESOURCE, and a driver refuses it on a texture that carries no
-# usage flag at all - the rig answered E_INVALIDARG for the same 256x256
-# RGBA16F description with flags 0x8 while the identical description with flags
-# 0x0 was accepted, on one device, in one process.
+# DENY_SHADER_RESOURCE, and Microsoft's own docs state the rule that makes it
+# illegal on its own: "Must be used with D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL."
+# So 0x8 alone is not merely "not a UAV flag" - it is an invalid resource
+# description, which is why CreateCommittedResource answered E_INVALIDARG on a
+# healthy device for the same 256x256 RGBA16F description with flags 0x8 while
+# the identical description with flags 0x0 was accepted, in every process, on
+# every feature level, with no CUDA ever involved.
 # What that cost, all of it ours: every "UAV" texture this pack ever created was
 # UAV-LESS (the recipe ladder hid it by silently degrading to flags 0x0 until
 # 0db946a stopped it), NGX was handed an output it could not write through, and
@@ -84,9 +90,11 @@ DXGI_FORMAT_R8G8B8A8_UNORM = 28
 DXGI_FORMAT_R16G16B16A16_FLOAT = 10
 DXGI_FORMAT_R16G16_FLOAT = 34
 DXGI_FORMAT_R32_FLOAT = 41
+DXGI_FORMAT_D32_FLOAT = 40      # depth format: legal with ALLOW_DEPTH_STENCIL
 
 BPP = {DXGI_FORMAT_R16G16B16A16_FLOAT: 8, DXGI_FORMAT_R8G8B8A8_UNORM: 4,
-       DXGI_FORMAT_R16G16_FLOAT: 4, DXGI_FORMAT_R32_FLOAT: 4}
+       DXGI_FORMAT_R16G16_FLOAT: 4, DXGI_FORMAT_R32_FLOAT: 4,
+       DXGI_FORMAT_D32_FLOAT: 4}
 
 # ID3D12Device vtable slots
 _DEVICE_CREATE_COMMAND_QUEUE = 8
@@ -195,6 +203,157 @@ def resource_flag_name(flags):
     """
     known = [name for bit, name in RESOURCE_FLAG_NAMES if flags & bit]
     return f"0x{flags:X} ({', '.join(known) if known else 'no flags'})"
+
+
+# --- the D3D12 debug layer (opt-in) -----------------------------------------
+# Why it exists: a refused resource description is answered with a bare
+# E_INVALIDARG. With the layer armed the runtime says WHY, in words - the
+# sentence this pack needed for a whole night ("DENY_SHADER_RESOURCE can only
+# be set with ALLOW_DEPTH_STENCIL" is the docs' rule; the runtime prints its own
+# wording). It is OFF by default: it is a validation layer, it changes what the
+# runtime checks, and it is only present when the Windows "Graphics Tools"
+# optional feature is installed.
+_DEBUG_ENABLE_LAYER = 3          # ID3D12Debug::EnableDebugLayer (IUnknown 0-2)
+_INFOQUEUE_GET_MESSAGE = 5       # ID3D12InfoQueue vtable, from d3d12sdklayers.h
+_INFOQUEUE_NUM_STORED = 8        # 3 SetMessageCountLimit, 4 ClearStoredMessages,
+#                                  5 GetMessage, 6/7 allowed/denied, 8 stored
+# D3D12_MESSAGE (x64): Category u32 @0, Severity u32 @4, ID u32 @8, (pad 4),
+# pDescription @16, DescriptionByteLength u64 @24, then the string in the same
+# caller-provided buffer.
+_MESSAGE_HEADER = 32
+_MESSAGE_SEVERITY = {0: "CORRUPTION", 1: "ERROR", 2: "WARNING", 3: "INFO",
+                     4: "MESSAGE"}
+_DEFAULT_MESSAGE_LIMIT = 12
+DEBUG_LAYER_STATE = {"armed": False, "tried": False, "detail": "not tried yet"}
+
+
+def debug_layer_requested():
+    """``ANTS_D3D12_DEBUG_LAYER=1`` - opt-in, default OFF (see above)."""
+    raw = os.environ.get("ANTS_D3D12_DEBUG_LAYER", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def debug_message_limit():
+    """How many stored messages to print (``ANTS_D3D12_DEBUG_MESSAGES``)."""
+    try:
+        value = int(os.environ.get("ANTS_D3D12_DEBUG_MESSAGES", "").strip())
+    except ValueError:
+        return _DEFAULT_MESSAGE_LIMIT
+    return max(1, min(value, 100))
+
+
+def debug_layer_report():
+    """One line about the debug layer, for logs and the probe."""
+    return DEBUG_LAYER_STATE["detail"]
+
+
+def enable_debug_layer():
+    """(armed, detail) - arm the layer once per process, before any device.
+
+    Called from :meth:`D3D12Device.create`; a failure here is reported and
+    swallowed (the layer is a diagnostic, never a requirement).
+    """
+    if DEBUG_LAYER_STATE["tried"]:
+        return DEBUG_LAYER_STATE["armed"], DEBUG_LAYER_STATE["detail"]
+    DEBUG_LAYER_STATE["tried"] = True
+    from ..log import dlss_logger
+    if not debug_layer_requested():
+        DEBUG_LAYER_STATE["detail"] = ("off (set ANTS_D3D12_DEBUG_LAYER=1 to have "
+                                       "the runtime explain a refused resource "
+                                       "description)")
+        return False, DEBUG_LAYER_STATE["detail"]
+    try:
+        symbol = win32.d3d12_get_debug_interface_symbol()
+        symbol.argtypes = [ctypes.c_void_p,
+                           ctypes.POINTER(ctypes.c_void_p)]
+        symbol.restype = ctypes.c_int32
+        out = ctypes.c_void_p()
+        hr = symbol(IID_ID3D12Debug, ctypes.byref(out))
+        if hr < 0 or not out.value:
+            detail = (f"unavailable: {describe_hresult(hr)} - install the Windows "
+                      "\"Graphics Tools\" optional feature to arm it")
+            DEBUG_LAYER_STATE["detail"] = detail
+            dlss_logger.warning("[ANTs] D3D12 debug layer NOT armed: %s", detail)
+            return False, detail
+        ComObject(out.value, "ID3D12Debug").call(_DEBUG_ENABLE_LAYER, [], None)
+        DEBUG_LAYER_STATE.update(armed=True,
+                                 detail="armed (Graphics Tools present)")
+        dlss_logger.status("[ANTs] D3D12 debug layer ARMED - a refused resource "
+                           "description now carries the runtime's own reason")
+        return True, DEBUG_LAYER_STATE["detail"]
+    except Exception as exc:              # the instrument may never fail the run
+        detail = f"could not arm ({exc.__class__.__name__}: {exc})"
+        DEBUG_LAYER_STATE["detail"] = detail
+        dlss_logger.warning("[ANTs] D3D12 debug layer NOT armed: %s", detail)
+        return False, detail
+
+
+def _read_debug_message(queue, index):
+    """One stored ``D3D12_MESSAGE`` as ``SEVERITY: text``, or None.
+
+    Every field is bounds-checked before it is used: the message buffer is
+    filled by the runtime, and a diagnostic reader that dereferences a pointer
+    out of that buffer would turn a bad description into a crash.
+    """
+    argtypes = [_CVOID_U64(), _CVOID_P(), ctypes.POINTER(ctypes.c_size_t)]
+    size = ctypes.c_size_t(0)
+    queue.call(_INFOQUEUE_GET_MESSAGE, argtypes, ctypes.c_int32,
+               ctypes.c_uint64(index), None, ctypes.byref(size))
+    if not _MESSAGE_HEADER < size.value <= (1 << 20):
+        return None
+    buf = ctypes.create_string_buffer(size.value)
+    queue.call(_INFOQUEUE_GET_MESSAGE, argtypes, ctypes.c_int32,
+               ctypes.c_uint64(index), buf, ctypes.byref(size))
+    raw = buf.raw[:size.value]
+    severity = int.from_bytes(raw[4:8], "little")
+    pointer = int.from_bytes(raw[16:24], "little")
+    length = int.from_bytes(raw[24:32], "little")
+    base = ctypes.addressof(buf)
+    if not base <= pointer < base + size.value:
+        return None                       # outside the buffer we handed in
+    keep = min(length, base + size.value - pointer)
+    text = ctypes.string_at(pointer, keep).split(b"\x00", 1)[0]
+    text = text.decode("utf-8", "replace").replace("\r", " ").replace("\n", " ")
+    return f"{_MESSAGE_SEVERITY.get(severity, severity)}: {text.strip()[:400]}"
+
+
+def drain_debug_messages(device, limit=None):
+    """Log the debug layer's stored messages; returns the texts.
+
+    Runs only when the layer is armed, reads at most ``limit`` messages, and
+    swallows every failure: the caller is already handling a refusal, and the
+    explanation must not become the error.
+    """
+    if not DEBUG_LAYER_STATE["armed"]:
+        return []
+    from ..log import dlss_logger
+    limit = debug_message_limit() if limit is None else int(limit)
+    try:
+        queue = device.query_interface(IID_ID3D12InfoQueue, "ID3D12InfoQueue")
+    except Exception as exc:
+        dlss_logger.warning("[ANTs] D3D12 debug layer: no message queue (%s)", exc)
+        return []
+    if queue is None:
+        dlss_logger.warning("[ANTs] D3D12 debug layer: the device exposes no "
+                            "ID3D12InfoQueue - nothing to read")
+        return []
+    out = []
+    try:
+        total = int(queue.call(_INFOQUEUE_NUM_STORED, [], ctypes.c_uint64))
+        for index in range(max(0, total - limit), total):
+            text = _read_debug_message(queue, index)
+            if text:
+                out.append(text)
+                dlss_logger.error("[ANTs] D3D12 debug layer says: %s", text)
+    except Exception as exc:
+        dlss_logger.warning("[ANTs] D3D12 debug layer: cannot read messages (%s)",
+                            exc)
+    finally:
+        try:
+            queue.release()
+        except Exception:
+            pass
+    return out
 
 
 def feature_level():
@@ -435,6 +594,7 @@ class D3D12Device(ComObject):
 
     @staticmethod
     def create(adapter_ptr=None, feature_level=D3D_FEATURE_LEVEL_11_0):
+        enable_debug_layer()      # opt-in, and it must precede the device
         create = win32.d3d12_create_device_symbol()
         create.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                            ctypes.POINTER(ctypes.c_char * 16),
@@ -585,6 +745,7 @@ class D3D12Device(ComObject):
             break
         if accepted is None:
             from ..log import dlss_logger
+            drain_debug_messages(self)      # the runtime's own reason, if armed
             _removed, _hr, status = self.device_status()
             tried = "; ".join(f"{resource_flag_name(f)} + {state_name(s)}"
                               for f, s in candidates)
@@ -646,7 +807,11 @@ class D3D12Device(ComObject):
         no log line can be read as the wrong flag.
         """
         desc = _resource_desc_texture(width, height, fmt, flags)
-        ptr = self._committed(D3D12_HEAP_TYPE_DEFAULT, desc, state, label)
+        try:
+            ptr = self._committed(D3D12_HEAP_TYPE_DEFAULT, desc, state, label)
+        except DlssSrError:
+            drain_debug_messages(self)      # the exact refusal, in words
+            raise
         return D3D12Resource(ptr, label, width, height, fmt,
                              int(width) * int(height) * BPP[fmt], state)
 

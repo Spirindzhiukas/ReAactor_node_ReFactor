@@ -1088,6 +1088,18 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - **Only the byte and the process-state theories die with it**: A0 (pack CUDA flag arming), B (feature
   level 12_0), A/C/D (legacy engine) were all cleared by the probe, and the owner's 3ds Max / 10 GB VRAM
   observation is consistent - a plain texture is always fine because it has no flags at all.
+- **The documented rule** (learn.microsoft.com, D3D12_RESOURCE_FLAGS): DENY_SHADER_RESOURCE "Must be
+  used with D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL" - so 0x8 alone is an INVALID description, refused
+  by any D3D12 runtime on any machine, not a driver/CUDA/process-state symptom. Same conclusion reached
+  independently (owner asked Claude Sonnet 5 with the same log; its one off note: the texture FORMAT is
+  irrelevant to this refusal, and the `_fwd_stub` fix it mentions was already applied + credited).
+- **The instrument that would have named it in one run**: the D3D12 debug layer, opt-in
+  (`ANTS_D3D12_DEBUG_LAYER=1`, `ANTS_D3D12_DEBUG_MESSAGES` cap, needs the Windows "Graphics Tools"
+  feature) - `d3d12.enable_debug_layer()` arms it before device creation, and a refused description
+  drains the runtime's own sentences out of `ID3D12InfoQueue` (GetMessage slot 5, GetNumStoredMessages
+  slot 8, 32-byte D3D12_MESSAGE header, all pinned against d3d12sdklayers.h). Bounds-checked, capped,
+  never raises; the probe arms it by default and prints the state. `com.ComObject.query_interface` is
+  the new door (returns None instead of raising: a release runtime has no InfoQueue).
 - **Shipped**: `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS = 0x4`; `DENY_SHADER_RESOURCE` named;
   `RESOURCE_FLAG_NAMES` + `resource_flag_name()` so every recipe/log line prints the BYTE next to the
   name (`0x4 (ALLOW_UNORDERED_ACCESS), initial state ...`); `create_texture2d_with_flags()` (one exact
@@ -1095,5 +1107,5 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   exit **14** = "THE FLAGS BYTE WAS THE BUG" and exit 11 = "even the correct byte is refused fresh ->
   reboot, then probe"; the refusal text and README no longer blame the legacy CUDA path.
 - Tests: the whole flag table is pinned against d3d12.h (the old check pinned `== 0x8` with the comment
-  "(0x4 = render target)" - the suite was holding the bug in place). Suite: **450 checks** (dlsssr 106,
+  "(0x4 = render target)" - the suite was holding the bug in place). Suite: **452 checks** (dlsssr 108,
   native_flow 58, dlssnr_bridge 101, nr_schedule 33).

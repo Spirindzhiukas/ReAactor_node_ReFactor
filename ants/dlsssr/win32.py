@@ -119,6 +119,17 @@ def d3d12_create_device_symbol():
     return _d3d12.D3D12CreateDevice
 
 
+def d3d12_get_debug_interface_symbol():
+    """``D3D12GetDebugInterface`` - the debug layer's door (opt-in only).
+
+    Needs the Windows "Graphics Tools" optional feature; without it the call
+    answers DXGI_ERROR_SDK_COMPONENT_MISSING (0x887A002D) and the layer simply
+    stays off.
+    """
+    _require_windows("D3D12GetDebugInterface")
+    return _d3d12.D3D12GetDebugInterface
+
+
 def create_dxgi_factory1_symbol():
     _require_windows("CreateDXGIFactory1")
     return _dxgi.CreateDXGIFactory1
