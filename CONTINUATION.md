@@ -578,6 +578,79 @@ workaround only works once this is right):
   LUID + the launch flags found in the logs), so the next report answers
   "does #15255 even apply here".
 
+### The 21:17 evidence (owner) — one GPU, the LUID line matches NGX, and the kill has a status
+
+**1. This machine has ONE CUDA device — the multi-GPU CUDA bug is OUT.**
+
+```
+--- CUDA / MULTI-GPU VIEW (ComfyUI #15255) ---
+  1 CUDA device(s) visible to this python:
+    0: NVIDIA GeForce RTX 4090 (LUID 00000000:000497ea)
+  single CUDA device: the multi-GPU CUDA bug (#15255) cannot apply ...
+```
+
+`check_cuda_multigpu.bat` agrees (phase A passed, phase B: "Only one CUDA
+device is visible in this process"). #15255 needs **more than one** GPU
+visible to the process, so it cannot explain the 20:39 device removal, and the
+`--cuda-device 0` A/B is pointless on this rig — drop it. The adapter-identity
+fix stays (it is what makes `--cuda-device N` safe on multi-GPU machines, and
+it removed the wrong-LUID read).
+
+**2. The LUID fix is now verified against NVIDIA's own log.** NGX writes:
+
+```
+[NGXCheckArchitectureSupport:229] Found matching adapter with NVAPI physical GPU
+handle: 0xc00 and LUID: { 0x0, 0x497ea }
+```
+
+which is exactly the value our reader prints (`LUID 00000000:000497ea` —
+`{HighPart, LowPart}`). The old `desc + 0x12C` read produced a bogus pair; the
+new 0x128 read matches the vendor's own numbers, so the host and the engine
+now agree about which GPU this process is on.
+
+**3. The black box caught the kill (and it has a status now).**
+
+```
+[ANTs] C++ exception 0xE06D7363 ... thrown from libffi-8.dll+... <- _ctypes.pyd+... <- python313.dll+...
+   ... (four of these: the runtime's internal throws, which we catch)
+[ANTs] TERMINATION via ntdll!NtTerminateProcess(handle=0x0, status=0x00000002); call chain: libffi ...
+[ANTs] TERMINATION via ntdll!NtTerminateProcess(handle=0xFFFFFFFFFFFFFFFF, status=0x00000002); call chain: libffi ...
+```
+
+`handle=0x0` is an invalid-handle call that fails; `handle=-1` is
+NtCurrentProcess — **that one terminates the process with exit code 2**. Both
+came from inside one of our ctypes calls (the chain is libffi → `_ctypes` →
+python), which is the "silent kill" this project has chased since run 14: the
+runtime deliberately terminates the host, and now we know the status (2) and
+that it happens inside a ctypes call.
+
+What was still missing was **which** call. This commit adds that:
+every ctypes call into the engine (`dlss5nr_*`), NGX (`NVSDK_NGX_*`) and the
+D3D12 vtables carries an in-flight label, and every kill/exception line prints
+it — so the next report says
+`TERMINATION via ... [in-flight call: EvaluateFeature]` instead of a chain of
+FFI frames. Plus `ANTS_NR_BLOCK_TERMINATION=1` (opt-in A/B): the trap logs and
+then **refuses** the kill (`ExitProcess`/`TerminateProcess` only; `abort` and
+fast-fail are never blocked), so the node can fail loudly and ComfyUI stays
+alive to print why. State after such a refusal is undefined by definition —
+that is the experiment.
+
+**4. A collector bug made the 21:17 helper inventory say the opposite of the
+truth.** With no arguments (exactly how the bat calls it) the export reader
+was never located, so every helper DLL printed "not a neuroframe engine" and
+the report shouted `[!] NO helper build on disk exports the CUDA entry
+points`. The reader path is fixed (the resolved repo is passed, not the empty
+`--repo` argument), the report now says outright when no reader was loaded,
+and the test invokes the collector the way the bat does. Re-run the collector
+for the real HELPER / ENGINE INVENTORY.
+
+**Open question for the owner (it decides how to read 20:40):** did ComfyUI
+itself die at ~20:39:50? The `status=2` termination says the process *was*
+asked to exit during the native evaluate. If the window closed and you
+restarted before the 20:40 legacy run, then "cannot match CUDA ordinal 0 by
+LUID" happened in a **fresh** process and is a real bug worth chasing; if it
+was the same window, it is the wedged-process state as assumed.
+
 **Next runs, in order** (each in a FRESH ComfyUI process):
 
 1. **Small frame first, native engine** (e.g. 768x768, 1 pass): proves the
@@ -591,18 +664,17 @@ workaround only works once this is right):
    If it *still* says "by LUID", send the collector report - the HELPER /
    ENGINE INVENTORY section will show whether the pair on disk is the one
    that worked earlier.
-4. **A/B the multi-GPU variable** (one run each, fresh process): launch with
-   the same workflow but add `--cuda-device 0` to the launch bat, and if it
-   still fails try `--disable-pinned-memory` as well. If the run suddenly
-   works, the failure was the #15255 CUDA state, not our code - and the log
-   will already say so (the advisory line + the removal clause).
-   `tools\check_cuda_multigpu.bat` answers the same question in ~10 seconds
-   without touching ComfyUI, and the collector's new
-   `CUDA / MULTI-GPU VIEW` section lists every GPU with its LUID plus the
-   launch flags it found.
+4. **If the process dies again** (console closes / ComfyUI restarts itself):
+   the kill line now carries `[in-flight call: ...]` - send that line. Then
+   re-run once with `set "ANTS_NR_BLOCK_TERMINATION=1"` in the launch bat:
+   the trap will not let the runtime kill the process, the node fails loudly
+   instead, and ComfyUI survives to print the reason.
 5. If a `Close 0x80070057` appears while the device reports healthy, re-run
    once with `set ANTS_D3D12_CHECKPOINT=1` - the log will name the invalid
    command.
+6. Re-run `tools\collect_rig_evidence.bat` (the 21:17 report's helper
+   verdicts came from a tool bug - the reader had not loaded) and send the
+   HELPER / ENGINE INVENTORY section.
 
 ## Rig facts (owner environment)
 

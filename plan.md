@@ -117,12 +117,29 @@ python and never registers callbacks.
       (fresh-process A/B: single-GPU child vs all-GPU copy), and the
       collector's new **CUDA / MULTI-GPU VIEW** section (devices + LUIDs +
       launch flags).
-- [ ] **Run 34 (owner, fresh process each time)**: as Run 33, plus the
-      multi-GPU A/B — one run with `--cuda-device 0` (and if needed
-      `--disable-pinned-memory`) in the launch bat. A run that starts working
-      there = the #15255 CUDA state, not the pack; the console already says
-      which flags to add. Also run `tools\check_cuda_multigpu.bat` once and
-      send its verdict (it needs ~10 s and does not touch ComfyUI).
+- [x] **OWNER EVIDENCE 21:17 — the rig is SINGLE-GPU**: collector + probe
+      both report one RTX 4090 (LUID 00000000:000497ea), so the #15255
+      multi-GPU CUDA bug is OUT on this machine — the `--cuda-device 0` A/B is
+      pointless and dropped. NGX's own log line (`LUID: { 0x0, 0x497ea }`)
+      now matches our reader exactly: the 0x128 LUID fix is verified against
+      the vendor. The black box caught the kill: two
+      `TERMINATION via ntdll!NtTerminateProcess` lines (handle 0x0 then -1,
+      `status=0x2`) inside a ctypes call — the runtime terminates the host,
+      and the chain is FFI-only. New: every ctypes call into engine/NGX/D3D12
+      carries an in-flight label printed on every kill/exception line, plus
+      `ANTS_NR_BLOCK_TERMINATION=1` (opt-in: the trap refuses the kill so the
+      node fails loudly). Collector bug fixed: with no args (the bat) the
+      export reader was not found → every helper "not a neuroframe engine" +
+      a false CUDA alarm; the resolved repo is now passed and the test runs
+      the collector the way the bat does.
+- [ ] **Run 34 (owner, fresh process each time)**: the ladder unchanged
+      (small native frame → 4096x3072 → legacy in a fresh process) — but
+      answer ONE question first: did ComfyUI die at ~20:39:50 (status=2 kill)?
+      If it did, the 20:40 "by LUID" failure was a FRESH process = a real bug.
+      If the process dies again: send the `[in-flight call: ...]` line, then
+      re-run once with `set "ANTS_NR_BLOCK_TERMINATION=1"`. Also re-run
+      `tools\collect_rig_evidence.bat` for the real HELPER / ENGINE
+      INVENTORY (the 21:17 verdicts came from a tool bug).
 - [ ] **Run 33 (owner, fresh process each time)**:
       1. native engine + a SMALL frame (768x768, 1 pass) → proves the path
          end-to-end and cannot hit the 2 s TDR timeout;

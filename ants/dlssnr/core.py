@@ -4,7 +4,25 @@ import threading
 
 import numpy as np
 
+from ..dlsssr import crashlog
 from ..log import logger
+
+
+def _tagged(fn, name):
+    """Wrap one engine export so the crash box names the call in flight.
+
+    The TERMINATION / exception lines in the black box print this label: the
+    rig's lines so far showed only libffi -> _ctypes -> python frames, so the
+    one fact missing was WHICH export the process died in.
+    """
+    def wrapper(*args):
+        previous = crashlog.phase()
+        crashlog.set_phase(name)
+        try:
+            return fn(*args)
+        finally:
+            crashlog.set_phase(previous)
+    return wrapper
 
 # --- constants ---
 BRIDGE_ABI_VERSION = 6
@@ -187,7 +205,9 @@ class DLSSStandaloneManager:
                     ctypes.c_char_p, ctypes.c_int,
                 ]
                 self._library.dlss5nr_process_cuda_v6.restype = ctypes.c_int
-                self._process_cuda = self._library.dlss5nr_process_cuda_v6
+                self._process_cuda = _tagged(
+                    self._library.dlss5nr_process_cuda_v6,
+                    "dlss5nr_process_cuda_v6")
             for name, attr in (
                 ("dlss5nr_cuda_supported", "_cuda_supported_fn"),
                 ("dlss5nr_cuda_status", "_cuda_status_fn"),
@@ -201,17 +221,21 @@ class DLSSStandaloneManager:
                         fn.argtypes, fn.restype = [ctypes.c_char_p, ctypes.c_int], ctypes.c_int
                     else:
                         fn.argtypes, fn.restype = [], ctypes.c_char_p
-                    setattr(self, attr, fn)
+                    setattr(self, attr, _tagged(fn, name))
 
             try:
                 self._library.dlss5nr_frame_abi_version.argtypes = []
                 self._library.dlss5nr_frame_abi_version.restype = ctypes.c_uint32
-                self.actual_abi = self._library.dlss5nr_frame_abi_version()
+                self.actual_abi = _tagged(
+                    self._library.dlss5nr_frame_abi_version,
+                    "dlss5nr_frame_abi_version")()
             except Exception:
                 self.actual_abi = BRIDGE_ABI_VERSION
 
             error = ctypes.create_string_buffer(4096)
-            ok = self._library.dlss5nr_init(ordinal, self.dll_dir, error, len(error))
+            ok = _tagged(self._library.dlss5nr_init,
+                         "dlss5nr_init")(ordinal, self.dll_dir, error,
+                                         len(error))
             
             if not ok:
                 err_msg = error.value.decode('utf-8', errors='ignore')
@@ -338,7 +362,8 @@ class DLSSStandaloneManager:
             c_float_p = ctypes.POINTER(ctypes.c_float)
             
             # call the HOST function (the DLL talks to the GPU itself)
-            ok = self._library.dlss5nr_process_v6(
+            ok = _tagged(self._library.dlss5nr_process_v6,
+                         "dlss5nr_process_v6")(
                 source.ctypes.data_as(c_float_p),
                 destination.ctypes.data_as(c_float_p),
                 source.shape[1],

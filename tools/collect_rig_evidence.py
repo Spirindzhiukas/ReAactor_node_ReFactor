@@ -700,6 +700,11 @@ def helper_inventory(roots, out_lines, pe):
                               bool(names_set) and all(
                                   entry in names_set
                                   for entry in (pe.CUDA_ENTRYPOINTS if pe else ()))))
+    if pe is None:
+        out_lines.append("  [!] the export reader (ants/dlssnr/peexports.py) "
+                         "was NOT loaded, so NO verdict below is real - fix "
+                         "the pack path (or set ANTS_EVIDENCE_REPO) and run "
+                         "this again")
     if not found:
         out_lines.append("  (no helper/engine DLL found in the audited trees)")
         return []
@@ -713,10 +718,16 @@ def helper_inventory(roots, out_lines, pe):
         verdict = ("CUDA entry points present <<< use this build"
                    if cuda_ok else
                    ("neuroframe engine, NO CUDA entry points (CPU path)"
-                    if exports_ok else "not a neuroframe engine"))
+                    if exports_ok else
+                    ("export table not read (no reader loaded)"
+                     if pe is None else "not a neuroframe engine")))
         out_lines.append(f"  {path}  {size} bytes  sha256(first 8) {digest}")
         out_lines.append(f"      {verdict}")
-    if not cuda_capable:
+    if not cuda_capable and pe is None:
+        out_lines.append("  (no CUDA verdict can be given without the export "
+                         "reader - this is a tool problem, not a verdict "
+                         "about the builds)")
+    elif not cuda_capable:
         out_lines.append("  [!] NO helper build on disk exports the CUDA entry "
                          "points (dlss5nr_process_cuda_v6) - the node will run "
                          "the 20-25x slower CPU staging path. Replace the "
@@ -976,11 +987,15 @@ def main(argv=None):
 
     lines.append("")
     lines.append("--- MODELS/DLSS LAYOUT AUDIT (keep / delete) " + "-" * 32)
-    layout_audit(dlss_root, lines, load_pack_versions(args.repo))
+    layout_audit(dlss_root, lines, load_pack_versions(repo))
 
     lines.append("")
     lines.append("--- HELPER / ENGINE INVENTORY (CUDA-capable?) " + "-" * 31)
-    pe_mod = load_pack_peexports(args.repo)
+    # repo (auto-detected), NOT args.repo: the bat passes no arguments,
+    # and with "" the export reader silently came up missing and every
+    # helper was reported "not a neuroframe engine" (owner report
+    # 21:17). The reader is what proves the CUDA entry points exist.
+    pe_mod = load_pack_peexports(repo)
     if pe_mod is None:
         lines.append("  (peexports.py not found - export tables not read)")
     roots = extra_dlss_roots(dlss_root)

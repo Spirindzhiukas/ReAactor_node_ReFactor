@@ -49,6 +49,7 @@ from .parameters import (CoreParameterObject, OwnParameterObject,
 
 _CVOID = ctypes.c_void_p
 _CI32 = ctypes.c_int32
+from . import crashlog
 from . import shim as shim_mod
 
 
@@ -198,6 +199,27 @@ def writable_cache_dir(tag):
 _SHIM_LOGGED = set()   # shim paths already announced (console triage hygiene)
 
 
+def _tagged_call(call, name):
+    """Wrap one NGX export so the crash box knows what was in flight.
+
+    The black box's TERMINATION / C++-exception lines print this label. It is
+    the difference between "something killed the process" (which is all the
+    rig's lines said so far: libffi -> _ctypes -> python frames, no engine
+    frame) and "the process died inside EvaluateFeature".
+    """
+    short = name.replace("NVSDK_NGX_D3D12_", "").replace("NVSDK_NGX_", "")
+
+    def wrapper(*args):
+        previous = crashlog.phase()
+        crashlog.set_phase(short)
+        try:
+            return call(*args)
+        finally:
+            crashlog.set_phase(previous)
+
+    return wrapper
+
+
 class NgxModule:
     """A loaded NGX provider (driver core or snippet) + shim-routed calls."""
 
@@ -281,6 +303,7 @@ class NgxModule:
             return False
 
     def fn(self, name, argtypes, restype=ctypes.c_int32, thunk="call"):
+        # (the bound callable is wrapped at the end of this method)
         """Bindable NGX function, routed through the shim when enabled.
 
         thunk="init_ext" routes through fwd_init_ext, whose prototype is the
@@ -296,7 +319,8 @@ class NgxModule:
             # there too). The rig's NGX log showed the core recording the
             # caller module ("called from module nvngx.dll_ants.dll"), which
             # is a geometry no working host exhibits.
-            return win32.callable_at(address, argtypes, restype)
+            return _tagged_call(win32.callable_at(address, argtypes, restype),
+                                name)
         # Bind the thunk ADDRESS with the caller's real prototype (a
         # CFUNCTYPE over a raw int is a native call; over a callable it
         # would be a lossy Python trampoline - see _fwd_stub above).
@@ -309,7 +333,7 @@ class NgxModule:
             self._set_slots(ctypes.c_void_p(address), None, None)
             return stub(*args)
 
-        return routed
+        return _tagged_call(routed, name)
 
     def fn_raw(self, name, argtypes, restype=ctypes.c_int32):
         """The real export, un-routed (no shim, no caller-check geometry).
@@ -317,7 +341,8 @@ class NgxModule:
         Only for calls that must NOT come from a shim: never used on the
         feature path in the default configuration.
         """
-        return win32.callable_at(self.address(name), argtypes, restype)
+        return _tagged_call(
+            win32.callable_at(self.address(name), argtypes, restype), name)
 
     def close(self):
         if self._fwd_handle:

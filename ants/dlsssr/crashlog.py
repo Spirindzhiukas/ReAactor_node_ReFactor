@@ -71,7 +71,29 @@ _CXX_NOISE = ("ntdll", "kernelbase", "kernel32", "vcruntime", "ucrtbase",
               "python", "libffi", "_ctypes", "msvcp")
 
 _state = {"fd": None, "handler": None, "count": 0, "cxx_count": 0,
-          "cxx": [], "trap": False, "trap_keep": [], "path": None}
+          "cxx": [], "trap": False, "trap_keep": [], "path": None,
+          "phase": ""}
+
+
+def set_phase(text):
+    """Name the call that is IN FLIGHT, in one word (the crash box prints it).
+
+    The rig's TERMINATION lines so far named only libffi/_ctypes/python
+    frames, so "something killed the process" could not be tied to a call.
+    Every ctypes call into the engine/NGX sets this before it runs and
+    restores it after, which makes the next kill line say WHERE it happened.
+    """
+    _state["phase"] = text or ""
+
+
+def phase():
+    """The current in-flight label (empty outside any ctypes call)."""
+    return _state.get("phase") or ""
+
+
+def _phase_note():
+    current = phase()
+    return f" [in-flight call: {current}]" if current else ""
 
 
 def _kernel32():
@@ -301,7 +323,8 @@ def arm(crash_file_path):
                             except Exception:
                                 chain = ""
                         _emit(f"\n[ANTs] NATIVE CRASH: exception 0x{code:08X} "
-                              f"({_INTERESTING[code]}){where}{chain}\n")
+                              f"({_INTERESTING[code]}){where}{_phase_note()}"
+                              f"{chain}\n")
             except Exception:
                 pass
         return 0  # EXCEPTION_CONTINUE_SEARCH - the crash proceeds normally
@@ -422,7 +445,8 @@ def _report_cxx(k32, record):
         if raw:
             peek = " object " + raw[:32].hex()
     _state["cxx_count"] += 1
-    text = (f"[ANTs] C++ exception 0x{_CXX_CODE:08X} (magic 0x{info[0]:X}) "
+    text = (f"[ANTs] C++ exception 0x{_CXX_CODE:08X} (magic 0x{info[0]:X})"
+            f"{_phase_note()} "
             f"type {type_name or '<?> (type descriptor unreadable)'}"
             + (f" message guess {message!r}" if message else "")
             + peek
@@ -491,8 +515,18 @@ def _term_stub(k32, name, original, keep):
     @proto
     def stub(*a):
         chain = _caller_chain(k32)
-        _emit(f"\n[ANTs] TERMINATION via {name}; call chain: "
+        _emit(f"\n[ANTs] TERMINATION via {name}{_phase_note()}; call chain: "
               + (" <- ".join(chain) or "unresolved") + "\n")
+        if os.environ.get("ANTS_NR_BLOCK_TERMINATION") == "1":
+            # A/B knob (opt-in): do not let the runtime kill the process -
+            # return to its caller instead, so the node can fail LOUDLY and
+            # ComfyUI survives to print the reason. `abort`/fast-fail are
+            # never blocked (the CRT does not expect them to return).
+            if name not in ("abort", "RaiseFailFastException"):
+                _emit(f"[ANTs] ANTS_NR_BLOCK_TERMINATION=1: {name} did NOT "
+                      "terminate the process; the caller resumes (state after "
+                      "this point is undefined - send this line)\n")
+                return None if ret is None else ret()   # 0 = "success"
         return real(*a)
 
     keep.append(stub)
@@ -655,7 +689,8 @@ def install_ntdll_terminate_detour():
             chain = _caller_chain(k32)
             _emit("\n[ANTs] TERMINATION via ntdll!NtTerminateProcess"
                   f"(handle=0x{int(handle or 0) & 0xFFFFFFFFFFFFFFFF:X}, "
-                  f"status=0x{status & 0xFFFFFFFF:08X}); call chain: "
+                  f"status=0x{status & 0xFFFFFFFF:08X}){_phase_note()}; "
+                  "call chain: "
                   + (" <- ".join(chain) or "unresolved") + "\n")
             return stolen_fn(handle, status)
 

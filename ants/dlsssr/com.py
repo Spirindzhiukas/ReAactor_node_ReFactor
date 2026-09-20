@@ -7,6 +7,7 @@ headers (ID3D12Device::CreateCommittedResource = 27, etc.).
 
 import ctypes
 
+from . import crashlog
 from .errors import DlssSrError
 
 _S_OK = 0
@@ -48,10 +49,22 @@ class ComObject:
 
     def call(self, slot, argtypes, restype, *args):
         fn = self._slot_proto(slot, argtypes, restype)
-        return fn(self.ptr, *args)
+        # the crash box prints the in-flight label on any TERMINATION /
+        # exception line, so a kill inside a call is not anonymous
+        previous = crashlog.phase()
+        crashlog.set_phase(self.label)
+        try:
+            return fn(self.ptr, *args)
+        finally:
+            crashlog.set_phase(previous)
 
     def call_hr(self, slot, argtypes, *args, what="COM call"):
-        hr = self.call(slot, argtypes, ctypes.c_int32, *args)
+        previous = crashlog.phase()
+        crashlog.set_phase(f"{self.label}.{what}")
+        try:
+            hr = self.call(slot, argtypes, ctypes.c_int32, *args)
+        finally:
+            crashlog.set_phase(previous)
         hresult_check(hr, f"{self.label}.{what}")
         return hr
 

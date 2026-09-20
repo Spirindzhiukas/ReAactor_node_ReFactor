@@ -461,6 +461,17 @@ def _rig_evidence_check():
         (nr / "nvngx_dlssnr_RenoDX_4000_series_friendly.dll").write_bytes(twins)
         (nr / "neuroframe_caller.dll").write_bytes(b"helper")
         (nr / "neuroframe_engine.dll").write_bytes(b"helper")
+        # the bat passes NO arguments: the export reader must still be found.
+        # Rig 21:17 proved it was not - args.repo was "" there, so every helper
+        # came out "not a neuroframe engine" AND the report shouted a false
+        # "NO helper build on disk exports the CUDA entry points" alarm.
+        import shutil
+        import subprocess
+        for rel in (("tools", "collect_rig_evidence.py"),
+                    ("ants", "dlssnr", "peexports.py"),
+                    ("ants", "dlsssr", "versions.py")):
+            (repo / Path(*rel[:-1])).mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPO / Path(*rel), repo / Path(*rel))
         out = root / "out"
         with contextlib.redirect_stdout(io.StringIO()):
             code = module.main(["--repo", str(repo), "--dlss-root", str(dlss),
@@ -510,9 +521,23 @@ def _rig_evidence_check():
                      and "load_pack_cuda_luid" in collector_src
                      and "CUDA_ERROR_OUT_OF_MEMORY" in collector_src
                      and "--disable-pinned-memory" in collector_src)
+        out2 = root / "out-auto"
+        proc = subprocess.run(
+            [sys.executable, str(repo / "tools" / "collect_rig_evidence.py"),
+             "--dlss-root", str(dlss), "--comfy-root", str(root),
+             "--out", str(out2)], cwd=str(root), capture_output=True,
+            text=True, timeout=300)
+        run2 = sorted(d for d in out2.iterdir() if d.is_dir())[-1]
+        report2 = (run2 / "rig_evidence.txt").read_text()
+        auto_inventory = (proc.returncode == 0
+                          and "HELPER / ENGINE INVENTORY" in report2
+                          and "peexports.py not found" not in report2
+                          and "export table not read" not in report2
+                          and "NOT loaded" not in report2
+                          and "not a neuroframe engine" in report2)
         return (code == 0 and self_contained and audit and helper_section
                 and auto and guard and outside and offsets and inlined
-                and cuda_view
+                and auto_inventory and cuda_view
                 and "2099-01-01.1" in report          # deployment marker
                 and "nvngx_dlssnr.dll" in report      # runtime inventory
                 and "sha256(first 8)" in report
@@ -601,6 +626,64 @@ def _collector_bat_check():
             and b"THE ONLY BLOCK YOU MAY EDIT" in raw
             and b"READ-ONLY" in raw
             and not risky)
+
+
+def _crash_phase_check():
+    """set_phase/phase + the label reaching every kill line, and the wires
+    that set it around the NGX / engine / vtable calls."""
+    from ants.dlsssr import crashlog
+    from ants.dlsssr import com, ngx
+    previous = crashlog.phase()
+    crashlog.set_phase("dlss5nr_process_cuda_v6")
+    named = (crashlog.phase() == "dlss5nr_process_cuda_v6"
+             and "dlss5nr_process_cuda_v6" in crashlog._phase_note())
+    crashlog.set_phase(previous)
+    restored = crashlog.phase() == previous
+
+    labels = []
+    real = crashlog.set_phase
+
+    def spy(text):
+        labels.append(text)
+        return real(text)
+    crashlog.set_phase = spy
+    try:
+        bound = ngx._tagged_call(lambda *a: 7, "NVSDK_NGX_D3D12_EvaluateFeature")
+        called = bound() == 7
+    finally:
+        crashlog.set_phase = real
+    ngx_tagged = called and labels[:2] == ["EvaluateFeature", ""]
+
+    labels.clear()
+    crashlog.set_phase = spy
+    real_proto = com.ComObject._slot_proto
+    poked = {"n": 0}
+
+    def fake_proto(self, slot, argtypes, restype):
+        def slot_call(*a):
+            poked["n"] += 1
+            return 0
+        return slot_call
+    com.ComObject._slot_proto = fake_proto
+    try:
+        fake = com.ComObject(0x1000, "ID3D12Device")
+        hr = fake.call_hr(0x2A, [], what="CreateFence")
+    finally:
+        com.ComObject._slot_proto = real_proto
+        crashlog.set_phase = real
+    com_tagged = (hr == 0 and poked["n"] == 1
+                  and any("CreateFence" in entry for entry in labels)
+                  and labels[-1] == "")
+
+    crashlog_src = (REPO / "ants" / "dlsssr" / "crashlog.py").read_text()
+    lines_pinned = (crashlog_src.count("_phase_note()") >= 4
+                    and "def set_phase" in crashlog_src
+                    and "def phase" in crashlog_src
+                    and "ANTS_NR_BLOCK_TERMINATION" in crashlog_src)
+    core_src = (REPO / "ants" / "dlssnr" / "core.py").read_text()
+    return (named and restored and ngx_tagged and com_tagged and lines_pinned
+            and "_tagged" in core_src
+            and "crashlog.set_phase" in (REPO / "ants" / "dlsssr" / "com.py").read_text())
 
 
 def _cuda_multigpu_tool_check():
@@ -1031,6 +1114,10 @@ def main():
           (REPO / "docs" / "MODELS_DLSS_LAYOUT.md").is_file()
           and "staged/" in (REPO / "docs" / "MODELS_DLSS_LAYOUT.md").read_text()
           and "Merserk_DLLS" in (REPO / "docs" / "MODELS_DLSS_LAYOUT.md").read_text())
+    check("crashlog: the black box names the call that was IN FLIGHT - the "
+          "rig's TERMINATION lines were only libffi/_ctypes/python frames, so "
+          "the one missing fact was WHICH export the process died in",
+          _crash_phase_check())
     check("crashlog: the C++ throw reporter is wired into the armed "
           "first-chance handler and still lets the exception unwind",
           "_report_cxx(k32, record)" in crashlog_src

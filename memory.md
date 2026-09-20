@@ -919,3 +919,41 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   applies.
 - Suite: **413 checks** (dlsssr 90, native_flow 51, dlssnr_bridge 101) +
   pyflakes/scope/smoke green.
+
+### 2026-09-20 (owner evidence 21:17) — ONE GPU (so #15255 is out), the LUID read is verified, and the kill is captured
+- **The rig is single-GPU**: collector's new `CUDA / MULTI-GPU VIEW` and
+  `check_cuda_multigpu.bat` both report one RTX 4090 (LUID
+  `00000000:000497ea`) → the #15255 / PR #15451 multi-GPU CUDA bug CANNOT
+  apply here; the `--cuda-device 0` A/B is dropped from the ladder. The
+  adapter-by-LUID fix stays (it is what makes `--cuda-device N` safe at all).
+- **The LUID fix is VERIFIED against NVIDIA's own line**: `nvngx.log` says
+  `Found matching adapter with NVAPI physical GPU handle: 0xc00 and LUID:
+  { 0x0, 0x497ea }` = exactly what our reader prints. (The old `desc+0x12C`
+  read produced a bogus pair; 0x128 is right.)
+- **The kill is captured with a status**: `native-crash.log` shows four
+  caught `0xE06D7363` C++ throws, then
+  `TERMINATION via ntdll!NtTerminateProcess(handle=0x0, status=0x2)` (invalid
+  handle → fails) and `(handle=0xFFFFFFFFFFFFFFFF, status=0x2)` = NtCurrentProcess
+  → **the process is terminated with exit code 2**, from inside one of our
+  ctypes calls (chain is libffi → _ctypes → python only).
+  OPEN: did ComfyUI actually die at 20:39:50? If yes, the 20:40 legacy "by
+  LUID" failure happened in a FRESH process and is a real bug, not the wedged
+  state. Asked the owner.
+- **New diagnostics**: every ctypes call into the engine (`dlss5nr_*`), NGX
+  (`NVSDK_NGX_*`, via `NgxModule.fn`/`fn_raw`) and the D3D12 vtables
+  (`ComObject.call`/`call_hr`) sets `crashlog.set_phase(...)`, and every
+  kill/exception line prints `[in-flight call: ...]` — the next report says
+  WHICH call the process died in. Plus `ANTS_NR_BLOCK_TERMINATION=1`
+  (opt-in A/B): the trap logs and refuses `ExitProcess`/`TerminateProcess`
+  (`abort`/fast-fail never blocked) so the node can fail loudly.
+- **Collector bug found + fixed (owner-facing false alarm)**: with no
+  arguments (how the bat calls it) `load_pack_peexports(args.repo)` got `""`,
+  so the export reader was missing → EVERY helper printed "not a neuroframe
+  engine" + `[!] NO helper build on disk exports the CUDA entry points` (a
+  false alarm; the node's own `find_engine_dll` had named a CUDA-capable
+  engine at 20:39). Now the resolved `repo` is passed, the report says loudly
+  when no reader was loaded, and `test_dlsssr` runs the collector the way the
+  bat does (subprocess, no `--repo`, neutral cwd) — verified to fail with the
+  bug and pass with the fix.
+- Suite: **414 checks** (dlsssr 91, native_flow 51, dlssnr_bridge 101) +
+  swapper_state 13 + pyflakes/scope/smoke green.
