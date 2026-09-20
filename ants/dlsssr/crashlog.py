@@ -328,14 +328,23 @@ def install_ntdll_terminate_detour():
             return
         addr = int(addr)
         # Win10/11 stub: mov r10,rcx (4C 8B D1); mov eax,<ssn> (B8 ...);
-        # ...; syscall (0F 05); ret (C3). Steal whole instructions only.
-        raw = ctypes.string_at(addr, 20)
-        end = raw.find(b"\x0f\x05\xc3")
-        if raw[:3] != b"\x4c\x8b\xd1" or raw[3] != 0xB8 or end < 8:
-            _emit("[ANTs] ntdll detour SKIPPED: prologue is not the standard "
-                  f"syscall stub ({raw[:8].hex()}) - report this line\n")
+        # optionally build-specific check bytes; syscall (0F 05); ret (C3).
+        # Steal whole instructions up to and including the syscall - the
+        # checks between mov-eax and syscall are rsp/flag-relative and copy
+        # verbatim - and ensure the stolen block ends with a ret so the
+        # kernel's return comes back to our trampoline.
+        raw = ctypes.string_at(addr, 32)
+        if raw[:3] != b"\x4c\x8b\xd1" or raw[3] != 0xB8:
+            _emit("[ANTs] ntdll detour SKIPPED: prologue is not 'mov r10,rcx; "
+                  f"mov eax,<ssn>' ({raw[:32].hex()}) - report this line\n")
             return
-        stolen = raw[:end + 3]
+        syscall = raw.find(b"\x0f\x05")
+        if not (8 <= syscall <= 24):
+            _emit("[ANTs] ntdll detour SKIPPED: no syscall instruction "
+                  f"within reach ({raw[:32].hex()}) - obfuscated stub build; "
+                  "report this line\n")
+            return
+        stolen = raw[:syscall + 2] + b"\xc3"
         k32.VirtualAlloc.restype = ctypes.c_void_p
         k32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                      ctypes.c_uint32, ctypes.c_uint32]

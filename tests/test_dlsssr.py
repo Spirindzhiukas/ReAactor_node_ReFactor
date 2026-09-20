@@ -289,7 +289,8 @@ def main():
           "install_ntdll_terminate_detour" in crashlog_src
           and "install_ntdll_terminate_detour" in ngx_src
           and "\\x4c\\x8b\\xd1" in crashlog_src
-          and "\\x0f\\x05\\xc3" in crashlog_src
+          and "\\x0f\\x05" in crashlog_src
+          and "no syscall instruction" in crashlog_src
           and "jmp rax" in crashlog_src)
     check("crashlog: IAT termination tracer walks imports and patches the "
           "termination APIs (flat-PE fixture, fake kernel32)",
