@@ -6,6 +6,7 @@ rem  Shows which NGX backend a dll binds and which termination APIs it
 rem  imports (the silent-kill suspects).
 rem
 rem  Usage: DRAG ANY DLL ONTO THIS FILE (or run it and paste a path).
+rem  Full listing mode is always on (every imported dll is shown).
 rem
 rem  ============== THE ONLY BLOCK YOU MAY EDIT ==============
 set "PY=C:\ComfyUI_PORTABLE\python_embeded\python.exe"
@@ -19,7 +20,7 @@ if not defined TARGET goto usage
 if not exist "%SCRIPT%" echo [X] tool missing: "%SCRIPT%" - copy list_imports.py there, or fix the SCRIPT line in this bat & goto fail
 if not exist "%TARGET%" echo [X] dll not found: "%TARGET%" & goto fail
 
-"%PY%" "%SCRIPT%" "%TARGET%" > "%TEMP%\ants_imports.txt" 2>&1
+"%PY%" "%SCRIPT%" "%TARGET%" --all > "%TEMP%\ants_imports.txt" 2>&1
 type "%TEMP%\ants_imports.txt"
 echo.
 echo [OK] result also copied to the clipboard - paste it all back to the chat.
