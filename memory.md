@@ -1146,7 +1146,8 @@ versions on the owner rig).
   watching VRAM and process handles (per-prompt re-init ~1 s; reuse the size-keyed session only if that
   re-init is unintended); (3) keep the literal-name staging rule (canonical `nvngx_dlssnr.dll` staged
   copy + the sibling-name warning); (4) still-image depth A/B: flat zero depth (current) vs a real
-  estimated depth map for `DLSSNR.Depth` (a normal ComfyUI depth model feeds the NR input). Sonnet:
+  estimated depth map for `DLSSNR.Depth` - note the native node has NO depth socket today (the guide is
+  zero-filled), so that A/B needs an optional depth input first. Sonnet:
   "I wouldn't revert one to find out" which of the two shipped bugs caused the original C++ exception -
   both were masked by silent behaviour, and removing the silence is what enabled progress.
 - **Shipped in the same commit** (the flag fix itself is the entry above):

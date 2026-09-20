@@ -308,8 +308,10 @@ python and never registers callbacks.
 - [ ] **~50-prompt soak with `ANTS_NR_SOAK=1`** (item 2): process handles + torch VRAM should stay
       flat. Per-prompt NGX re-init (~1 s - ComfyUI makes a new node object per prompt) is expected;
       `ANTS_NR_SESSION_CACHE=1` A/Bs reuse across prompts (default OFF).
-- [ ] **Still-image depth A/B** (item 4): flat zero depth (current) vs a real estimated depth map for
-      `DLSSNR.Depth` - owner-run once the smoke test is clean.
+- [ ] **Still-image depth A/B** (item 4): today `DLSSNR.Depth` is zero-filled, and the native node has
+      no depth socket - this needs an OPTIONAL depth-map input (default absent = flat zero, so existing
+      workflows are untouched) before it can be A/B'd. Implement on owner request, then compare flat vs
+      an estimated depth map.
 - [x] Literal-name staging rule stays (item 3): canonical `nvngx_dlssnr.dll` staged copy + the
       sibling-name warning on stage - no change needed.
 - [ ] Fix any owner-reported issues from the test round above (priority over new features).
