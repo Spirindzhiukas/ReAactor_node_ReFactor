@@ -93,6 +93,21 @@ def main():
     from ants.dlsssr import ngx
     check("ngx: API version 0x15 + feature ids 1/18",
           ngx.NGX_VERSION_API == 0x15 and ngx.FEATURE_SR == 1 and ngx.FEATURE_NR == 18)
+    ngx_src = (REPO / "ants" / "dlsssr" / "ngx.py").read_text()
+    # ---- run 21 countermeasures (Merserk host contract) ----
+    check("ngx: NR preloads the driver core into the process (run 21)",
+          "NGX core preloaded" in ngx_src and "locate_ngx_core()" in ngx_src)
+    check("ngx: explicit _nvngx.dll override next to the snippet wins",
+          '"_nvngx.dll"' in ngx_src and "local_core" in ngx_src)
+    check("ngx: Init_Ext-first with the 0x13..0x20 version sweep on NR",
+          "Init_Ext-first" in ngx_src and "range(0x13, 0x21)" in ngx_src
+          and "classic 4-arg Init accepted" in ngx_src)
+    check("ngx: snippet callbacks are an env-gated experiment, pinned",
+          "ANTS_NR_RUNTIME_CALLBACKS" in ngx_src and "_cb_keep" in ngx_src
+          and "SetRuntimeParamsCallback" in ngx_src)
+    check("ngx: session close frees the core AFTER the snippet (reverse order)",
+          ngx_src.find("self.module.close()") < ngx_src.find(
+              "Reverse load order"))
     from ants.dlsssr.sr import PERF_QUALITY, PERF_RATIO, DLSS_RENDER_PRESETS
     check("sr: mode ratios fixed (DLAA 1.0 .. UP 3.0)",
           PERF_RATIO[5] == 1.0 and PERF_RATIO[3] == 3.0 and PERF_RATIO[1] > 1.72)

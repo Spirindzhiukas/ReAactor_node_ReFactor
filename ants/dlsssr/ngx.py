@@ -7,7 +7,16 @@ One class serves both providers, because the API surface is identical:
   ``NVSDK_NGX_FeatureCommonInfo``;
 - **snippet direct** (`nvngx_dlssnr.dll` loaded as the module) — used for
   NR: that runtime exports the whole NVSDK_NGX_D3D12 API itself and is
-  handed our own parameter object.
+  handed our own parameter object. Run 21 (Merserk's proven C++ host,
+  probed from his binaries): his engine hard-requires the driver core
+  ``_nvngx.dll`` in-process, inits the snippet via ``Init_Ext`` across API
+  versions ``0x13..0x20``, and snippet hosts wire the snippet's
+  ``Set{RuntimeParams,OverrideStatus,TelemetryEvaluate}Callback`` exports.
+  Our NR path therefore preloads the core (presence for the snippet's
+  evaluate path; ``local _nvngx.dll`` override first, then the driver
+  store, exactly like his ``runtime\_nvngx.dll`` override), tries
+  ``Init_Ext`` across ``0x13..0x20`` (classic 4-arg last resort), and can
+  register no-op callbacks when ``ANTS_NR_RUNTIME_CALLBACKS=1``.
 
 Every NGX call is routed through the generated ``nvngx.dll`` thunk shim
 (``shim.py``): slot 0 is re-pointed at the real function immediately before
@@ -251,6 +260,56 @@ class NgxSession:
         self._create = None
         self._evaluate = None
         self._release = None
+        self._core_handle = None
+        self._cb_keep = []
+
+        # Run 21 (Merserk probe): the PROVEN host of this snippet - his C++
+        # engine - hard-REQUIRES the NGX driver core (_nvngx.dll) loaded
+        # in-process ("Could not load NVIDIA NGX core _nvngx.dll..."), inits
+        # the snippet via Init_Ext across API versions 0x13..0x20, and the
+        # snippet exports Set{RuntimeParams,OverrideStatus,TelemetryEvaluate}
+        # Callback that a snippet host is expected to wire. Our NR path did
+        # NONE of the three: no core in-process, classic-Init-first, no
+        # callbacks - runs 14-20 died at the first EvaluateFeature.
+        if use_own_parameters:
+            core_path = None
+            local_core = os.path.join(os.path.dirname(module_path), "_nvngx.dll")
+            if os.path.isfile(local_core):
+                core_path = local_core  # explicit override next to the dll
+            else:
+                try:
+                    core_path = locate_ngx_core()
+                except DlssSrError:
+                    core_path = None
+            if core_path and os.path.normcase(os.path.abspath(core_path)) != \
+                    os.path.normcase(os.path.abspath(module_path)):
+                try:
+                    # PRESENCE, not use: if the snippet resolves the core
+                    # (GetModuleHandle) on its evaluate path, it must already
+                    # be in-process; his engine treats it as a hard dependency.
+                    self._core_handle = win32.load_library(core_path)
+                    _log().status(f"[ANTs] NGX core preloaded: {core_path}")
+                except Exception as exc:
+                    _log().status(f"[ANTs] NGX core preload skipped: {exc}")
+            if os.environ.get("ANTS_NR_RUNTIME_CALLBACKS"):
+                # EXPERIMENT (run 22, env-gated): register no-op callbacks on
+                # the snippet the way a snippet host would. A NULL callback
+                # dereference inside the evaluate path is one candidate cause
+                # of the first-evaluate death; this discriminates cheaply.
+                cb_type = ctypes.CFUNCTYPE(ctypes.c_int)
+                for name in ("NVSDK_NGX_SetRuntimeParamsCallback",
+                             "NVSDK_NGX_SetOverrideStatusCallback",
+                             "NVSDK_NGX_SetTelemetryEvaluateCallback"):
+                    if not self.module.has_export(name):
+                        continue
+                    def _nop(_name=name):
+                        _log().status(f"[ANTs] snippet callback fired: {_name}")
+                        return 1
+                    cb = cb_type(_nop)
+                    setter = self.module.fn(name, [_CVOID])
+                    setter(ctypes.cast(cb, _CVOID))
+                    self._cb_keep.append(cb)  # pin the trampoline
+                    _log().status(f"[ANTs] {name} <- no-op registered")
 
         app_data = app_data_path or os.path.join(writable_cache_dir("appdata"), "logs")
         os.makedirs(app_data, exist_ok=True)
@@ -269,27 +328,35 @@ class NgxSession:
         init4 = self.module.fn("NVSDK_NGX_D3D12_Init",
                                [_CVOID, _CVOID, _CVOID, _CI32])
 
-        _log().status(f"NGX init -> {os.path.basename(module_path)} "
-                      f"({'classic Init' if use_own_parameters else 'Init_Ext-first'})")
+        _log().status(f"NGX init -> {os.path.basename(module_path)} (Init_Ext-first)")
         def try_init():
+            # Init_Ext first for BOTH providers: DVT's rig-proven NR flow,
+            # and run 21 - Merserk's proven host inits the snippet via
+            # Init_Ext too ("DLSSNR snippet Init_Ext via caller shim").
+            # Classic 4-arg stays as the last-resort fallback.
+            versions = [NGX_VERSION_API]
             if use_own_parameters:
-                # Snippet-direct runtimes (ReShade/RenoDX builds) target the
-                # classic 4-arg Init - DVT's rig-proven NR flow. Init_Ext is
-                # only the fallback (its extra arg may be ignored or worse).
-                hr4 = init4(ctypes.c_void_p(app_id), app_data_wide,
-                            gpu.device.ptr, ctypes.c_int32(NGX_VERSION_API))
-                if hr4 == 1:
+                # Merserk's engine spans 0x13..0x20 ("NGX core initialization
+                # failed for API versions 0x13..0x20") - sweep the window.
+                versions += [v for v in range(0x13, 0x21)
+                             if v != NGX_VERSION_API]
+            last = 0
+            for sdk in versions:
+                hr = init_ext(ctypes.c_void_p(app_id), app_data_wide,
+                              gpu.device.ptr, ctypes.c_int32(sdk), info.ptr)
+                if hr == 1:
+                    if sdk != NGX_VERSION_API:
+                        _log().status(
+                            f"[ANTs] Init_Ext accepted sdkVersion 0x{sdk:X}")
                     return 1
-            hr = init_ext(ctypes.c_void_p(app_id), app_data_wide,
-                          gpu.device.ptr, ctypes.c_int32(NGX_VERSION_API), info.ptr)
-            if hr == 1:
+                last = hr
+            hr4 = init4(ctypes.c_void_p(app_id), app_data_wide,
+                        gpu.device.ptr, ctypes.c_int32(NGX_VERSION_API))
+            if hr4 == 1:
+                _log().status(
+                    "[ANTs] classic 4-arg Init accepted (Init_Ext rejected)")
                 return 1
-            if not use_own_parameters:
-                hr4 = init4(ctypes.c_void_p(app_id), app_data_wide,
-                            gpu.device.ptr, ctypes.c_int32(NGX_VERSION_API))
-                if hr4 == 1:
-                    return 1
-            return hr  # last failure, for the error message
+            return last  # last failure, for the error message
 
         hr = try_init()
         _log().status(f"NGX init <- hr=0x{hr & 0xFFFFFFFF:08X}")
@@ -406,3 +473,9 @@ class NgxSession:
             self._own_parameters = None
         self.params = None
         self.module.close()
+        # Reverse load order: snippet (module) first, THEN the preloaded
+        # driver core, then drop the callback trampolines.
+        if self._core_handle:
+            win32.free_library(self._core_handle)
+            self._core_handle = None
+        self._cb_keep = []

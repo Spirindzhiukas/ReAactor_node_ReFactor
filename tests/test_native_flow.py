@@ -523,9 +523,12 @@ def main():
     sess = DlssNrSession(gpu, W, H, "fake/nvngx_dlssnr.dll", style="Natural", intensity=0.8)
     FakeNgxModule.own_store = sess.ngx.params.store
     creates = [entry for entry in RECORD if entry[0] == "CreateFeature"]
-    check("nr: classic Init first for snippet-direct (sdk 0x15) precedes CreateFeature(18)",
-          any(entry[0] == "Init4" and entry[1] == 0x15 for entry in RECORD)
+    check("nr: Init_Ext first (sdk 0x15) precedes CreateFeature(18) - run 21 order",
+          any(entry[0] == "Init_Ext" and entry[1] == 0x15 for entry in RECORD)
           and creates and creates[0][1] == FEATURE_NR)
+    init_exts = [entry for entry in RECORD if entry[0] == "Init_Ext"]
+    check("nr: Init_Ext is attempted exactly once when accepted at 0x15 (no sweep)",
+          len(init_exts) == 1 and not any(entry[0] == "Init4" for entry in RECORD))
 
     rng = random.Random(7)
     payload = bytes(rng.randrange(256) for _ in range(W * H * 4))
