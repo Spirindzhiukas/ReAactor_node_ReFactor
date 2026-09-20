@@ -72,6 +72,24 @@ def _fp16_to_rgba8(payload, width, height):
     return (arr * 255.0 + 0.5).astype(np.uint8).tobytes()
 
 
+def fp16_anomalies(payload):
+    """(nonfinite, out_of_range, values) counts for an RGBA16F readback.
+
+    The RGBA8 conversion below CLAMPS (and casts), so an Inf, a NaN or a wildly
+    saturated value would reach the user as 0 or 255 without a word - the host
+    clamp is exactly what hides an engine that produces garbage. The node asks
+    for this scan on the FIRST frame of a prompt only
+    (``evaluate(check_anomalies=True)``), so a running session never pays for
+    a whole-payload pass.
+    """
+    arr = np.frombuffer(payload, dtype=np.float16)
+    finite = np.isfinite(arr)
+    nonfinite = int(arr.size - int(finite.sum()))
+    vals = arr[finite].astype(np.float32)
+    out_of_range = int(((vals < 0.0) | (vals > 1.0)).sum())
+    return nonfinite, out_of_range, int(arr.size)
+
+
 class DlssNrSession:
     """One created NR feature (1:1 enhancement); evaluate() runs one frame."""
 
@@ -86,6 +104,11 @@ class DlssNrSession:
 
         self.gpu = gpu
         self.w, self.h = int(width), int(height)
+        # frames this session has produced (soak line: a reused session's count
+        # keeps climbing across prompts, a per-prompt session restarts at 1)
+        self.evaluates = 0
+        # last fp16_anomalies() tuple, filled only when the caller asked for it
+        self.last_output_anomalies = None
         self.settings = {
             "style": _STYLE_TO_INT.get(style, 0),
             "intensity": float(intensity),
@@ -294,8 +317,16 @@ class DlssNrSession:
         p.set_f32("DLSSNR.FaceSkinProtection", s["face_skin_protection"])
         p.set_f32("DLSSNR.GrainPreservation", s["grain_preservation"])
 
-    def evaluate(self, color_rgba, reset=True):
-        """Enhance one RGBA8 frame 1:1; returns the enhanced RGBA8 frame."""
+    def evaluate(self, color_rgba, reset=True, check_anomalies=False):
+        """Enhance one RGBA8 frame 1:1; returns the enhanced RGBA8 frame.
+
+        ``check_anomalies`` scans the RGBA16F readback for NaN/Inf and for
+        out-of-range values before they are clamped away (see
+        :func:`fp16_anomalies`); the result lands in
+        ``self.last_output_anomalies``. The node asks for it on the first frame
+        of a prompt - see ``_check_native_output``.
+        """
+        self.evaluates += 1
         expected = self.w * self.h * 4
         if len(color_rgba) != expected:
             raise DlssSrError(
@@ -357,8 +388,10 @@ class DlssNrSession:
         # exactly this. Our own copies/barriers live in the other list, so a
         # runtime that poisons its list cannot take the frame upload with it.
         self.gpu.runtime_submit_and_wait()
-        return _fp16_to_rgba8(self.gpu.readback_texture(self.output, uav),
-                              self.w, self.h)
+        raw = self.gpu.readback_texture(self.output, uav)
+        self.last_output_anomalies = (fp16_anomalies(raw) if check_anomalies
+                                      else None)
+        return _fp16_to_rgba8(raw, self.w, self.h)
 
     def close(self):
         self.ngx.close()

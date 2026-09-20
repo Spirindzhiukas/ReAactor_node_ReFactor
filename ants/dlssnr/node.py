@@ -100,6 +100,117 @@ def decide_cuda_acceleration(mode: str, torch_cuda_available: bool,
     return True, "CUDA device-pointer path"
 
 
+# --- the output smoke test + the soak instrument (2026-09-21) ---------------
+# The native host runs end to end now (owner run 01:50: three prompts, styles
+# 0/1/2, CreateFeature and EvaluateFeature both hr=0x00000001, visibly different
+# output per mode). Two silent failures cost the nights before that, so the two
+# things a clamp cannot hide are checked out loud on the first native frame:
+# non-finite values (an fp16 overflow arrives as inf, a broken engine as NaN)
+# and a payload that comes back byte-identical (the engine did nothing).
+def rgba_bytes_from_rgb8(rgb8):
+    """(H, W, 3) uint8 -> the (H, W, 4) RGBA8 payload the NR host uploads.
+
+    Pure numpy on purpose: the smoke test builds a synthetic image and checks
+    this path where no GPU exists, and the tensor wrapper around it stays a
+    two-liner.
+    """
+    h, w = rgb8.shape[0], rgb8.shape[1]
+    rgba = np.empty((h, w, 4), dtype=np.uint8)
+    rgba[:, :, :3] = rgb8
+    rgba[:, :, 3] = 255
+    return rgba.tobytes()
+
+
+# A few clipped texels are normal: the host maps the engine's RGBA16F readback
+# into RGBA8 by clamping. A frame where a real share of the payload saturates
+# means the engine left its [0, 1] contract, and that is worth a line.
+NR_OUT_OF_RANGE_FRACTION = 0.01
+
+
+def native_output_verdict(same_as_input, nonfinite, clipped=0, values=0):
+    """(level, text) for the first native frame - the output smoke test.
+
+    ``same_as_input``: the RGBA8 payload the engine returned is byte-identical
+    to the one it was given. ``nonfinite``: non-finite values (NaN/Inf) in the
+    RGBA16F readback, before the host clamps them into range. ``clipped`` /
+    ``values``: how many of the scanned readback values sat outside [0, 1].
+    The caller logs, never raises: intensity 0 is a legitimate no-op and the
+    user still gets a frame either way, now with the reason attached.
+    """
+    if nonfinite:
+        return ("error",
+                f"[ANTs] the native NR output holds {int(nonfinite)} non-finite "
+                "values (NaN/Inf) - that is an engine (or driver) fault, not a "
+                "look. The frame is shown clamped; report this line.")
+    if values and clipped > NR_OUT_OF_RANGE_FRACTION * values:
+        return ("warning",
+                f"[ANTs] {int(clipped)} of {int(values)} native NR readback "
+                "values were outside [0, 1] and got clamped - the engine left "
+                "its range. Report this line.")
+    if same_as_input:
+        return ("warning",
+                "[ANTs] the native NR output is byte-identical to its input - "
+                "the engine did nothing for this frame. Expected only when "
+                "intensity is 0 or the style is a no-op; otherwise report this "
+                "line.")
+    return ("ok", "")
+
+
+def session_cache_enabled():
+    """``ANTS_NR_SESSION_CACHE=1`` - keep the NR session across prompts.
+
+    ComfyUI builds a FRESH node instance per prompt, so the size-keyed cache in
+    :meth:`_native_session_for` only spans the frames of one queue item: every
+    prompt pays Init_ProjectID + provider load + CreateFeature again (owner run
+    01:50: all of it inside a 1.6-1.9 s prompt). The key itself is unchanged
+    (dll, size, preset), so a workflow change still rebuilds the session.
+    OFF by default: a session that outlives a prompt is a lifecycle change, and
+    the run that made this path work used per-prompt init - the owner can A/B
+    it and watch the soak line.
+    """
+    return os.environ.get("ANTS_NR_SESSION_CACHE", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def soak_enabled():
+    """``ANTS_NR_SOAK=1`` - one line per run with handles + torch VRAM.
+
+    The 50-prompt soak: both numbers should stay flat. A per-prompt init that
+    leaked a handle or a hundred megabytes would show long before prompt 50.
+    """
+    return os.environ.get("ANTS_NR_SOAK", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def soak_line(uses=None):
+    """Handles + torch VRAM as one line (see :func:`soak_enabled`)."""
+    from ..dlsssr import win32
+    parts = []
+    handles = win32.process_handle_count()
+    if handles is not None:
+        parts.append(f"process handles {handles}")
+    try:
+        import torch as _torch
+        if _torch.cuda.is_available():
+            parts.append("torch VRAM %.0f MiB allocated, %.0f MiB reserved" % (
+                _torch.cuda.memory_allocated() / 1048576.0,
+                _torch.cuda.memory_reserved() / 1048576.0))
+    except Exception:
+        pass
+    if uses is not None:
+        parts.append(f"NR session frames {int(uses)}")
+    return "[ANTs] soak: " + (", ".join(parts) if parts
+                              else "no data on this host")
+
+
+# Cross-prompt session cache: key -> (session, gpu). Only touched when
+# ANTS_NR_SESSION_CACHE=1. A dict, not one slot, so a workflow that runs two
+# sizes (or two engines) never has ONE node close the OTHER node's feature:
+# entries are evicted only when their own session is closed (`_close_native`,
+# `_drop_session`).
+_NR_SESSION_CACHE = {}
+
+
 class ReFactorDLSS5Enhancer:
     def __init__(self):
         self.device = model_management.get_torch_device()
@@ -110,6 +221,8 @@ class ReFactorDLSS5Enhancer:
         self.native_session = None
         self.native_key = None
         self.native_dll_path = None
+        self._native_checked = False     # first native frame of this run
+        self._soak_logged = False
         self._nr_preset = 0
         self._sr_choice = "auto"
         self._sr_preset = "Default"
@@ -243,7 +356,30 @@ class ReFactorDLSS5Enhancer:
         "Layout, and what is safe to delete: docs/MODELS_DLSS_LAYOUT.md"
     )
 
+    @staticmethod
+    def _forget_cached(session):
+        """Evict a session that is being closed - the cache must never hand out
+        a closed feature (it is what makes the cross-prompt reuse safe)."""
+        if session is None:
+            return
+        for key, entry in list(_NR_SESSION_CACHE.items()):
+            if entry[0] is session:
+                del _NR_SESSION_CACHE[key]
+
+    def _drop_session(self):
+        """Close this instance's NR session (the device stays; see
+        :meth:`_close_native`)."""
+        if self.native_session is not None:
+            self._forget_cached(self.native_session)
+            try:
+                self.native_session.close()
+            except Exception:
+                pass
+            self.native_session = None
+            self.native_key = None
+
     def _close_native(self):
+        self._forget_cached(self.native_session)
         if self.native_session is not None:
             try:
                 self.native_session.close()
@@ -357,24 +493,57 @@ class ReFactorDLSS5Enhancer:
         return self.native_gpu
 
     def _native_session_for(self, width, height, pass_settings):
-        """Size-keyed native NR session (created lazily, reused across frames)."""
+        """Size-keyed native NR session (created lazily, reused across frames).
+
+        With ``ANTS_NR_SESSION_CACHE=1`` it also survives the PROMPT boundary
+        (ComfyUI makes a new node instance per prompt, so without the switch the
+        whole NGX init runs again for every prompt - see
+        :func:`session_cache_enabled`).
+        """
         key = (self.native_dll_path, width, height, self._nr_preset)
+        cached = _NR_SESSION_CACHE.get(key) if session_cache_enabled() else None
+        if cached is not None:
+            # same dll/size/preset as an earlier PROMPT: reuse its device and
+            # feature as they are - do not build a second device just to drop it
+            if self.native_session is not None and self.native_session is not cached[0]:
+                self._drop_session()
+            self.native_session, self.native_gpu = cached
+            self.native_key = key
+            self.native_session.settings.update(pass_settings)
+            return self.native_session
         self._ensure_native_gpu()
         if self.native_session is None or self.native_key != key:
-            if self.native_session is not None:
-                try:
-                    self.native_session.close()
-                except Exception:
-                    pass
+            self._drop_session()
             from ..dlsssr.nr import DlssNrSession
             self.native_session = DlssNrSession(self.native_gpu, width, height,
                                                 self.native_dll_path,
                                                 nr_preset=self._nr_preset)
             self.native_key = key
+        if session_cache_enabled():
+            _NR_SESSION_CACHE[key] = (self.native_session, self.native_gpu)
         # look controls are re-set by the host before every evaluate; keep
         # the session's dict in sync with the pass plan
         self.native_session.settings.update(pass_settings)
         return self.native_session
+
+    def _check_native_output(self, out, payload, sess):
+        """Log once per prompt whether the engine actually changed the frame.
+
+        See :func:`native_output_verdict`. The counts come from the RGBA16F
+        readback (``sess.last_output_anomalies``) - by the time the frame is a
+        tensor it has passed the host clamp, which is exactly what would hide a
+        NaN or a saturated output.
+        """
+        if self._native_checked:
+            return
+        self._native_checked = True
+        anomalies = getattr(sess, "last_output_anomalies", None) or (0, 0, 0)
+        level, text = native_output_verdict(out == payload, anomalies[0],
+                                            anomalies[1], anomalies[2])
+        if level == "error":
+            logger.error("%s", text)
+        elif level == "warning":
+            logger.warning("%s", text)
 
     def _sr_session_for(self, width, height):
         """Lazily created 1:1 DLAA SR session (pre-denoise pass), keyed by
@@ -405,10 +574,7 @@ class ReFactorDLSS5Enhancer:
         import numpy as _np
         rgb8 = (_np.clip(frame_t.cpu().numpy(), 0.0, 1.0) * 255.0).round().astype(_np.uint8)
         h, w = rgb8.shape[0], rgb8.shape[1]
-        rgba = _np.empty((h, w, 4), dtype=_np.uint8)
-        rgba[:, :, :3] = rgb8
-        rgba[:, :, 3] = 255
-        return rgba.tobytes(), w, h
+        return rgba_bytes_from_rgb8(rgb8), w, h
 
     @staticmethod
     def _rgba8_to_frame(payload, width, height, device):
@@ -668,7 +834,9 @@ class ReFactorDLSS5Enhancer:
                                                     int(frame_t.shape[0]), look)
                     payload, w_px, h_px = self._frame_to_rgba8(frame_t)
                     try:
-                        out = sess.evaluate(payload, reset=do_reset)
+                        out = sess.evaluate(
+                            payload, reset=do_reset,
+                            check_anomalies=not self._native_checked)
                     except Exception as exc:
                         # A failing evaluate can leave the NGX feature (and the
                         # snippet's internal state) mid-flight; run 30 showed a
@@ -693,6 +861,11 @@ class ReFactorDLSS5Enhancer:
                         self._close_native()
                         raise
                     frame_t = self._rgba8_to_frame(out, w_px, h_px, self.device)
+                    self._check_native_output(out, payload, sess)
+                    if soak_enabled() and not self._soak_logged:
+                        self._soak_logged = True
+                        logger.status("%s", soak_line(
+                            getattr(sess, "evaluates", None)))
                 elif use_cuda:
                     if denoise_this:
                         frame = self._pre_denoise_frame(frame, d_model, d_strength)

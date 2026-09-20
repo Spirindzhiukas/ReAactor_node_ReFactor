@@ -161,6 +161,86 @@ def main():
     check("blend: 0.5 sits halfway",
           np.allclose(blend_frames(orig, denoised, 0.5), (orig + denoised) / 2, atol=1e-6))
 
+    # ---- native output smoke test + the soak instrument (pure, GPU-free) ----
+    # Owner run 01:50 proved the native host works (three prompts, styles 0/1/2,
+    # hr=1 from CreateFeature and EvaluateFeature). A smoke test on a synthetic
+    # image is what keeps it honest without a GPU: the payload round-trips, a
+    # real change passes, a no-op and a NaN do not.
+    from ants.dlssnr.node import (native_output_verdict, rgba_bytes_from_rgb8,
+                                  session_cache_enabled, soak_enabled,
+                                  soak_line)
+    import os as _os
+    import pathlib as _pl
+    rng = np.random.default_rng(7)
+    h, w = 24, 32
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    rgb[:, :, 0] = np.linspace(0, 255, w, dtype=np.uint8)[None, :]
+    rgb[:, :, 1] = np.linspace(0, 255, h, dtype=np.uint8)[:, None]
+    rgb[4:12, 4:12, 2] = rng.integers(0, 256, size=(8, 8), dtype=np.uint8)
+    payload = rgba_bytes_from_rgb8(rgb)
+    check("smoke: a synthetic image becomes the RGBA8 payload the host uploads "
+          "(right size, opaque alpha)",
+          len(payload) == h * w * 4 and payload[3::4] == b"\xff" * (h * w))
+    check("smoke: the payload decodes back to the same pixels",
+          np.array_equal(np.frombuffer(payload, np.uint8).reshape(h, w, 4)[:, :, :3],
+                         rgb))
+    changed = rgba_bytes_from_rgb8(np.clip(rgb.astype(np.int16) + 8, 0, 255)
+                                   .astype(np.uint8))
+    check("smoke: the verdict passes a real change, warns on a no-op and fails "
+          "on non-finite output",
+          changed != payload
+          and native_output_verdict(False, 0)[0] == "ok"
+          and native_output_verdict(True, 0)[0] == "warning"
+          and native_output_verdict(False, 3)[0] == "error"
+          and "byte-identical" in native_output_verdict(True, 0)[1]
+          and "non-finite" in native_output_verdict(False, 3)[1])
+    check("smoke: a saturated readback warns, a normal one does not (the host "
+          "clamps silently, so range is only visible before the clamp)",
+          native_output_verdict(False, 0, 50, 100)[0] == "warning"
+          and "outside [0, 1]" in native_output_verdict(False, 0, 50, 100)[1]
+          and native_output_verdict(False, 0, 1, 100000)[0] == "ok")
+    from ants.dlsssr.nr import fp16_anomalies
+    probe = np.array([0.5, 1.5, np.nan, np.inf, -0.2, 0.0],
+                     dtype=np.float16).tobytes()
+    check("smoke: the RGBA16F readback scan counts NaN/Inf and out-of-range "
+          "values - the two things the RGBA8 conversion would hide",
+          fp16_anomalies(probe) == (2, 2, 6))
+
+    # ---- the same instrument, wired into the native path ----
+    root = _pl.Path(__file__).resolve().parents[1]
+    node_src = (root / "ants" / "dlssnr" / "node.py").read_text()
+    nr_src = (root / "ants" / "dlsssr" / "nr.py").read_text()
+    check("native: the smoke scan runs only where the engine can damage the "
+          "frame - the RGBA16F readback, asked for on the first frame",
+          "def fp16_anomalies(payload)" in nr_src
+          and "fp16_anomalies(raw) if check_anomalies" in nr_src
+          and "last_output_anomalies" in nr_src
+          and "check_anomalies=not self._native_checked" in node_src)
+    _os.environ.pop("ANTS_NR_SESSION_CACHE", None)
+    off = session_cache_enabled()
+    _os.environ["ANTS_NR_SESSION_CACHE"] = "1"
+    on = session_cache_enabled()
+    _os.environ.pop("ANTS_NR_SESSION_CACHE", None)
+    _os.environ["ANTS_NR_SOAK"] = "0"
+    soak_off = soak_enabled()
+    _os.environ.pop("ANTS_NR_SOAK", None)
+    check("session cache + soak are opt-in knobs, default OFF (the run that "
+          "made the native path work used per-prompt init)",
+          off is False and on is True and soak_off is False)
+    check("soak: the line never raises and names what it measured",
+          soak_line(7).startswith("[ANTs] soak:") and "frames 7" in soak_line(7))
+    check("native: the output check and the soak line are wired into the "
+          "evaluate path, and a closed session is evicted from the cache",
+          "self._check_native_output(out, payload, sess)" in node_src
+          and "soak_line(" in node_src
+          and "def _check_native_output" in node_src
+          and "def _drop_session" in node_src
+          and "def _forget_cached" in node_src
+          and node_src.count("self._forget_cached(self.native_session)") == 2
+          and "_NR_SESSION_CACHE[key] = (self.native_session, self.native_gpu)"
+              in node_src
+          and "def session_cache_enabled" in node_src)
+
     # ---- dispatch ----
     check("apply_bridge dispatch + off",
           np.allclose(apply_bridge(frame, "off"), frame)

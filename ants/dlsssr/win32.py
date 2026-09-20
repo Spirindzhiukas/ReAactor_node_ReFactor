@@ -119,6 +119,25 @@ def d3d12_create_device_symbol():
     return _d3d12.D3D12CreateDevice
 
 
+def process_handle_count():
+    """Handles held by THIS process, or None (soak test: does anything leak?).
+
+    ``GetProcessHandleCount`` + the ``GetCurrentProcess`` pseudo-handle (-1).
+    A diagnostic number must never be a reason to fail a run, so every failure
+    (off-Windows, a broken kernel32) answers None instead of raising.
+    """
+    if not _is_windows:
+        return None
+    try:
+        count = ctypes.c_uint32(0)
+        current = ctypes.c_void_p(-1)          # GetCurrentProcess()
+        if not _k32.GetProcessHandleCount(current, ctypes.byref(count)):
+            return None
+        return int(count.value)
+    except Exception:
+        return None
+
+
 def d3d12_get_debug_interface_symbol():
     """``D3D12GetDebugInterface`` - the debug layer's door (opt-in only).
 

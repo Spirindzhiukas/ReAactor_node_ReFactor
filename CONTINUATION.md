@@ -5,6 +5,15 @@ Read this at the start of the next session, after `CLAUDE.md` → `memory.md`
 This file exists because the investigation hit its instrumentation ceiling at
 run 27c and the next session starts at the two final gates, not in the middle.
 
+**UPDATE 2026-09-21 — the investigation is CLOSED.** The "silent kill" was not deliberate and not
+kernel-direct: the host's UAV texture carried the wrong flag byte (`0x8` = `DENY_SHADER_RESOURCE`
+instead of `0x4` = `ALLOW_UNORDERED_ACCESS`), so the runtime kept being handed a flagless texture
+and later recorded an illegal UAV barrier on it. With the byte fixed (`4e483f1`) the probe exits
+**14** and the native node runs (three styles, `hr=0x00000001`, unique images, ~1.6-1.9 s/prompt).
+Read `memory.md` "THE ROOT CAUSE" + "RIG VERDICT (2026-09-21)" first; the run-by-run history below
+is kept as an archive — do not re-run its experiments. The rig-verdict summary is at the end of
+this file.
+
 ## Where the investigation stands
 
 **The question**: the RenoDX/Merserk `nvngx_dlssnr.dll` (bytes identical to his
@@ -1097,3 +1106,32 @@ launch bat has a CONFIGURATION block (env must precede the `start` line);
 NGX home `C:\ProgramData\NVIDIA\NGX`; the snippet may flash a **second
 console window** during evaluate (its own framework — its buffer dies with
 the process, the crash log does not).
+
+
+## RIG VERDICT (2026-09-21) — CLOSED: one wrong bit, and the native node runs
+
+**The answer** (full entries in `memory.md` "THE ROOT CAUSE" + "RIG VERDICT"): `ants/dlsssr/d3d12.py`
+defined the UAV flag as `0x8` since the first commit — that is `DENY_SHADER_RESOURCE`, and `0x4` is
+`ALLOW_UNORDERED_ACCESS`. Every texture meant as a UAV was therefore created WITHOUT the UAV flag
+(and with SRV denied); the runtime then refused the `UNORDERED_ACCESS` initial state, or recorded an
+illegal barrier on the flagless texture, which is what produced `Close 0x80070057`, the device
+removals and the "deliberate kernel-direct kill" reading of runs 14-27c. Nothing about the snippet,
+the shim, the callbacks or the process state was ever wrong.
+
+**Rig proof (owner):**
+- probe `tools/check_d3d12_uav.bat` -> **exit 14**: flags `0x4` CREATED, `0x8` REFUSED `0x80070057`
+  with the debug layer's own sentence, `0x0` CREATED; `[DOC]` control (0xA on D32_FLOAT) ACCEPTED;
+  device healthy after the matrix.
+- native node, build `2026-09-21.2`, pid 12940: three prompts (styles 0/1/2 = Default / Natural /
+  Cinematic), all `hr=0x00000001`, recipe line `0x4 (ALLOW_UNORDERED_ACCESS), initial state
+  UNORDERED_ACCESS`, a unique image per mode, ~1.6-1.9 s per prompt. Owner: "it actually runs and
+  produces unique images for each mode!"
+
+**Shipped with this pass:** first-frame output smoke test (NaN/Inf + out-of-range counts on the
+RGBA16F readback before the clamp, plus byte-identity against the input; one log line, never raises),
+`ANTS_NR_SOAK=1` (handles + torch VRAM per prompt) and the opt-in `ANTS_NR_SESSION_CACHE=1`
+(cross-prompt session reuse; default OFF — per-prompt init is what the working run used, and the knob
+exists to measure its ~1 s). `HOST_BUILD` is `2026-09-21.3`.
+
+**Next, owner-run:** the synthetic-image smoke prompt, the ~50-prompt soak, and the still-image depth
+A/B (flat zero depth vs a real estimated depth map). Keep the literal-name staging rule.

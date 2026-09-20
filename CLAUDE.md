@@ -86,6 +86,16 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
    (`ANTS_NR_TERMINATION_TRAP=0`, `ANTS_NR_INT29_TRAP=0`,
    `ANTS_NR_USE_SHIM` toggles the E1 direct-bind experiment). Never nest
    diagnostic arming inside env-gated experiment blocks again (run 27b lesson).
+5. **The native NR path reports its own output** (2026-09-21, after two silent bugs cost nights):
+   the first frame of every prompt runs a smoke check - NaN/Inf and out-of-range counts in the
+   RGBA16F readback (i.e. before the host clamp hides them) and whether the output is
+   byte-identical to its input - and logs ONE line only when something is wrong; it never raises
+   (intensity 0 is a legal no-op). Instrument knobs, all opt-in, defaults OFF:
+   `ANTS_D3D12_DEBUG_LAYER=1` (+ `ANTS_D3D12_DEBUG_MESSAGES`; needs the Windows "Graphics Tools"
+   feature) arms the D3D12 debug layer before device creation and drains the runtime's own
+   sentences; `ANTS_NR_SOAK=1` prints one handles+VRAM line per prompt (the ~50-prompt soak);
+   `ANTS_NR_SESSION_CACHE=1` keeps the size-keyed NGX session across prompts - the DEFAULT is the
+   per-prompt init the working run used, so do not flip it without rig evidence.
 
 ## Engineering conventions
 
@@ -96,8 +106,8 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
   (`upscale_image_with_model` is the sanctioned stub seam).
 - **Gates before every commit:** `pyflakes` over `ants/`, `nodes.py`, `tests/`
   (benign exceptions: star-import notes in `codeformer_arch.py`); `tests/test_pyflakes.py`,
-  `tests/test_scope_check.py`, `tests/smoke_import.py` (asserts exactly 18 nodes), plus
-  the full suite. Current tally: **171 checks** (see `memory.md`).
+  `tests/test_scope_check.py`, `tests/smoke_import.py` (asserts exactly 22 nodes), plus
+  the full suite. Current tally: **461 checks** (see `memory.md`).
 - **Rebrand hygiene:** no `ReFactor` outside the historical H1 note and the git clone URL
   in `README.md`; `CATEGORY` attrs are `ANTs` / `ANTs/loaders`; `[ANTs]` log prefix.
 - **Commits:** conventional prefixes (`feat:`, `fix:`, `docs:`), body bullets explaining

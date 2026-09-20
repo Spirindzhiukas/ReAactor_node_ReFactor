@@ -5,14 +5,15 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
 
 ## Snapshot
 
-- **Version:** v1.1.0-alpha1 · branch: `arena/01a0b5e0-reaactor-node-refactor` (work branch;
+- **Version:** v1.1.0-alpha1 · branch: `arena/01a0bccd-reaactor-node-refactor` (session branch;
   `main` moves via PR merge)
-- **Head at last update:** run-28+ NR host layout (core-owned session + caller
-  shim with the snippet Init_Ext swap; working tree, commit pending) on top of
-  the GPU-acceleration commit (`588f790` DLSS5 hybrid, `88305cb` pre-pass/rebrand)
-- **Suite:** ALL GREEN — 366 checks + 2 scanners + smoke_import (20 nodes)
-  (`test_nr_schedule` 32, `test_dlssnr_bridge` 65, `test_dlsssr` 81,
-  `test_runtime_surface` 58, `test_native_flow` 35, `test_upres` 27,
+- **Head at last update:** the native NGX host **RIG-VERIFIED** — the UAV flag byte fix (`4e483f1`),
+  the documented rule + D3D12 debug layer (`cb7c572`), and the first-frame output smoke test +
+  `ANTS_NR_SOAK` soak line + opt-in `ANTS_NR_SESSION_CACHE` (this commit; `HOST_BUILD`
+  `2026-09-21.3`)
+- **Suite:** ALL GREEN — 461 checks + 2 scanners + smoke_import (22 nodes)
+  (`test_dlssnr_bridge` 110, `test_dlsssr` 108, `test_native_flow` 58,
+  `test_runtime_surface` 58, `test_nr_schedule` 33, `test_upres` 27,
   `test_pure_helpers` 26, `test_facerestore_routing` 21, `test_swapper_state`
   13, `test_detection_state_dict` 7)
 - **Owner rig facts (probe v2, CONFIRMED):** NGX core PRESENT (DriverStore
@@ -103,20 +104,23 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 
 | File | Checks | Coverage |
 |---|---|---|
-| test_pure_helpers.py | 26 | pure helpers + DLSS discovery policy |
-| test_swapper_state.py | 13 | swapper state dict |
-| test_runtime_surface.py | 58 | 18-node surface, ANTs branding, pre-pass contract, OPTIONS socket |
-| test_facerestore_routing.py | 21 | restore routing incl. e2e loud-failure |
-| test_detection_state_dict.py | 7 | detector state dicts |
+| test_dlssnr_bridge.py | 110 | HDR bridge math + defaults neutrality + discovery (categories, flat labels, loud error) + GPU decision + native output smoke/soak/cache instruments |
+| test_dlsssr.py | 108 | NGX host: D3D12 flag table + debug-layer wire bytes, shim/params ABI, SR/NR sessions, probe bat |
+| test_native_flow.py | 58 | native NR flow: stub thunk addresses, create/evaluate contract, loud refusals |
+| test_runtime_surface.py | 58 | 22-node surface, ANTs branding, pre-pass contract, OPTIONS socket |
+| test_nr_schedule.py | 33 | schedule parse/validate/pad, plan bypass + denoise fallback, loud slot errors, node surface |
 | test_upres.py | 27 | upRes/upscale paths |
-| test_dlssnr_bridge.py | 36 | HDR bridge math + defaults neutrality + discovery (categories, flat labels, loud error) + GPU decision |
-| test_nr_schedule.py | 32 | schedule parse/validate/pad, plan bypass + denoise fallback, loud slot errors, node surface (nr_passes gone) |
-| smoke_import.py | — | import + 18-node assert + socket/execute wiring |
+| test_pure_helpers.py | 26 | pure helpers + DLSS discovery policy |
+| test_facerestore_routing.py | 21 | restore routing incl. e2e loud-failure |
+| test_swapper_state.py | 13 | swapper state dict |
+| test_detection_state_dict.py | 7 | detector state dicts |
+| smoke_import.py | — | import + 22-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 272 checks, all green at the selector-restructure commit (20 nodes; package `ants/`).** Sandbox venv: numpy, opencv-python-headless,
-pillow, pyflakes, pefile (NO torch — stub harness only). huggingface.co is TLS-blocked from the
-sandbox (DLL zips can't be downloaded there — verify engine versions on the owner rig).
+**Total: 461 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.3`; 22 nodes; package `ants/`).**
+Sandbox venv: numpy, opencv-python-headless, pillow, pyflakes, pefile (NO torch — stub harness only).
+huggingface.co is TLS-blocked from the sandbox (DLL zips can't be downloaded there — verify engine
+versions on the owner rig).
 
 ## Known issues / dead ends (do not retry)
 
@@ -133,6 +137,11 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - Upscale-model integration mirrors comfy core and resizes output back to face resolution
   (settled design).
 - `model_paths._migrate_legacy_dirs` off-by-one (low priority, known).
+- **The native NR silent-kill / UAV-refusal saga is CLOSED** (18:25 → 01:22): it was our own flag
+  byte (0x8 `DENY_SHADER_RESOURCE` instead of 0x4 `ALLOW_UNORDERED_ACCESS`), hidden for hours by the
+  silent fallback to a flagless texture. Do NOT re-open the process-state, CUDA-flag-arming,
+  feature-level or "degraded driver / reboot" theories — the probe cleared all of them (exit 14) and
+  the native node runs (see the two 2026-09-21 entries below).
 
 ## Awaiting owner feedback
 
@@ -1109,3 +1118,53 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - Tests: the whole flag table is pinned against d3d12.h (the old check pinned `== 0x8` with the comment
   "(0x4 = render target)" - the suite was holding the bug in place). Suite: **452 checks** (dlsssr 108,
   native_flow 58, dlssnr_bridge 101, nr_schedule 33).
+
+
+### 2026-09-21 (RIG VERDICT) — probe exit 14, and the NATIVE NODE RUNS: unique image per style
+- **Probe (owner, ~01:44): exit 14.** The flags matrix runs FIRST: **0x4 CREATED**, **0x8 REFUSED**
+  (0x80070057) with the runtime's own sentence out of the debug layer -
+  `ID3D12Device::CreateCommittedResource: D3D12_RESOURCE_DESC::Flags cannot have
+  D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE set without D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+  D3D12_RESOURCE_FLAG_VIDEO_DECODE_REFERENCE_ONLY or D3D12_RESOURCE_FLAG_VIDEO_ENCODE_REFERENCE_ONLY.`
+  - and **0x0 CREATED**. `[DOC]` control (flags 0xA on D32_FLOAT) ACCEPTED; device `0x00000000`
+  (present and healthy) after the whole matrix. Note the runtime accepts two companions beyond the
+  docs quote: the VIDEO_DECODE/ENCODE_REFERENCE_ONLY flags also legitimize 0x8.
+- **Native node (owner, 01:50-01:51, pid 12940, build 2026-09-21.2): RUNS end to end.** Three
+  prompts, styles 0/1/2 = Default / Natural / Cinematic: `Init_ProjectID`, `GetCapabilityParameters`,
+  snippet `Init_Ext`, `CreateFeature` and `EvaluateFeature` all `hr=0x00000001`; recipe line
+  `0x4 (ALLOW_UNORDERED_ACCESS), initial state UNORDERED_ACCESS`; contract 2368x1760 quality 5,
+  surfaces RGBA16F colour/output + R16G16_FLOAT mvec + R32_FLOAT depth inverted, inputs
+  NON_PIXEL_SHADER_RESOURCE. **The three modes produce visibly different images** (~1.6-1.9 s per
+  prompt). Owner: "it actually runs and produces unique images for each mode!"
+- **Per-prompt re-init (measured, not a defect):** every prompt runs the whole NGX init again, with no
+  `Shutdown1` between prompts. ComfyUI instantiates a NEW node object per prompt, so the size-keyed
+  session (dll, size, preset) is rebuilt by the node lifecycle, not because of a cache miss; the ~1 s
+  is the provider/CreateFeature cost, not the frame.
+- **Owner-forwarded follow-ups (Claude Sonnet 5, same day)** — recorded as the next work, not as done:
+  (1) regression tests: the `_fwd_stub` address and the whole flag table are already pinned; add a
+  smoke test on a synthetic image (output differs from input, no NaN, in range); (2) a ~50-prompt soak
+  watching VRAM and process handles (per-prompt re-init ~1 s; reuse the size-keyed session only if that
+  re-init is unintended); (3) keep the literal-name staging rule (canonical `nvngx_dlssnr.dll` staged
+  copy + the sibling-name warning); (4) still-image depth A/B: flat zero depth (current) vs a real
+  estimated depth map for `DLSSNR.Depth` (a normal ComfyUI depth model feeds the NR input). Sonnet:
+  "I wouldn't revert one to find out" which of the two shipped bugs caused the original C++ exception -
+  both were masked by silent behaviour, and removing the silence is what enabled progress.
+- **Shipped in the same commit** (the flag fix itself is the entry above):
+  - **First-frame output smoke test** — pure `rgba_bytes_from_rgb8` + `native_output_verdict`, and
+    `DlssNrSession.evaluate(..., check_anomalies=True)` + `fp16_anomalies()` which counts NaN/Inf and
+    out-of-range values in the RGBA16F READBACK, i.e. before the host clamp would hide them. The node
+    logs one line per prompt: error on non-finite, warning on a saturated readback or on an output that
+    is byte-identical to its input. One whole-payload pass on the first frame of a prompt only; never
+    raises (intensity 0 is a legal no-op).
+  - **Soak instrument** — `ANTS_NR_SOAK=1` prints one line per prompt with the process handle count
+    (`win32.process_handle_count`, `GetProcessHandleCount`, None off-Windows), torch VRAM
+    allocated/reserved and the session's frame counter; both numbers should stay flat over the soak.
+  - **Opt-in cross-prompt session cache** — `ANTS_NR_SESSION_CACHE=1` keeps the size-keyed session (and
+    its device) across prompts (`_NR_SESSION_CACHE`, a key -> (session, gpu) dict), so the NGX init is
+    paid once per size/dll/preset instead of once per prompt; default OFF because per-prompt init is
+    what the working run used, and the knob exists to measure the ~1 s. Lifecycle: a session that is
+    closed is evicted from the cache (`_forget_cached`, called from both `_close_native` and
+    `_drop_session`) so a closed feature can never be reused, and the dict means two sizes/engines in
+    one workflow never close each other's feature (pinned by test).
+- Suite: **461 checks** (dlssnr_bridge 110, dlsssr 108, native_flow 58, runtime_surface 58,
+  nr_schedule 33).

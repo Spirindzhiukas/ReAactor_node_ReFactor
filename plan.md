@@ -6,6 +6,16 @@ stays a lean "what's next". Rules: `CLAUDE.md`. Facts: `memory.md`.
 
 ## 🔍 NR silent-kill investigation (runs 14-27c; handoff: CONTINUATION.md)
 
+**STATUS 2026-09-21: RESOLVED and RIG-VERIFIED — do not run the experiments below.** The "kill" was
+our own one-bit bug: the UAV texture carried `0x8` (`DENY_SHADER_RESOURCE`) instead of `0x4`
+(`ALLOW_UNORDERED_ACCESS`), so the runtime was handed a flagless texture and later recorded an
+illegal UAV barrier on it - the "deliberate kernel-direct terminate" reading was an artifact of that
+silent fallback. The probe exits **14** (0x4 CREATED / 0x8 REFUSED with the debug layer's own
+sentence / 0x0 CREATED) and the native node runs end to end: three styles, `hr=0x00000001`, unique
+images, ~1.6-1.9 s per prompt. Details: `memory.md` "THE ROOT CAUSE" + "RIG VERDICT (2026-09-21)",
+`CONTINUATION.md` tail. Everything below is archived history - the traps/detours/E1-shim/run-29-31
+checklists are NOT to be re-run.
+
 Terminal verdict (2026-09-20): the RenoDX/Merserk `nvngx_dlssnr.dll` kills the
 process **deliberately, kernel-direct** (`__fastfail`/int-29h class) at the
 first evaluate on our host — proven against every user-mode instrument (VEH
@@ -291,6 +301,17 @@ python and never registers callbacks.
 
 ## 🔜 Next up (agreed direction, in order)
 
+- [ ] **Rig-side smoke test on a synthetic image** (Sonnet 5 item 1): the node reports its own verdict
+      on the first frame of every prompt (`[ANTs] the native NR output ...` - non-finite, saturated, or
+      byte-identical to the input). Run one small native prompt and confirm no line appears; the
+      NaN/range/identity logic is already unit-tested pure.
+- [ ] **~50-prompt soak with `ANTS_NR_SOAK=1`** (item 2): process handles + torch VRAM should stay
+      flat. Per-prompt NGX re-init (~1 s - ComfyUI makes a new node object per prompt) is expected;
+      `ANTS_NR_SESSION_CACHE=1` A/Bs reuse across prompts (default OFF).
+- [ ] **Still-image depth A/B** (item 4): flat zero depth (current) vs a real estimated depth map for
+      `DLSSNR.Depth` - owner-run once the smoke test is clean.
+- [x] Literal-name staging rule stays (item 3): canonical `nvngx_dlssnr.dll` staged copy + the
+      sibling-name warning on stage - no change needed.
 - [ ] Fix any owner-reported issues from the test round above (priority over new features).
 - [ ] After first real-world Anchored-mode use: evaluate whether `black_lever`/`highlight
       anchor` defaults feel right; consider an `Anchored+Classic blend` only if the owner asks.
@@ -352,3 +373,12 @@ python and never registers callbacks.
 - [x] `588f790` — DLSS5 hybrid upgrade (HDR bridge, temporal history, models/DLSS discovery).
 - [x] `88305cb` — pre-pass + consolidation (20→18) + ANTs rebrand v1.1.0-alpha1.
 - [x] Rebrand residuals sweep (`[ANTs]` startup banner).
+- [x] `f730f24` — pre-denoise `OFF` mode (third mode; model/strength ignored and logged; JS greys the
+      strength widget).
+- [x] Native NGX host **RIG-VERIFIED** (2026-09-21): UAV flag byte `4e483f1` + the documented rule and
+      the D3D12 debug layer `cb7c572`; probe exit 14; native node runs (styles 0/1/2, hr=1, unique
+      images, ~1.6-1.9 s/prompt). First-frame output smoke test + `ANTS_NR_SOAK` + opt-in
+      `ANTS_NR_SESSION_CACHE` shipped with this docs pass (`HOST_BUILD` 2026-09-21.3).
+- [x] `cb7c572` — debug layer (`ANTS_D3D12_DEBUG_LAYER`), the docs-cited rule, the flags matrix probe
+      (exit 14) and the test-side fixes that keep it all pinned.
+- [x] `4e483f1` — `ALLOW_UNORDERED_ACCESS = 0x4` (the one-bit root cause of the whole native saga).
