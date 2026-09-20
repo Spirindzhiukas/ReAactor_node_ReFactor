@@ -1022,3 +1022,20 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   JS), and the JS now RE-FITS the node after rebuilding the dynamic rows (`fitNode`:
   computeSize/setSize) - it used to grow on toggle-ON and never shrink back on toggle-OFF.
 - Suite: **440 checks** (dlsssr 98, native_flow 56, dlssnr_bridge 101) + pyflakes/scope/smoke green.
+
+### 2026-09-20 (owner run 23:32) — the third layer, and it was our own fallback
+- **The driver refused `(ALLOW_UNORDERED_ACCESS, UNORDERED_ACCESS)` for `nr output`** (the recipe that
+  worked at 21:52), our recipe ladder silently degraded to `(FLAG_NONE, COMMON)`, and the NR path then
+  recorded `Barrier(nr output -> 8)` on a resource WITHOUT the UAV flag = an INVALID COMMAND. That is
+  the E_INVALIDARG that shows up as "command list not closable" — the 18:25 / 20:39 / 21:52 mystery
+  was, at least in part, our own degraded fallback.
+- Fixes: the ladder can never drop the UAV flag (a UAV texture fails LOUDLY, naming the device status
+  at that moment); a refused/degraded recipe is NEVER cached on the device; `GpuContext.health` reads
+  `GetDeviceRemovedReason` at creation and announces a device that is born unusable.
+- **OPEN**: was the 23:32 native run in the same ComfyUI process as the 22:35 legacy CUDA run? Clean
+  experiment = restart, native node FIRST and alone.
+- **NODE PARITY (owner rule, enforced by test)**: `set(proc inputs) == set(enhancer inputs) -
+  {"engine"}` for BOTH focused processors - only the engine selector is dropped; the engine-only
+  widgets stay and explain themselves (SR pre-denoise warns on the legacy node, CPU/host-staging says
+  "native is always a GPU path").
+- Suite: **444 checks** (dlsssr 100, native_flow 58, dlssnr_bridge 101, nr_schedule 33).

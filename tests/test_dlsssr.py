@@ -686,6 +686,13 @@ def _crash_phase_check():
             and "crashlog.set_phase" in (REPO / "ants" / "dlsssr" / "com.py").read_text())
 
 
+def _uav_recipe_block(src):
+    """The text of D3D12Device._UAV_RECIPES (the ladder a UAV texture may use)."""
+    start = src.index("_UAV_RECIPES = (")
+    end = src.index("_INPUT_RECIPES = (")
+    return src[start:end]
+
+
 def _js_ui_check():
     """The frontend: the scheduler grows AND shrinks, the default plan matches
     the Python cycle, and all three enhancer classes get their own UI."""
@@ -1220,6 +1227,19 @@ def main():
           and "D3D12_RESOURCE_FLAG_NONE,\n                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE" in d3d_src
           and "REFUSED the intended texture recipe" in d3d_src
           and "def create_input_texture2d" in d3d_src)
+    d3d_src = (REPO / "ants" / "dlsssr" / "d3d12.py").read_text()
+    check("d3d12: no recipe ladder entry can drop the UAV flag (the flag is "
+          "part of the caller's contract, not a preference), the refusal path "
+          "logs the device status, and a device that is born unusable is "
+          "announced",
+          "_UAV_RECIPES = ((D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS"
+          in d3d_src
+          and _uav_recipe_block(d3d_src).count(
+              "D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS") == 2
+          and "D3D12_RESOURCE_FLAG_NONE" not in _uav_recipe_block(d3d_src)
+          and "cannot create the texture" in d3d_src
+          and "Device status right now" in d3d_src
+          and "ALREADY unusable" in d3d_src)
     check("tools: import lister flags termination APIs + NGX backend "
           "bindings statically (engine-dll discriminator, no execution)",
           (REPO / "tools" / "list_imports.py").is_file()
@@ -1348,16 +1368,14 @@ def main():
     proc = pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5Processor"].INPUT_TYPES()["required"]
     native = pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5ProcessorNative"].INPUT_TYPES()["required"]
     enh = pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5Enhancer"].INPUT_TYPES()["required"]
-    check("dlss5: the focused processors carry NO engine selector and only the "
-          "widgets their engine can act on (the legacy helper has no render "
-          "preset; the native host owns the SR pre-denoise)",
-          "engine" not in proc and "engine" not in native
-          and "engine" in enh
-          and {"sr_dll_version", "sr_model", "pre_denoise_mode",
-               "fg_dll_version", "nr_model_preset"}.isdisjoint(proc)
-          and {"gpu_acceleration", "fg_dll_version"}.isdisjoint(native)
-          and "pre_denoise_mode" in native and "nr_model_preset" in native
-          and "gpu_acceleration" in proc)
+    check("dlss5: the focused processors keep FULL settings parity with the "
+          "full enhancer - the engine selector is the ONLY widget they drop "
+          "(owner rule: 'same everything the enhancer has but without its "
+          "selection of engines and that's it')",
+          "engine" not in proc and "engine" not in native and "engine" in enh
+          and set(proc) == set(enh) - {"engine"}
+          and set(native) == set(enh) - {"engine"}
+          and set(native) == set(proc))
     proc_cls = pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5Processor"]
     native_cls = pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5ProcessorNative"]
     check("dlss5: each focused processor FORCES its engine (so a run can never "
@@ -1369,6 +1387,10 @@ def main():
           and issubclass(native_cls, pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5Enhancer"])
           and "nr_schedule" in enh_t["optional"] and "use_nr_schedule" in proc
           and "hdr_bridge_mode" in native and "style" in native)
+    check("dlss5: the CPU/GPU choice is not a lie on the native node - picking "
+          "CPU there says the native host is always a GPU path instead of "
+          "silently ignoring the widget",
+          "always runs on the GPU (the native " in node_src)
     check("dlss5: the display names + descriptions say which engine each node "
           "drives, and credit the lineage the owner asked about",
           "ReShade based" in pkg.NODE_DISPLAY_NAME_MAPPINGS["ANTsDLSS5Processor"]

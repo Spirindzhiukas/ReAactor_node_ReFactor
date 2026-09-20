@@ -43,6 +43,8 @@ FAKE_ADAPTERS = {}   # "hw"/"sw": the DXGI adapters build_device_graph made
 FAKE_HANDLE = 0xDEADBEEF
 close_failures = {"n": 0}   # how many upcoming Close() calls report failure
 device_state = {"reason": 0}  # GetDeviceRemovedReason return value (0 = alive)
+# rig 23:32: a driver that refuses UAV-flagged texture2d creation (all of them)
+uav_refused = {"on": False}
 
 
 def check(name, ok, extra=""):
@@ -275,7 +277,8 @@ def build_device_graph():
             if layout != d3d12.D3D12_TEXTURE_LAYOUT_UNKNOWN or sample_count != 1 \
                     or height < 1:
                 return -2147024809
-            del flags  # UAV-flagged textures are legal (DVT rig-proven)
+            if uav_refused["on"] and flags & d3d12.D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS:
+                return -2147024809      # E_INVALIDARG, the 23:32 behaviour
             size = int(width) * int(height) * bpp.get(fmt, 4)
         else:
             return -2147024809  # only buffers + texture2d are supported here
@@ -982,6 +985,34 @@ def main():
           "21:52 line could not be acted on because both lists looked alike)",
           "NGX runtime" in probe_ctx._describe_list(probe_ctx.runtime_list)
           and "copy command list" in probe_ctx._describe_list(probe_ctx.list))
+
+    # ---- rig 23:32: the UAV recipe refused -> LOUD, never degraded --------
+    d3d12.reset_wedged()
+    device_state["reason"] = 0
+    ctx3 = d3d12.make_gpu_context(0)
+    check("d3d12: the device health is read at creation and kept on the "
+          "context (the 23:32 report needed it to tell 'driver refuses' from "
+          "'device already gone')",
+          isinstance(ctx3.health, tuple) and ctx3.health[0] is False
+          and "healthy" in ctx3.health[2])
+    uav_refused["on"] = True
+    try:
+        ctx3.device.create_texture2d(64, 64,
+                                     d3d12.DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                     label="needs a UAV")
+        refused_ok = "no exception"
+    except Exception as exc:
+        refused_ok = str(exc)
+    finally:
+        uav_refused["on"] = False
+    check("d3d12: when the driver refuses every UAV-capable recipe the pack "
+          "FAILS LOUDLY (naming the device status) instead of silently taking "
+          "a UAV-less texture - the 23:32 cascade was our own fallback "
+          "recording a barrier to UNORDERED_ACCESS on a non-UAV resource",
+          "no exception" not in refused_ok and "[ANTs]" in refused_ok
+          and "UAV" in refused_ok and "Device status" in refused_ok
+          and ctx3.device._texture_recipe is None)
+    ctx3.close()
 
     released = []
     real_release = d3d12.ComObject.release

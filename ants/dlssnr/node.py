@@ -497,6 +497,11 @@ class ReFactorDLSS5Enhancer:
 
         if native:
             use_cuda, cuda_why = False, "native NGX host (D3D12 path)"
+            if gpu_acceleration == GPU_OFF:
+                logger.status(
+                    "[ANTs] note: this node always runs on the GPU (the native "
+                    "NGX host is a D3D12 + device-pointer path) - the 'CPU "
+                    "(host staging)' choice applies to the legacy engine only.")
             if mask is not None:
                 logger.status("DLSS5 note: the native NGX engine has no mask-plane input - "
                               "the connected mask is ignored (Auto Mask still applies).")
@@ -755,12 +760,14 @@ def _without_inputs(types, names):
 class ReFactorDLSS5Processor(ReFactorDLSS5Enhancer):
     """ANTs DLSS5 Processor (legacy / ReShade-RenoDX-derived DLL engine).
 
-    The engine that already works on this rig (the RenoDX-derived
-    nvngx_dlssnr.dll driven through the neuroframe helper pair). No engine
-    selector and none of the widgets that only the native path can act on: the
-    SR pre-denoise host, the SR runtime picker, the NR render preset (the
-    legacy helper has no such field) and the reserved FG picker are gone from
-    its UI, so nothing on the node can promise something the engine cannot do.
+    Identical to the full enhancer EXCEPT that the engine is locked: the
+    ``engine`` selector is not rendered and the engine cannot be changed at
+    run time (owner request - the three nodes must keep full settings and
+    feature parity, so the only difference between them is the engine).
+
+    The engine it drives is the one that already works on this rig (the
+    RenoDX-derived nvngx_dlssnr.dll through the neuroframe helper pair,
+    including its CUDA zero-copy path).
     """
 
     ENGINE_MODE = ENGINE_LEGACY
@@ -769,28 +776,25 @@ class ReFactorDLSS5Processor(ReFactorDLSS5Enhancer):
         "nvngx_dlssnr.dll + the neuroframe helper pair by Merserk, credit to "
         "clshortfuse's RenoDX work) - the engine that runs this rig today, "
         "including its CUDA zero-copy path (GPU acceleration ON = CUDA).\n"
-        "This node drives that engine ONLY; see ANTs DLSS5 Processor "
-        "(Native NGX, experimental) for the pack's own pure-Python NGX host.\n"
+        "Same controls as ANTs DLSS5 Frame Enhancer; the engine selector is "
+        "locked to this engine and the engine-related widgets that path cannot "
+        "use say so instead of lying.\n"
         "Multi-pass plans come from the ANTs DLSS NR Scheduler node "
         "(nr_schedule input)."
     )
 
     @classmethod
     def INPUT_TYPES(cls):
-        return _without_inputs(
-            ReFactorDLSS5Enhancer.INPUT_TYPES(),
-            ("engine", "sr_dll_version", "sr_model", "pre_denoise_mode",
-             "fg_dll_version", "nr_model_preset"))
+        return _without_inputs(ReFactorDLSS5Enhancer.INPUT_TYPES(), ("engine",))
 
 
 class ReFactorDLSS5ProcessorNative(ReFactorDLSS5Enhancer):
     """ANTs DLSS5 Processor (experimental, the pack's own native NGX host).
 
-    Our pure-Python D3D12 + NGX host driving nvngx_dlssnr.dll directly: no
-    3rd-party helper DLLs, feature 18 called through the caller shim, the SR
-    pre-denoise host available. No engine selector - this node is the native
-    path and nothing else. Experimental by design: it is the path we are still
-    validating, kept separate so it cannot perturb the working node.
+    Identical to the full enhancer EXCEPT that the engine is locked - here to
+    the pack's own pure-Python D3D12 + NGX host (no 3rd-party helper DLLs,
+    feature 18 through the caller shim, SR pre-denoise available). Separate
+    node so the native path can fail loudly without touching the working one.
     """
 
     ENGINE_MODE = ENGINE_NATIVE
@@ -799,6 +803,8 @@ class ReFactorDLSS5ProcessorNative(ReFactorDLSS5Enhancer):
         "nvngx_dlssnr.dll directly (D3D12 device, feature 18 through the "
         "caller shim, no 3rd-party helper DLLs). Separate node so the native "
         "path can fail loudly without touching the working legacy processor.\n"
+        "Same controls as ANTs DLSS5 Frame Enhancer; the engine selector is "
+        "locked to this engine.\n"
         "Requirements: an NR runtime in ComfyUI/models/DLSS/NR/ (any filename; "
         "the pack probes exports, never names) and, on RTX 30/40, a "
         "RenoDX-derived build. Diagnostics: the crash black box, the in-flight "
@@ -809,6 +815,4 @@ class ReFactorDLSS5ProcessorNative(ReFactorDLSS5Enhancer):
 
     @classmethod
     def INPUT_TYPES(cls):
-        return _without_inputs(
-            ReFactorDLSS5Enhancer.INPUT_TYPES(),
-            ("engine", "gpu_acceleration", "fg_dll_version"))
+        return _without_inputs(ReFactorDLSS5Enhancer.INPUT_TYPES(), ("engine",))

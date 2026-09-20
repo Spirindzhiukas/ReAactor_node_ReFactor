@@ -86,8 +86,8 @@ Three nodes, two engines:
 | node | engine | notes |
 |---|---|---|
 | **ANTs⚡DLSS5 Frame Enhancer** | both (selector) | the original node — full surface, engine picker |
-| **ANTs⚡DLSS5 Processor (ReShade based)** | legacy DLL engine only | the RenoDX-derived `nvngx_dlssnr.dll` + the neuroframe helper pair (**by Merserk**, credit to **clshortfuse**'s RenoDX work) — the engine that runs the rig today, CUDA zero-copy included. No engine selector and none of the widgets that engine cannot act on (SR pre-denoise host, SR runtime pick, NR render preset, FG picker). |
-| **ANTs⚡DLSS5 Processor (Native NGX, experimental)** | the pack's own native NGX host only | our pure-Python D3D12 + feature-18 path (no 3rd-party helper DLLs, caller shim, SR pre-denoise available). Kept separate so its failures cannot perturb the working node. |
+| **ANTs⚡DLSS5 Processor (ReShade based)** | legacy DLL engine only | the RenoDX-derived `nvngx_dlssnr.dll` + the neuroframe helper pair (**by Merserk**, credit to **clshortfuse**'s RenoDX work) — the engine that runs the rig today, CUDA zero-copy included. **Full settings parity**: the `engine` selector is the only thing it drops. |
+| **ANTs⚡DLSS5 Processor (Native NGX, experimental)** | the pack's own native NGX host only | our pure-Python D3D12 + feature-18 path (no 3rd-party helper DLLs, caller shim). Kept separate so its failures cannot perturb the working node. **Full settings parity**: the `engine` selector is the only thing it drops. |
 
 Why "ReShade based": the DLL lineage is the RenoDX DLSS-5 addon, which is a **ReShade addon** —
 *OptiScaler is a different project* (a DLSS/XeSS/FSR call redirector) and none of its code is involved

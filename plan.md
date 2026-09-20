@@ -165,6 +165,18 @@ python and never registers callbacks.
       engine-specific widgets only; own JS header/refresh/greying; both take the same schedule.
       Scheduler defaults to 3 passes Cinematic -> Natural -> Default; the JS re-fits the node size
       when per-pass rows are removed (it never shrank before).
+- [x] **OWNER EVIDENCE 23:32 — the cascade decoded**: the driver refused
+      `(ALLOW_UNORDERED_ACCESS, UNORDERED_ACCESS)` for the OUTPUT texture, our
+      ladder silently degraded to a UAV-less texture, and the NR path's
+      `Barrier(nr output -> UNORDERED_ACCESS)` on it was an INVALID COMMAND -
+      that E_INVALIDARG is the "command list not closable" line from 18:25 /
+      20:39 / 21:52. Fixed: the ladder can no longer drop the UAV flag (loud
+      failure + device status), a refused recipe is never cached, and
+      `GpuContext.health` reports the device state at creation. OPEN QUESTION:
+      was 23:32 the same process as the 22:35 legacy CUDA run?
+- [x] **NODE PARITY (owner rule)**: both focused processors now drop ONLY the
+      `engine` selector — `set(proc) == set(enh) - {"engine"}` is pinned by a
+      test; the engine-only widgets stay visible and say what they mean.
 - [ ] **Run 34 (owner, fresh process each time)**: 1) native + a SMALL frame
       (768x768) — the state fix's real test; 2) if that works, 4096x3072;
       3) legacy (GPU) in a fresh process; 4) if anything dies: send the

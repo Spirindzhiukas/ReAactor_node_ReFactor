@@ -689,6 +689,52 @@ small ladder of alternatives if the driver refuses the first, and **logs which r
 took** instead of silently swapping it. `ANTS_NR_INPUT_STATE=uav` still restores the old behaviour
 for an A/B.
 
+### Run 23:32 (owner) — the 23:08 fix exposed the NEXT layer, and it was ours
+
+```
+[ANTs] D3D12: the driver REFUSED the intended texture recipe for 'nr output'
+       (flags 0x8, initial state UNORDERED_ACCESS; it answered ... E_INVALIDARG)
+       and accepted (flags 0x0, initial state COMMON) instead
+[ANTs] D3D12 command list not closable (Close 0x80070057) - our copy command list
+       (4 recorded command(s): Barrier(nr color -> 1024), CopyTextureRegion(...),
+       Barrier(nr color -> 64), Barrier(nr output -> 8))
+```
+
+Read the two lines together and the whole cascade is OURS, not the driver's:
+
+1. the driver refused the one recipe the proven host uses
+   **(ALLOW_UNORDERED_ACCESS, UNORDERED_ACCESS)** for the OUTPUT texture - the
+   same recipe that succeeded at 21:52, so something about this process was
+   already off (the device is created on the right adapter with the right LUID,
+   and the run right before it in that session was the legacy CUDA zero-copy
+   one);
+2. our ladder then **silently degraded** to (FLAG_NONE, COMMON) - a texture
+   WITHOUT the UAV flag;
+3. the NR path dutifully recorded `Barrier(nr output -> 8)` (UNORDERED_ACCESS)
+   on that non-UAV resource: an **invalid command**, which D3D12 punishes at the
+   next `Close()` with E_INVALIDARG;
+4. and that E_INVALIDARG is what the 21:52/20:39 "command list not closable"
+   lines have been showing us all along.
+
+Fixes, in the same commit:
+* **the ladder can no longer drop the UAV flag**: a texture the runtime writes
+  through a UAV either gets the flag or the creation FAILS, loudly, naming the
+  device status at that exact moment (that status is what tells "the driver
+  refuses" from "the device is already gone" - the only question left here);
+* the refused-recipe warning carries the device status too, and a degraded
+  recipe is **never cached** on the device (caching it would have poisoned every
+  later texture in the process);
+* `GpuContext.health` records `GetDeviceRemovedReason` at creation time and a
+  device that is born unusable is announced in the console - so the next report
+  answers "was it already broken before we asked for anything?".
+
+**Open question for the owner (decides the next move):** was the 23:32 native run
+in the SAME ComfyUI process as the 22:35 legacy CUDA run? If yes, the clean
+experiment is: restart ComfyUI and run the native node FIRST, alone. If it still
+refuses the UAV recipe with a healthy device status, then the driver itself is
+refusing UAV textures for us and we go after the device-creation parameters
+(feature level / debug layer / adapter) with the reference host as the yardstick.
+
 ### The node split (owner request) — one engine per node
 
 The native path can now fail without touching the working one:
@@ -696,12 +742,16 @@ The native path can now fail without touching the working one:
 | node class | engine | dropped widgets |
 |---|---|---|
 | `ANTsDLSS5Enhancer` (unchanged) | both, via the `engine` selector | — |
-| `ANTsDLSS5Processor` — *ANTs⚡DLSS5 Processor (ReShade based)* | legacy DLL engine, forced | `engine`, `sr_dll_version`, `sr_model`, `pre_denoise_mode`, `nr_model_preset`, `fg_dll_version` |
-| `ANTsDLSS5ProcessorNative` — *ANTs⚡DLSS5 Processor (Native NGX, experimental)* | our native NGX host, forced | `engine`, `gpu_acceleration`, `fg_dll_version` |
+| `ANTsDLSS5Processor` — *ANTs⚡DLSS5 Processor (ReShade based)* | legacy DLL engine, forced | `engine` (that is the ONLY difference) |
+| `ANTsDLSS5ProcessorNative` — *ANTs⚡DLSS5 Processor (Native NGX, experimental)* | our native NGX host, forced | `engine` (that is the ONLY difference) |
 
 Both are subclasses of the full node (one implementation, two focused UIs), both consume the same
 **ANTs⚡DLSS NR Scheduler** output, and the frontend gives each its own header line, refresh button
-and scheduler-link greying. Naming: the legacy engine's DLL lineage is the RenoDX DLSS-5 addon — a
+and scheduler-link greying. **Settings parity is the owner's rule and is enforced by a test**:
+`set(PROCESSOR inputs) == set(ENHANCER inputs) - {"engine"}` for both, so the widgets that only one
+engine can act on stay visible and honest - e.g. "SR pre-denoise" on the legacy node warns that it
+needs the native host, and "CPU (host staging)" on the native node says the native path is always a
+GPU path, instead of either node quietly dropping controls the other has. Naming: the legacy engine's DLL lineage is the RenoDX DLSS-5 addon — a
 **ReShade** addon — so "ReShade based" is the accurate short name; OptiScaler is a different project
 (a DLSS/XeSS/FSR redirector) and none of its code is involved.
 

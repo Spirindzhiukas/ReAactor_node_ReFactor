@@ -445,11 +445,16 @@ class D3D12Device(ComObject):
     # permissive first. NVIDIA's own NGX hosts create them in the UAV state;
     # DVT's rig-validated host uses COMMON. The first combo the driver
     # accepts is cached on the device and reused for every later texture.
+    # NOTE: a UAV-less fallback is deliberately NOT in this list. Rig 23:32
+    # showed what it costs: the driver refused the UAV recipe for 'nr output',
+    # the pack silently took (FLAG_NONE, COMMON), the NR path then recorded a
+    # barrier to UNORDERED_ACCESS on that resource - an INVALID COMMAND - and
+    # the next Close() answered E_INVALIDARG, which looked like a fresh bug.
+    # A texture the runtime writes through a UAV must carry the flag, or the
+    # creation has to FAIL LOUDLY right here.
     _UAV_RECIPES = ((D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
                     (D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                     D3D12_RESOURCE_STATE_COMMON),
-                    (D3D12_RESOURCE_FLAG_NONE,
                      D3D12_RESOURCE_STATE_COMMON))
     # INPUT textures (what the runtime reads). Rig 23:08: the driver answered
     # E_INVALIDARG for (ALLOW_UNORDERED_ACCESS, NON_PIXEL_SHADER_RESOURCE), so
@@ -475,12 +480,11 @@ class D3D12Device(ComObject):
             # a UAV initial state REQUIRES the flag
             return ((D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, state),
                     (D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                     D3D12_RESOURCE_STATE_COMMON),
-                    (D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON))
+                     D3D12_RESOURCE_STATE_COMMON))
         if allow_uav:
             return ((D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, state),
-                    (D3D12_RESOURCE_FLAG_NONE, state),
-                    (D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON))
+                    (D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                     D3D12_RESOURCE_STATE_COMMON))
         return ((D3D12_RESOURCE_FLAG_NONE, state),) + self._INPUT_RECIPES[1:]
 
     def create_texture2d(self, width, height, fmt, allow_uav=True, label="texture",
@@ -508,22 +512,41 @@ class D3D12Device(ComObject):
             accepted = (flags, initial, index)
             break
         if accepted is None:
-            raise last
+            from ..log import dlss_logger
+            _removed, _hr, status = self.device_status()
+            dlss_logger.error(
+                "[ANTs] D3D12 cannot create the texture '%s' (%dx%d) in any "
+                "recipe this path needs: %s. Device status right now: %s. "
+                "A UAV-capable texture is not optional - NGX feature 18 "
+                "writes its output through one - so the creation path stops "
+                "here instead of recording an illegal barrier later. If the "
+                "device reports HEALTHY, the driver itself is refusing the "
+                "resource descriptions (rig 23:32) - restart ComfyUI and send "
+                "this line with the console.", label, int(width), int(height),
+                str(last).strip(), status)
+            raise DlssSrError(
+                "[ANTs] Could not create the D3D12 texture '%s' (%dx%d): %s. "
+                "Device status: %s." % (label, int(width), int(height),
+                                        str(last).strip(), status)) from last
         flags, initial, index = accepted
         if state is None and self._texture_recipe is None and allow_uav:
+            # only the recipe the caller WANTED is cached; a fallback would
+            # silently degrade every later texture on this device
             self._texture_recipe = (flags, initial)
         if index:
             from ..log import dlss_logger
             wanted = candidates[0]
+            _removed, _hr, status = self.device_status()
             dlss_logger.warning(
                 "[ANTs] D3D12: the driver REFUSED the intended texture recipe "
                 "for '%s' (flags 0x%X, initial state %s; it answered %s) and "
-                "accepted (flags 0x%X, initial state %s) instead. Send this "
-                "line if the "
-                "engine later reports an invalid parameter or the device is "
-                "removed: the texture is not in the state the runtime expects.",
+                "accepted (flags 0x%X, initial state %s) instead. Device "
+                "status at the refusal: %s. The contract still holds (the "
+                "fallback keeps the required flags), but send this line: a "
+                "driver that refuses the exact recipe the proven host uses is "
+                "usually a process that already lost its D3D12 device.",
                 label, wanted[0], state_name(wanted[1]),
-                str(last).strip()[:120], flags, state_name(initial))
+                str(last).strip()[:120], flags, state_name(initial), status)
         self.report_texture_recipe()
         return D3D12Resource(ptr, label, width, height, fmt,
                              width * height * BPP[fmt], initial)
@@ -777,6 +800,15 @@ class GpuContext:
                 "[ANTs] D3D12 host adapter %s (index %d, LUID %s)",
                 self.adapter_name, adapter_index,
                 "{%s, %s}" % self.adapter_luid if self.adapter_luid else "?")
+        health = device.device_status()
+        if health[0]:
+            from ..log import dlss_logger as _dl
+            _dl.warning(
+                "[ANTs] the D3D12 device was created but is ALREADY unusable "
+                "(GetDeviceRemovedReason %s) - this process has lost a D3D12 "
+                "device before (an earlier removal, a driver reset, or the "
+                "legacy engine's CUDA work in this same process). RESTART "
+                "ComfyUI: nothing can be drawn on this device.", health[2])
         self.queue = device.create_command_queue()
         self.allocator = device.create_command_allocator()
         self.list = device.create_command_list(self.allocator)
@@ -790,6 +822,7 @@ class GpuContext:
         self._parked = []              # objects a poisoned list replaced
         self.dead = None               # (hr, text) once the device is removed
         self.recorded = []             # command descriptions, for checkpoints
+        self.health = health           # (removed, hr, text) at creation time
         self.runtime_allocator = None  # the pair NGX records into (lazy)
         self.runtime_list = None
         self.runtime_recoveries = 0
