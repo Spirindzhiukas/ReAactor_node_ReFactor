@@ -307,32 +307,48 @@ def resolve_legacy_dir(choice: str):
 
 
 def stage_nr_runtime(dll_path):
-    """A dir with the chosen NR runtime under its CANONICAL name.
+    """A dir with the CHOSEN NR runtime under its CANONICAL name.
 
     Both consumers need the canonical name: the legacy helper engine locates
-    its files by literal name, and the NGX snippet itself is only ever loaded
-    as ``nvngx_dlssnr.dll`` by every host that works (the runtime's own
-    identity/version probing is name-sensitive; a renamed copy is the one
-    configuration that exists nowhere in the wild).
-    - a set that already carries the canonical name (e.g. the owner's
-      models/DLSS/Merserk_DLLS/ masters) is used IN PLACE - nothing is
-      copied, nothing leaves models/DLSS;
-    - a build under any other name (nvngx_dlssnr_RenoDX_..., ...) is
-      staged under models/DLSS/staged/<dll_name>-<size>/nvngx_dlssnr.dll
-      (content-addressed: an existing stage is reused as-is, so loaded
-      DLL files are never rewritten and never get locked).
+    its files by literal name, and the snippet is only ever loaded as
+    ``nvngx_dlssnr.dll`` by every host that works (the community hosts load
+    it from their runtime folder by that exact name).
+
+    - the chosen file already IS ``nvngx_dlssnr.dll`` -> its folder is used
+      IN PLACE (nothing copied, nothing leaves models/DLSS);
+    - a build under any other name (nvngx_dlssnr_RenoDX_..., ...) is staged
+      under ``models/DLSS/staged/<dll_name>-<size>/nvngx_dlssnr.dll`` as a
+      copy of the CHOSEN file (content-addressed: an existing stage is
+      reused, so loaded DLL files are never rewritten and never get locked).
+
+    Run 28 taught the important half of this rule the hard way: the owner's
+    NR folder ALSO contains a file named ``nvngx_dlssnr.dll`` (a different
+    build than the RenoDX one selected in the node), and the old rule
+    ("this folder carries a canonical name -> use it") silently loaded THAT
+    file instead of the selection - a confounded experiment. Only the
+    chosen file is ever canonicalized now, and a sibling canonical file
+    that is not the selection is called out loudly.
     """
     dll_path = os.path.abspath(dll_path)
     src_dir = os.path.dirname(dll_path)
-    if dll_files(src_dir) and any(
-            f.lower() == "nvngx_dlssnr.dll" for f in dll_files(src_dir)):
-        return src_dir  # canonical set - use exactly where it lives
+    chosen = os.path.basename(dll_path)
+    if chosen.lower() == "nvngx_dlssnr.dll":
+        return src_dir  # already canonical - use exactly where it lives
+    sibling = [f for f in dll_files(src_dir)
+               if f.lower() == "nvngx_dlssnr.dll"]
+    if sibling:
+        logger.warning(
+            "[ANTs] The NR folder also contains a file literally named "
+            "nvngx_dlssnr.dll, but '%s' is the build you selected - staging "
+            "the selected one and ignoring the sibling (run 28 loaded the "
+            "sibling by mistake).", chosen)
     stage = os.path.join(DLSS_ROOT, "staged",
-                         f"{os.path.splitext(os.path.basename(dll_path))[0]}"
+                         f"{os.path.splitext(chosen)[0]}"
                          f"-{os.path.getsize(dll_path)}")
     os.makedirs(stage, exist_ok=True)
     canonical = os.path.join(stage, "nvngx_dlssnr.dll")
-    if not os.path.exists(canonical):
+    if not os.path.exists(canonical) or \
+            os.path.getsize(canonical) != os.path.getsize(dll_path):
         import shutil
         shutil.copyfile(dll_path, canonical)
     for f in dll_files(src_dir):

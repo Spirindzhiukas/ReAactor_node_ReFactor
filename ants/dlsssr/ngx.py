@@ -190,6 +190,9 @@ def writable_cache_dir(tag):
     raise DlssSrError("no writable directory found for NGX runtime artifacts")
 
 
+_SHIM_LOGGED = set()   # shim paths already announced (console triage hygiene)
+
+
 class NgxModule:
     """A loaded NGX provider (driver core or snippet) + shim-routed calls."""
 
@@ -224,9 +227,12 @@ class NgxModule:
                     "already loaded in this process - restart ComfyUI so the "
                     "ANTs host loads first (ANTS_NR_SHIM_NAME renames ours).")
             _, exports = shim_mod.build_shim_dll()
-            _log().status(
-                f"[ANTs] caller shim loaded as {os.path.basename(fwd_path)} "
-                "(set ANTS_NR_SHIM_NAME to change the module name)")
+            loaded = os.path.normcase(os.path.abspath(fwd_path))
+            if loaded not in _SHIM_LOGGED:      # one line per process, not per
+                _SHIM_LOGGED.add(loaded)        # module that routes through it
+                _log().status(
+                    f"[ANTs] caller shim loaded as {os.path.basename(fwd_path)} "
+                    "(set ANTS_NR_SHIM_NAME to change the module name)")
 
             def resolve(name):
                 try:

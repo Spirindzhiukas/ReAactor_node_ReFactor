@@ -23,7 +23,13 @@ python and never registers callbacks.
       `nvngx.dll` name - contract parity with the two working community hosts
       whose sources were decoded this session (see `memory.md` entry and
       `CONTINUATION.md` "Run 28+ host layout"). Suite: 329 checks green.
-- [ ] **Run 28 (owner, one run carries both gates):** `set "ANTS_NR_USE_SHIM=0"`
+- [x] **Run 28 attempt #1 (2026-09-20) = VOID**: our own int29 scanner faulted on
+      a section header and killed ComfyUI before `NGX init ->` (nothing about
+      the runtime was tested). Fixed + pinned: VirtualQuery-guarded reads
+      (`crashlog._Mem`), PE header validation, per-module skip-with-reason, and
+      the staging rule that had silently loaded a same-named sibling instead of
+      the selected build. The launch bat needs no change.
+- [ ] **Run 28 (owner, RE-RUN — one run carries both gates):** `set "ANTS_NR_USE_SHIM=0"`
       in the launch bat (keep `NVSDK_NGX_LOG_LEVEL=1`), scoop, run once.
       - Works → VERSION-gate-vs-shim confirmed → cure = ship a real
         VS_VERSIONINFO resource inside our shim builder (keep the shim), or

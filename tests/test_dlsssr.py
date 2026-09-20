@@ -27,6 +27,38 @@ def raw_exec_lines(bat_bytes):
             yield s
 
 
+def _fake_kernel32(regions, protect=0x04):
+    """A fake kernel32 for the crashlog diagnostics.
+
+    ``VirtualQuery`` reports each (base, size) in ``regions`` as committed
+    and readable - anything else reads as unmapped, exactly the condition
+    that killed run 28. ``VirtualProtect`` succeeds as a no-op.
+    """
+    import ctypes
+
+    class _K:
+        def __init__(self):
+            self.regions = regions
+
+        def VirtualQuery(self, address, mbi, length):
+            addr = address.value if hasattr(address, "value") else int(address)
+            for base, size in self.regions:
+                if base <= addr < base + size:
+                    mbi.BaseAddress = base
+                    mbi.AllocationBase = base
+                    mbi.RegionSize = base + size - addr
+                    mbi.State = 0x1000                      # MEM_COMMIT
+                    mbi.Protect = protect
+                    return ctypes.sizeof(mbi)
+            return 0
+
+        # a staticmethod so the diagnostics can set .argtypes/.restype on it
+        # exactly like they do on the real kernel32 export
+        VirtualProtect = staticmethod(lambda *args: 1)
+
+    return _K()
+
+
 def _iat_tracer_fixture_check():
     """Build a flat (identity-mapped) PE whose only import is KERNEL32!
     {ExitProcess, abort}, run crashlog._patch_iat over it with a fake
@@ -68,7 +100,7 @@ def _iat_tracer_fixture_check():
     image = ctypes.create_string_buffer(bytes(buf), len(buf))
     base = ctypes.addressof(image)
     keep = []
-    fake_k32 = type("K", (), {"VirtualProtect": staticmethod(lambda *a: 1)})()
+    fake_k32 = _fake_kernel32([(base, len(buf))])
     patched, wanted = crashlog._patch_iat(fake_k32, base, keep)
     slots = [ctypes.c_uint64.from_address(
         base + 0x5A0 + i * 8).value for i in range(len(names))]
@@ -76,6 +108,156 @@ def _iat_tracer_fixture_check():
             and wanted == set(names)
             and all(slots[i] != 0xDEADBEEF + i for i in range(len(names)))
             and len(keep) >= 2 * len(names))
+
+
+def _synthetic_module(exec_sites=1, non_exec_site=False, n_sec=None,
+                      opt_size=0xF0, e_lfanew=0x80, table_overflow=False):
+    """A 3-section PE (one executable) in a real in-process buffer.
+
+    Returns (buffer, base, exec_rva) so tests can assert on the bytes.
+    ``table_overflow`` claims more sections than fit before the buffer
+    ends - the exact shape that walked a scanner off the mapped page on
+    the rig."""
+    import ctypes
+    import struct
+
+    exec_rva, data_rva = 0x1000, 0x2000
+    buf = bytearray(0x1000 + 2 * 0x1000)          # headers + 2 sections
+    buf[0:2] = b"MZ"
+    buf[0x3C:0x40] = struct.pack("<I", e_lfanew)
+    buf[e_lfanew:e_lfanew + 4] = b"PE\x00\x00"
+    count = n_sec if n_sec is not None else 3
+    buf[e_lfanew + 6:e_lfanew + 8] = struct.pack("<H", count)
+    buf[e_lfanew + 20:e_lfanew + 22] = struct.pack("<H", opt_size)
+    sec0 = e_lfanew + 24 + opt_size
+    entries = [(".text\x00\x00\x00", 0x100, exec_rva, 0x60000020),
+               (".data\x00\x00\x00", 0x100, data_rva, 0xC0000040),
+               (".rdata\x00\x00", 0x100, 0x3000, 0x40000040)]
+    for index, (name, vsize, vaddr, chars) in enumerate(entries):
+        at = sec0 + index * 40
+        if at + 40 > len(buf):
+            break
+        buf[at:at + 8] = name.encode("latin1")
+        buf[at + 8:at + 12] = struct.pack("<I", vsize)
+        buf[at + 12:at + 16] = struct.pack("<I", vaddr)
+        buf[at + 36:at + 40] = struct.pack("<I", chars)
+    for k in range(exec_sites):   # contiguous: "CD 29 CD 29"
+        buf[exec_rva + 0x10 + k * 2:exec_rva + 0x12 + k * 2] = b"\xcd\x29"
+    if non_exec_site:
+        buf[data_rva + 0x20:data_rva + 0x22] = b"\xcd\x29"
+    if table_overflow:
+        # 96 sections starting at 0x1A0 => the table ends at 0x10A0, i.e.
+        # past the first mapped page (the caller maps only 0x1000 bytes)
+        buf[e_lfanew + 6:e_lfanew + 8] = struct.pack("<H", 96)
+    image = ctypes.create_string_buffer(bytes(buf), len(buf))
+    return image, ctypes.addressof(image), exec_rva
+
+
+def _int29_scanner_fixture_check():
+    """The CD29->CC90 rewriter on a synthetic PE: converts fast-fail sites
+    in EXECUTABLE sections only, and reports what it did."""
+    import ctypes
+
+    from ants.dlsssr import crashlog
+
+    image, base, exec_rva = _synthetic_module(exec_sites=2,
+                                              non_exec_site=True)
+    fake_k32 = _fake_kernel32([(base, len(image))])
+    lines = []
+    saved_emit = crashlog._emit
+    crashlog._emit = lines.append
+    crashlog._state["int29_done"] = False
+    try:
+        crashlog.install_int29_trap([(base, "fixture.dll")], k32=fake_k32)
+    finally:
+        crashlog._emit = saved_emit
+        crashlog._state["int29_done"] = False
+    text = "".join(lines)
+    exec_bytes = bytes(ctypes.string_at(base + exec_rva + 0x10, 4))
+    non_exec = bytes(ctypes.string_at(base + 0x2000 + 0x20, 2))
+    return (exec_bytes == b"\xcc\x90\xcc\x90"          # both converted
+            and non_exec == b"\xcd\x29"                  # data section untouched
+            and "2 fast-fail site(s) converted to breakpoints in "
+                "fixture.dll" in text)
+
+
+def _int29_scanner_safety_check():
+    """HOSTILE fixtures: unmapped base, absurd headers, a section table that
+    runs off the mapped image, and an executable section nobody mapped.
+    Run 28's scanner KILLED the process on the last of these - every case
+    must now be skipped with a logged reason."""
+    from ants.dlsssr import crashlog
+
+    results = []
+    lines = []
+    saved_emit = crashlog._emit
+    crashlog._emit = lines.append
+    try:
+        # (a) a base the guard reports as unmapped
+        crashlog._state["int29_done"] = False
+        empty_k32 = _fake_kernel32([])
+        crashlog.install_int29_trap([(0x7FFF00000000, "ghost.dll")],
+                                    k32=empty_k32)
+        results.append("not readable" in "".join(lines))
+        # (b) absurd section count
+        lines.clear()
+        image, base, _ = _synthetic_module(exec_sites=1, n_sec=0xFFFF)
+        crashlog._state["int29_done"] = False
+        crashlog.install_int29_trap([(base, "absurd.dll")],
+                                    k32=_fake_kernel32([(base, len(image))]))
+        results.append("implausible section count" in "".join(lines))
+        # (c) the section table runs past the end of the mapped image
+        lines.clear()
+        image, base, _ = _synthetic_module(exec_sites=1,
+                                           table_overflow=True)
+        crashlog._state["int29_done"] = False
+        # only the header page is mapped; the claimed section table is not
+        crashlog.install_int29_trap([(base, "overflow.dll")],
+                                    k32=_fake_kernel32([(base, 0x1000)]))
+        results.append("section table outside the mapped headers"
+                       in "".join(lines))
+        # (d) an executable section that no page backs
+        import ctypes
+        import struct
+        lines.clear()
+        image, base, _ = _synthetic_module(exec_sites=1)
+        ctypes.c_uint32.from_address(base + 0x80 + 24 + 0xF0 + 12).value = \
+            0x900000        # section 0's VirtualAddress, far off the image
+        crashlog._state["int29_done"] = False
+        crashlog.install_int29_trap([(base, "wild.dll")],
+                                    k32=_fake_kernel32([(base, len(image))]))
+        text = "".join(lines)
+        results.append("no fast-fail site" in text
+                       and "unreadable page" in text)
+        struct  # imported for symmetry with the other fixtures
+    finally:
+        crashlog._emit = saved_emit
+        crashlog._state["int29_done"] = False
+    return all(results)
+
+
+def _nr_staging_rule_check():
+    """Run 28's confound: a folder holding BOTH the selected build and a
+    same-named sibling used to load the SIBLING. The selected file must be
+    the one canonicalized, and an already-canonical selection is used in
+    place (nothing copied)."""
+    import tempfile
+
+    from ants.dlssnr import discovery as nr_discovery
+
+    folder = Path(tempfile.mkdtemp(prefix="ants_nr_folder_"))
+    selected = folder / "nvngx_dlssnr_RenoDX_4000_series_friendly.dll"
+    sibling = folder / "nvngx_dlssnr.dll"
+    selected.write_bytes(b"MZ" + b"selected-build" * 16)
+    sibling.write_bytes(b"MZ" + b"sibling" * 8)
+    stage = Path(nr_discovery.stage_nr_runtime(str(selected)))
+    staged = stage / "nvngx_dlssnr.dll"
+    ok = (stage != folder
+          and staged.read_bytes() == selected.read_bytes()
+          and staged.read_bytes() != sibling.read_bytes())
+    # the already-canonical selection stays exactly where it lives
+    ok = ok and Path(nr_discovery.stage_nr_runtime(str(sibling))) == folder
+    return ok
 
 
 def _resolver_tolerance_check():
@@ -394,9 +576,20 @@ def main():
     check("ngx: E1 direct-bind gate ships (ANTS_NR_USE_SHIM=0 = no shim "
           "module in process = Merserk host geometry; VERSION-gate test)",
           "ANTS_NR_USE_SHIM" in ngx_src)
+    check("discovery: the SELECTED NR build is the one canonicalized (run 28 "
+          "loaded a same-named sibling instead) and a canonical selection "
+          "is used in place",
+          _nr_staging_rule_check())
     check("crashlog: IAT termination tracer walks imports and patches the "
           "termination APIs (flat-PE fixture, fake kernel32)",
           _iat_tracer_fixture_check())
+    check("crashlog: int29 scanner converts CD29 sites in executable "
+          "sections only (synthetic PE)",
+          _int29_scanner_fixture_check())
+    check("crashlog: int29 scanner survives hostile images (unmapped base, "
+          "absurd section count, table past the mapping, unmapped section) "
+          "- run 28 died in this scan, before NGX init",
+          _int29_scanner_safety_check())
     check("tools: crash-offset resolver ships (names MODULE+0xRVAs)",
           (REPO / "tools" / "resolve_crash_offset.py").is_file()
           and "bisect" in (REPO / "tools" / "resolve_crash_offset.py").read_text())

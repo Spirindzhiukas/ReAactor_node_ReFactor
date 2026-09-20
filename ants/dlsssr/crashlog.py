@@ -67,6 +67,92 @@ def _kernel32():
         return None
 
 
+class _MBI(ctypes.Structure):
+    """MEMORY_BASIC_INFORMATION (x64)."""
+
+    _fields_ = [("BaseAddress", ctypes.c_void_p),
+                ("AllocationBase", ctypes.c_void_p),
+                ("AllocationProtect", ctypes.c_uint32),
+                ("_align", ctypes.c_uint32),
+                ("RegionSize", ctypes.c_size_t),
+                ("State", ctypes.c_uint32),
+                ("Protect", ctypes.c_uint32),
+                ("Type", ctypes.c_uint32)]
+
+
+_MEM_COMMIT = 0x1000
+_PAGE_NOACCESS = 0x01
+_PAGE_GUARD = 0x100
+
+
+class _Mem:
+    """Fault-free reads over another module's in-memory image.
+
+    A diagnostic must NEVER fault, and ``try/except`` does not buy that: an
+    access violation raised inside a raw ctypes dereference or
+    ``string_at`` is a HARD Windows exception, not a Python one. Run 28
+    (2026-09-20) proved it the expensive way - the int29 scanner killed the
+    whole ComfyUI process while reading a section header, before NGX was
+    even initialized, so the run tested nothing.
+
+    Every read therefore goes through VirtualQuery first and only touches
+    committed, non-guard, readable pages. Refused addresses are recorded so
+    the verdict can say what was skipped instead of dying.
+    """
+
+    def __init__(self, k32):
+        self.k32 = k32
+        self._mbi = _MBI()
+        self.holes = []          # addresses we refused to touch
+        try:
+            k32.VirtualQuery.argtypes = [ctypes.c_void_p,
+                                         ctypes.POINTER(_MBI),
+                                         ctypes.c_size_t]
+            k32.VirtualQuery.restype = ctypes.c_size_t
+        except Exception:
+            pass
+
+    def region(self, address):
+        """(region_end, protect) for the committed region holding `address`."""
+        mbi = self._mbi
+        # the struct is passed BY REFERENCE through the declared argtype;
+        # that also lets tests hand in a python stand-in that fills it
+        if not self.k32.VirtualQuery(ctypes.c_void_p(address),
+                                     mbi, ctypes.sizeof(mbi)):
+            return 0, 0
+        if mbi.State != _MEM_COMMIT:
+            return 0, 0
+        if mbi.Protect & (_PAGE_GUARD | _PAGE_NOACCESS):
+            return 0, 0
+        return (mbi.BaseAddress or 0) + mbi.RegionSize, mbi.Protect
+
+    def read(self, address, size):
+        """Bytes at `address`, or None when any part is not readable."""
+        out = bytearray()
+        at = int(address)
+        while len(out) < size:
+            end, _ = self.region(at)
+            if not end or end <= at:
+                self.holes.append(at)
+                return None
+            take = min(end - at, size - len(out))
+            out += ctypes.string_at(at, take)
+            at += take
+        return bytes(out)
+
+    def u16(self, address):
+        data = self.read(address, 2)
+        return None if data is None else int.from_bytes(data, "little")
+
+    def u32(self, address):
+        data = self.read(address, 4)
+        return None if data is None else int.from_bytes(data, "little")
+
+    def u64(self, address):
+        data = self.read(address, 8)
+        return None if data is None else int.from_bytes(data, "little")
+
+
 def _module_for(k32, address):
     """Resolve an address to '<module path>+0x<offset>' (no refcount churn)."""
     handle = ctypes.c_void_p(0)
@@ -219,31 +305,34 @@ def _term_stub(k32, name, original, keep):
     return ctypes.cast(stub, ctypes.c_void_p).value
 
 
-def _patch_iat(k32, base, keep):
+def _patch_iat(k32, base, keep, mem=None):
     """Rewrite the termination-API thunks of one loaded image.
 
     In-memory PE walk (base = HMODULE; RVAs are direct offsets from the
-    base in a mapped image). Returns (patched, wanted_seen): patched as
+    base in a mapped image). Every read goes through the VirtualQuery
+    guard, so a malformed or partially mapped image is skipped instead of
+    faulting (see _Mem). Returns (patched, wanted_seen): patched as
     'dll!name' strings, wanted_seen = which of _TERM_PROTOS the module
     imports at all (the static audit: absent names mean a statically
     linked CRT or inline syscall stubs)."""
     base = int(base)
+    if mem is None:
+        mem = _Mem(k32)
 
     def u32(off):
-        return ctypes.c_uint32.from_address(base + off).value
+        return mem.u32(base + off)
 
     def u64(off):
-        return ctypes.c_uint64.from_address(base + off).value
+        return mem.u64(base + off)
 
     def cstr(rva):
-        try:
-            raw = ctypes.string_at(base + rva, 96)
-        except Exception:
+        raw = mem.read(base + rva, 96)
+        if raw is None:
             return ""
         return raw.split(b"\x00", 1)[0].decode("ascii", "replace")
 
     e_lfanew = u32(0x3C)
-    if ctypes.c_uint32.from_address(base + e_lfanew).value != 0x00004550:
+    if e_lfanew is None or u32(e_lfanew) != 0x00004550:
         return [], set()
     imp_rva = u32(e_lfanew + 144)  # optional header +112 (data dirs), dir[1]
     if not imp_rva:
@@ -253,13 +342,15 @@ def _patch_iat(k32, base, keep):
     while d < 4096:  # import descriptor array, zero-terminated
         desc = imp_rva + d * 20
         oft, name_rva, ft = u32(desc), u32(desc + 12), u32(desc + 16)
+        if oft is None or name_rva is None or ft is None:
+            break
         if not (oft or ft or name_rva):
             break
         dll = cstr(name_rva)
         i = 0
         while i < 65535:  # thunk array, zero-terminated
             t = u64((oft or ft) + i * 8)
-            if not t:
+            if t is None or not t:
                 break
             if not t >> 63:  # by-name import (ordinals can't be matched)
                 fname = cstr(t + 2)  # IMAGE_IMPORT_BY_NAME: hint + name
@@ -283,12 +374,13 @@ def install_termination_trap(module_targets):
     if k32 is None or _state["trap"]:
         return
     _state["trap"] = True
+    mem = _Mem(k32)
     all_seen = set()
     for base, label in module_targets:
         if not base:
             continue
         try:
-            patched, wanted = _patch_iat(k32, base, _state["trap_keep"])
+            patched, wanted = _patch_iat(k32, base, _state["trap_keep"], mem)
         except Exception as exc:
             _emit(f"[ANTs] termination trap: import walk failed for {label} "
                   f"(base 0x{int(base):X}): {exc}\n")
@@ -336,7 +428,11 @@ def install_ntdll_terminate_detour():
         # checks between mov-eax and syscall are rsp/flag-relative and copy
         # verbatim - and ensure the stolen block ends with a ret so the
         # kernel's return comes back to our trampoline.
-        raw = ctypes.string_at(addr, 32)
+        raw = _Mem(k32).read(addr, 32)
+        if raw is None:
+            _emit("[ANTs] ntdll detour SKIPPED: the NtTerminateProcess page "
+                  "is not readable\n")
+            return
         if raw[:3] != b"\x4c\x8b\xd1" or raw[3] != 0xB8:
             _emit("[ANTs] ntdll detour SKIPPED: prologue is not 'mov r10,rcx; "
                   f"mov eax,<ssn>' ({raw[:32].hex()}) - report this line\n")
@@ -395,8 +491,104 @@ def install_ntdll_terminate_detour():
         _emit(f"[ANTs] ntdll detour failed (diagnostic only): {exc}\n")
 
 
-def install_int29_trap(module_targets):
-    """Convert the snippet's fast-fail instructions into breakpoints.
+def _rewrite_site(mem, k32, site):
+    """CD 29 -> CC 90 at one verified fast-fail site."""
+    if mem.read(site, 2) != b"\xcd\x29":
+        return False
+    old = ctypes.c_uint32(0)
+    try:
+        protect = k32.VirtualProtect
+        protect.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                            ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)]
+        if not protect(ctypes.c_void_p(site), ctypes.c_size_t(2), 0x40,
+                       ctypes.byref(old)):
+            return False
+    except Exception:
+        return False
+    ctypes.c_uint8.from_address(site).value = 0xCC
+    ctypes.c_uint8.from_address(site + 1).value = 0x90
+    try:
+        protect(ctypes.c_void_p(site), ctypes.c_size_t(2), old.value,
+                ctypes.byref(old))
+    except Exception:
+        pass
+    return True
+
+
+def _patch_section(mem, k32, start, size):
+    """Rewrite every fast-fail site in one executable section. Only guard-
+    verified pages are read; holes are stepped over, never touched."""
+    chunk_limit = 64 << 10
+    patched = 0
+    done = 0
+    while done < size:
+        n = min(chunk_limit, size - done)
+        chunk = mem.read(start + done, n)
+        if chunk is None:
+            n = min(0x1000, n)
+            chunk = mem.read(start + done, n)
+            if chunk is None:
+                done += n       # unreadable page: skip it, never touch it
+                continue
+        at = 0
+        while True:
+            at = chunk.find(b"\xcd\x29", at)
+            if at < 0:
+                break
+            if _rewrite_site(mem, k32, start + done + at):
+                patched += 1
+            at += 2
+        done += len(chunk)
+    return patched
+
+
+def _scan_int29_sites(mem, k32, base, label):
+    """One module: validate the headers, then walk its executable sections.
+
+    Returns (patched, note). NEVER dereferences anything the guard has not
+    verified: a module that is not a plain mapped image is skipped with a
+    reason instead of killing the process (run 28's exact failure mode)."""
+    header = mem.read(base, 0x40)
+    if header is None:
+        return 0, "header page not readable"
+    if header[:2] != b"MZ":
+        return 0, "no MZ signature"
+    e_lfanew = int.from_bytes(header[0x3C:0x40], "little")
+    if not 0x40 <= e_lfanew <= 0x1000:
+        return 0, f"implausible e_lfanew 0x{e_lfanew:X}"
+    head = mem.read(base + e_lfanew, 24)
+    if head is None or head[:4] != b"PE\x00\x00":
+        return 0, "no PE signature"
+    n_sec = int.from_bytes(head[6:8], "little")
+    size_opt = int.from_bytes(head[20:22], "little")
+    if not 1 <= n_sec <= 96:
+        return 0, f"implausible section count {n_sec}"
+    if size_opt > 0x400:
+        return 0, f"implausible optional-header size {size_opt}"
+    table = mem.read(base + e_lfanew + 24 + size_opt, n_sec * 40)
+    if table is None:
+        return 0, "section table outside the mapped headers"
+    patched = 0
+    scanned = 0
+    for index in range(n_sec):
+        entry = table[index * 40:(index + 1) * 40]
+        vsize = int.from_bytes(entry[8:12], "little")
+        vaddr = int.from_bytes(entry[12:16], "little")
+        chars = int.from_bytes(entry[36:40], "little")
+        if not vsize or not chars & 0x20000000:      # not executable
+            continue
+        scanned += 1
+        patched += _patch_section(mem, k32, base + vaddr, vsize)
+    note = f"{scanned} executable section(s)"
+    if mem.holes:
+        note += (f"; refused {len(mem.holes)} unreadable page(s), first at "
+                 f"0x{mem.holes[0]:X}")
+        del mem.holes[:]
+    return patched, note
+
+
+def install_int29_trap(module_targets, k32=None):
+    """Convert the runtime's fast-fail instructions into breakpoints.
 
     Runs 14-27c terminal diagnosis: the deliberate kill survives the
     patched IATs AND the ntdll detour => it is kernel-direct - CRT abort
@@ -407,67 +599,33 @@ def install_int29_trap(module_targets):
     vectored handler DOES see, and the crash verdict then names the exact
     module+offset of the fast-fail. Diagnostic-grade; the process was
     dying at that instruction anyway - a logged site is strictly better.
+
+    Every read is VirtualQuery-verified (_Mem). This runs at SESSION INIT,
+    before NGX even initializes, so a fault here destroys a whole
+    experiment - run 28 (2026-09-20) died exactly that way. The hardening
+    is pinned by tests over a synthetic PE plus hostile (unmapped /
+    absurd-header) fixtures.
     """
-    k32 = _kernel32()
+    if k32 is None:
+        k32 = _kernel32()
     if k32 is None or _state.get("int29_done"):
         return
     _state["int29_done"] = True
-    for base, label in module_targets:
-        if not base:
-            continue
-        base = int(base)
-
-        def u32(off):
-            return ctypes.c_uint32.from_address(base + off).value
-
+    mem = _Mem(k32)
+    targets = [(int(base), label) for base, label in module_targets if base]
+    _emit(f"[ANTs] int29 trap: scanning {len(targets)} module(s) for "
+          "kernel-direct fast-fail sites (CD 29)\n")
+    for base, label in targets:
         try:
-            e_lfanew = u32(0x3C)
-            if ctypes.c_uint32.from_address(base + e_lfanew).value != 0x00004550:
-                continue
-            n_sec = u32(e_lfanew + 6)
-            sec0 = (e_lfanew + 24) + u32(e_lfanew + 20)
-            patched = 0
-            old = ctypes.c_uint32(0)
-            protect = k32.VirtualProtect
-            protect.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
-                                ctypes.c_uint32,
-                                ctypes.POINTER(ctypes.c_uint32)]
-            CHUNK = 4 << 20
-            for s in range(n_sec):
-                head = sec0 + s * 40
-                vsize, vaddr = u32(head + 8), u32(head + 12)
-                chars = ctypes.c_uint32.from_address(base + head + 36).value
-                if vsize == 0 or not chars & 0x20000000:  # not executable
-                    continue
-                done = 0
-                while done < vsize:
-                    n = min(CHUNK, vsize - done)
-                    try:
-                        chunk = ctypes.string_at(base + vaddr + done, n)
-                    except Exception:
-                        break
-                    at = 0
-                    while True:
-                        at = chunk.find(b"\xcd\x29", at)
-                        if at < 0:
-                            break
-                        site = base + vaddr + done + at
-                        if protect(ctypes.c_void_p(site),
-                                   ctypes.c_size_t(2), 0x40,
-                                   ctypes.byref(old)):
-                            ctypes.c_uint8.from_address(site).value = 0xCC
-                            ctypes.c_uint8.from_address(site + 1).value = 0x90
-                            protect(ctypes.c_void_p(site),
-                                    ctypes.c_size_t(2), old.value,
-                                    ctypes.byref(old))
-                            patched += 1
-                        at += 2
-                    done += n
-            if patched:
-                _emit(f"[ANTs] int29 trap: {patched} fast-fail site(s) "
-                      f"converted to breakpoints in {label} - the next "
-                      "fast-fail logs its exact address instead of dying "
-                      "silently\n")
-        except Exception as exc:
-            _emit(f"[ANTs] int29 trap failed for {label} (diagnostic only): "
-                  f"{exc}\n")
+            patched, note = _scan_int29_sites(mem, k32, base, label)
+        except Exception as exc:      # a diagnostic never kills the run
+            _emit(f"[ANTs] int29 trap: {label} scan skipped ({exc})\n")
+            continue
+        if patched:
+            _emit(f"[ANTs] int29 trap: {patched} fast-fail site(s) "
+                  f"converted to breakpoints in {label} ({note}) - the next "
+                  "fast-fail logs its exact address instead of dying "
+                  "silently\n")
+        else:
+            _emit(f"[ANTs] int29 trap: {label} has no fast-fail site "
+                  f"({note})\n")

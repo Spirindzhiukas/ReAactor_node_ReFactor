@@ -113,6 +113,7 @@ class DlssNrSession:
         # The runtime is loaded as nvngx_dlssnr.dll from a staged folder: every
         # host that works loads it under that name, and a renamed copy is the
         # one configuration that exists nowhere in the wild.
+        from ..log import dlss_logger
         self.stage_dir = stage_nr_runtime(dll_path)
         runtime = os.path.join(self.stage_dir, "nvngx_dlssnr.dll")
         if not os.path.isfile(runtime):
@@ -120,12 +121,23 @@ class DlssNrSession:
                 "[ANTs] canonical NR runtime missing from the staging folder:\n"
                 f"    {runtime}\n"
                 f"    (staged from {dll_path})")
-        if os.path.normcase(os.path.abspath(runtime)) != os.path.normcase(
-                os.path.abspath(dll_path)):
-            from ..log import dlss_logger
-            dlss_logger.status(
-                "[ANTs] NR runtime staged under its canonical name: "
-                f"{runtime}")
+        selected = os.path.normcase(os.path.abspath(dll_path)) == \
+            os.path.normcase(os.path.abspath(runtime))
+        # The ONE file we run must be the file the owner selected: a same-
+        # named sibling in the same folder silently became the runtime on
+        # run 28 and confounded that experiment (see stage_nr_runtime).
+        if not selected and os.path.getsize(runtime) != os.path.getsize(dll_path):
+            raise DlssSrError(
+                "[ANTs] NR staging mismatch: the canonical runtime is not a "
+                "copy of the selected build.\n"
+                f"    selected: {dll_path} ({os.path.getsize(dll_path)} bytes)\n"
+                f"    staged:   {runtime} ({os.path.getsize(runtime)} bytes)\n"
+                "    Nothing is loaded. Delete the staged folder and retry.")
+        dlss_logger.status(
+            "[ANTs] NR runtime in use: "
+            f"{runtime} ({os.path.getsize(runtime)} bytes)"
+            + ("" if selected else
+               f" - a staged copy of the selected {os.path.basename(dll_path)}"))
 
         # Legacy snippet-direct mode (ANTS_NR_USE_OWN_PARAMS=1) stays
         # available for A/Bs: it is the configuration runs 14-27c used.

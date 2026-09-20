@@ -88,6 +88,43 @@ Outcomes:
 After NR settles: drop-Merserk cleanup (plan.md), credit Merserk + document
 provenance in the nodepack docs.
 
+## Run 28 attempt #1 — VOID (our scanner faulted; fixed 2026-09-20)
+
+The first run-28 attempt never reached the runtime: the process died inside
+`crashlog.install_int29_trap` (our diagnostic) reading a PE section header -
+`Windows fatal exception: access violation` at `crashlog.py:421 u32`, full
+all-thread faulthandler dump, then `TERMINATION via ntdll!NtTerminateProcess
+(status=0xC0000005)` from our own detour. The E1 shim gate therefore never
+ran and the run says NOTHING about `nvngx_dlssnr.dll`.
+
+It did prove the instrumentation lines fire: trap lines for the session owner
++ snippet, the static audit line, `ntdll detour ARMED (stolen 21-byte syscall
+stub)` - all before the fault.
+
+Both bugs are fixed and pinned by tests, so the next run is comparable:
+
+1. **Fault-proof diagnostics.** `try/except` cannot catch a raw dereference
+   (an AV in a ctypes getter is a hard Windows exception). Every read in
+   `crashlog` now goes through `_Mem` (VirtualQuery-verified, region by
+   region); the int29 scanner validates MZ/PE/e_lfanew/section-count/
+   optional-header-size/section-table-bounds and skips with a logged reason;
+   `_patch_iat` and the ntdll stub read use the same guard; each module is
+   wrapped so a diagnostic can never kill a run.
+2. **The staged file is the selected file.** The NR folder also contains a
+   file literally named `nvngx_dlssnr.dll`; the old staging rule used it in
+   place, so run 28 loaded a DIFFERENT build than the node selection (and
+   than every run before it). Now only the chosen file is canonicalized
+   (`models/DLSS/staged/<name>-<size>/`), the sibling is named in a warning,
+   the exact runtime in use is logged with its size, and a canonical file
+   that is not a copy of the selection is refused.
+
+Re-run the same bat (`ANTS_NR_USE_SHIM=0`, `NVSDK_NGX_LOG_LEVEL=1`). Expected
+new lines before `NGX init ->`:
+`[ANTs] NR runtime in use: <path> (<bytes>)`, `[ANTs] int29 trap: scanning 2
+module(s) ...`, and then either `N fast-fail site(s) converted to breakpoints
+in <module>` or `no fast-fail site (...)`. The three outcomes below are
+unchanged.
+
 ## Run 28+ host layout — IMPLEMENTED while run 28 is pending (2026-09-20)
 
 The whole NR host was rebuilt onto the layout the **working** hosts of this
