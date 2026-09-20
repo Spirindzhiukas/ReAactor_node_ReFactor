@@ -429,16 +429,25 @@ class ReFactorDLSS5Enhancer:
         out = out[0].to(device=frame.device, dtype=torch.float32).contiguous()
         return blend_frames(frame, out, float(strength))
 
-    def enhance(self, image, nr_dll_version, sr_dll_version, fg_dll_version,
-                sr_model, nr_model_preset, pre_denoise_mode, engine,
-                gpu_acceleration, use_nr_schedule, style,
-                intensity, local_tone, local_structure, skin_structure,
+    # Focused subclasses (see ReFactorDLSS5Processor / ...Native) drop whole
+    # widgets, so every input they may drop carries a default here and lives
+    # at the END of the signature. ComfyUI calls by keyword, so the order is
+    # irrelevant to it.
+    ENGINE_MODE = None          # forced engine for subclasses (None = the widget)
+
+    def enhance(self, image, nr_dll_version, use_nr_schedule,
+                style, intensity, local_tone, local_structure, skin_structure,
                 color_strength, tone_preservation, face_skin_protection,
                 grain_preservation, auto_mask, temporal_history, scene_change_threshold,
                 hdr_bridge_mode, diffuse_white_nits, scene_paper_white_scale,
                 hdr_transfer_strength, bridge_color_strength, black_lever,
-                pre_denoise_strength, denoise_model=None, nr_schedule=None, mask=None):
+                pre_denoise_strength, denoise_model=None, nr_schedule=None, mask=None,
+                engine=ENGINE_NATIVE, sr_dll_version="auto", fg_dll_version="auto",
+                sr_model=SR_MODEL_DEFAULT, pre_denoise_mode=PRE_DENOISE_SR,
+                gpu_acceleration=GPU_AUTO, nr_model_preset="Default"):
 
+        if self.ENGINE_MODE is not None:
+            engine = self.ENGINE_MODE
         self.load_bridge(nr_dll_version, engine)
         native = engine == ENGINE_NATIVE
         self._nr_preset = int(_NR_PRESET_TO_INT.get(nr_model_preset, 0))
@@ -716,3 +725,90 @@ class ReFactorDLSS5Enhancer:
         progress_bar_reset(pbar)
 
         return (torch.stack(enhanced_batch),)
+
+
+# --------------------------------------------------------------------------
+# Focused processors (owner request, 2026-09-20): one node per engine, so a
+# run can never pick the other path by accident and the debug surface of each
+# engine stays independent. Both take the SAME ANTs DLSS NR Scheduler output,
+# both keep the HDR Colour Bridge and the whole look control set; they differ
+# only in which engine they drive and therefore in which widgets they show.
+#
+# Naming (owner asked): the DLL lineage is the RenoDX DLSS-5 addon
+# (clshortfuse, MIT) - a ReShade addon - repacked by Merserk and bridged by
+# the community "neuroframe" helper pair. OptiScaler is a DIFFERENT project (a
+# DLSS/XeSS/FSR call redirector) and none of its code is involved here, so the
+# accurate short name is ReShade-based.
+# --------------------------------------------------------------------------
+
+def _without_inputs(types, names):
+    """A copy of an INPUT_TYPES dict without the named widgets."""
+    import copy
+    types = copy.deepcopy(types)
+    for section in types.values():
+        if isinstance(section, dict):
+            for name in names:
+                section.pop(name, None)
+    return types
+
+
+class ReFactorDLSS5Processor(ReFactorDLSS5Enhancer):
+    """ANTs DLSS5 Processor (legacy / ReShade-RenoDX-derived DLL engine).
+
+    The engine that already works on this rig (the RenoDX-derived
+    nvngx_dlssnr.dll driven through the neuroframe helper pair). No engine
+    selector and none of the widgets that only the native path can act on: the
+    SR pre-denoise host, the SR runtime picker, the NR render preset (the
+    legacy helper has no such field) and the reserved FG picker are gone from
+    its UI, so nothing on the node can promise something the engine cannot do.
+    """
+
+    ENGINE_MODE = ENGINE_LEGACY
+    DESCRIPTION = (
+        "DLSS5 frame enhancement through the legacy DLL engine (RenoDX-derived "
+        "nvngx_dlssnr.dll + the neuroframe helper pair by Merserk, credit to "
+        "clshortfuse's RenoDX work) - the engine that runs this rig today, "
+        "including its CUDA zero-copy path (GPU acceleration ON = CUDA).\n"
+        "This node drives that engine ONLY; see ANTs DLSS5 Processor "
+        "(Native NGX, experimental) for the pack's own pure-Python NGX host.\n"
+        "Multi-pass plans come from the ANTs DLSS NR Scheduler node "
+        "(nr_schedule input)."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return _without_inputs(
+            ReFactorDLSS5Enhancer.INPUT_TYPES(),
+            ("engine", "sr_dll_version", "sr_model", "pre_denoise_mode",
+             "fg_dll_version", "nr_model_preset"))
+
+
+class ReFactorDLSS5ProcessorNative(ReFactorDLSS5Enhancer):
+    """ANTs DLSS5 Processor (experimental, the pack's own native NGX host).
+
+    Our pure-Python D3D12 + NGX host driving nvngx_dlssnr.dll directly: no
+    3rd-party helper DLLs, feature 18 called through the caller shim, the SR
+    pre-denoise host available. No engine selector - this node is the native
+    path and nothing else. Experimental by design: it is the path we are still
+    validating, kept separate so it cannot perturb the working node.
+    """
+
+    ENGINE_MODE = ENGINE_NATIVE
+    DESCRIPTION = (
+        "EXPERIMENTAL: the pack's own pure-Python NGX host drives "
+        "nvngx_dlssnr.dll directly (D3D12 device, feature 18 through the "
+        "caller shim, no 3rd-party helper DLLs). Separate node so the native "
+        "path can fail loudly without touching the working legacy processor.\n"
+        "Requirements: an NR runtime in ComfyUI/models/DLSS/NR/ (any filename; "
+        "the pack probes exports, never names) and, on RTX 30/40, a "
+        "RenoDX-derived build. Diagnostics: the crash black box, the in-flight "
+        "call labels and the CUDA context-flag report all land in the console "
+        "and in models/DLSS/staged/ANTs/appdata/logs/native-crash.log.\n"
+        "Multi-pass plans come from the ANTs DLSS NR Scheduler node."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return _without_inputs(
+            ReFactorDLSS5Enhancer.INPUT_TYPES(),
+            ("engine", "gpu_acceleration", "fg_dll_version"))

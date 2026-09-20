@@ -11,6 +11,12 @@
  * talk through pure graph state (node.properties + widget values), so the
  * sync works even when nothing is executing.
  *
+ * Processors: the full enhancer plus the two focused ones (legacy engine /
+ * native NGX engine) each get their own header line and their own refresh
+ * button; the widgets the other engine cannot act on are not rendered at all
+ * (their Python INPUT_TYPES omit them), so the three UIs differ by
+ * construction rather than by hiding rules.
+ *
  * Convention note: ComfyUI serves custom-node frontends from the pack's
  * `web` folder (WEB_DIRECTORY = "./web"), not a "js" folder.
  */
@@ -19,9 +25,24 @@ import { api } from "../../scripts/api.js";
 
 const SCHED_CLASS = "ANTsDLSSNRScheduler";
 const ENH_CLASS = "ANTsDLSS5Enhancer";
+// Focused processors (owner request): one node per engine, each with its own
+// UI, all consuming the same scheduler output. The Python classes are
+// subclasses of the full enhancer, so the scheduler link logic is shared.
+const PROC_CLASS = "ANTsDLSS5Processor";
+const PROC_NATIVE_CLASS = "ANTsDLSS5ProcessorNative";
+const ENH_CLASSES = [ENH_CLASS, PROC_CLASS, PROC_NATIVE_CLASS];
 
 const STYLES = ["Default", "Natural", "Cinematic"];
-const STYLE_CYCLE_DEFAULT = ["Natural", "Cinematic"];
+// The owner's showcase plan (also the Python default, ants/dlssnr/schedule.py):
+// 3 passes, Cinematic -> Natural -> Default.
+const STYLE_CYCLE_DEFAULT = ["Cinematic", "Natural", "Default"];
+
+// What each node IS, shown as a header line in its own UI.
+const ENH_HEADER = {
+    [ENH_CLASS]: "engine: both (selector below)",
+    [PROC_CLASS]: "engine: legacy DLLs (RenoDX-derived) - no selector",
+    [PROC_NATIVE_CLASS]: "engine: native NGX host (experimental) - no selector",
+};
 
 // [widget key, human label, min, max, step, default]
 const PER_PASS_NUMERIC = [
@@ -79,7 +100,9 @@ function serializeScheduler(node) {
     const slots = [];
     for (let i = 0; i < passes; i++) {
         const st = passState[i] || {};
-        styles.push(st.style && STYLES.includes(st.style.value) ? st.style.value : STYLE_CYCLE_DEFAULT[i % 2]);
+        styles.push(st.style && STYLES.includes(st.style.value)
+            ? st.style.value
+            : STYLE_CYCLE_DEFAULT[i % STYLE_CYCLE_DEFAULT.length]);
         const vals = {};
         for (const [key] of PER_PASS_NUMERIC) {
             const w = st.fields ? st.fields[key] : null;
@@ -140,7 +163,7 @@ function rebuildSchedulerUI(node) {
         const styleDefault =
             prev && Array.isArray(prev.styles) && STYLES.includes(prev.styles[i])
                 ? prev.styles[i]
-                : STYLE_CYCLE_DEFAULT[i % 2];
+                : STYLE_CYCLE_DEFAULT[i % STYLE_CYCLE_DEFAULT.length];
         state.style = node.addWidget("combo", `Style · pass ${i + 1}`, styleDefault,
             () => serializeScheduler(node), { values: STYLES });
         node.__antsPasses.push(state);
@@ -175,7 +198,38 @@ function rebuildSchedulerUI(node) {
         inp.hidden = !(perDenoise && passes > slotIndex);
     });
 
+    fitNode(node);
     serializeScheduler(node);
+}
+
+/* Grow AND shrink: litegraph grows a node when a widget is added, but
+ * removing widgets (splice) leaves the old size behind - that is why the node
+ * expanded when the per-pass toggles went ON and never came back when they
+ * went OFF. Recompute here, keep the user's width if they widened the node,
+ * and never go below the computed minimum. */
+function fitNode(node) {
+    if (typeof node.computeSize !== "function") return;
+    const computed = node.computeSize();
+    const width = Math.max(computed[0], node.size ? node.size[0] : 0);
+    const height = computed[1];
+    if (node.size && node.size[0] === width && node.size[1] === height) return;
+    if (typeof node.setSize === "function") node.setSize([width, height]);
+    else node.size = [width, height];
+    if (typeof node.setDirtyCanvas === "function") node.setDirtyCanvas(true, true);
+    app.graph.setDirtyCanvas(true, true);
+}
+
+/* A one-line header naming which engine this node drives (not serialized). */
+function addEngineHeader(node, text) {
+    if (!text || node.__antsEngineHeader) return;
+    const w = node.addWidget("text", "\u26a1 engine", text, () => {});
+    if (w) {
+        w.serialize = false;
+        w.disabled = true;
+        node.__antsEngineHeader = true;
+    }
+    const at = node.widgets.indexOf(w);
+    node.widgets.splice(0, 0, node.widgets.splice(at, 1)[0]);   // top of the UI
 }
 
 /* ----------------------------- enhancer side ---------------------------- */
@@ -228,7 +282,7 @@ function refreshConnectedEnhancers(schedNode) {
             const link = app.graph.links[linkId];
             if (!link) continue;
             const target = app.graph.getNodeById(link.target_id);
-            if (target && target.comfyClass === ENH_CLASS) refreshEnhancerControls(target);
+            if (target && ENH_CLASSES.includes(target.comfyClass)) refreshEnhancerControls(target);
         }
     }
 }
@@ -241,8 +295,9 @@ function refreshConnectedEnhancers(schedNode) {
  * re-reads object_info and repopulates the combos, so newly dropped DLLs
  * show up without a browser reload. Lives at the top of the node's UI.     */
 async function refreshDlssCombos(node) {
-    const res = await api.fetchApi("/object_info/" + ENH_CLASS);
-    const info = (await res.json())[ENH_CLASS];
+    const cls = node.comfyClass || ENH_CLASS;
+    const res = await api.fetchApi("/object_info/" + cls);
+    const info = (await res.json())[cls];
     if (!info || !info.input) return;
     const spec = Object.assign({}, info.input.required || {}, info.input.optional || {});
     for (const w of node.widgets) {
@@ -260,7 +315,7 @@ async function refreshDlssCombos(node) {
 app.registerExtension({
     name: "ANTs.DLSS5.RefreshButton",
     beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== ENH_CLASS) return;
+        if (!ENH_CLASSES.includes(nodeData.name)) return;
         const originalCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const result = originalCreated ? originalCreated.apply(this, arguments) : this;
@@ -269,6 +324,7 @@ app.registerExtension({
             btn.serialize = false;
             const at = this.widgets.indexOf(btn);
             this.widgets.splice(0, 0, this.widgets.splice(at, 1)[0]);  // top of the UI
+            addEngineHeader(this, ENH_HEADER[nodeData.name]);
             return result;
         };
     },
@@ -295,7 +351,7 @@ app.registerExtension({
                 setTimeout(() => rebuildSchedulerUI(node), 0);
             };
         }
-        if (node.comfyClass === ENH_CLASS) {
+        if (ENH_CLASSES.includes(node.comfyClass)) {
             setTimeout(() => refreshEnhancerControls(node), 0);
             const originalConnections = node.onConnectionsChange;
             node.onConnectionsChange = function (...args) {

@@ -21,7 +21,7 @@ class DLSSNRScheduler:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "passes": ("INT", {"default": 2, "min": 1, "max": _schedule.MAX_PASSES,
+                "passes": ("INT", {"default": 3, "min": 1, "max": _schedule.MAX_PASSES,
                                    "tooltip": "Number of neural-reconstruction passes per frame "
                                               "(applied in order, each pass re-processes the previous pass output)."}),
                 "use_per_pass_settings": ("BOOLEAN", {"default": False, "label_off": "OFF", "label_on": "ON",
@@ -33,7 +33,8 @@ class DLSSNRScheduler:
                                                                 "slot inherit the main node's denoise_model."}),
                 "schedule_data": ("STRING", {"default": "",
                                              "tooltip": "Serialized schedule (written by the node's dynamic UI). Leave empty "
-                                                        "for the default plan: styles cycle Nature/Cinematic over the pass count."}),
+                                                        "for the default plan: styles cycle Cinematic -> Natural -> Default "
+                                                        "over the pass count."}),
             },
             "optional": {
                 "denoise_model": ("UPSCALE_MODEL",),
@@ -50,8 +51,9 @@ class DLSSNRScheduler:
 
     DESCRIPTION = (
         "Builds a multi-pass NR plan for the ANTs DLSS5 Frame Enhancer: a style "
-        "per pass (default cycle: Natural/Cinematic — the owner-validated pattern "
-        "that beats monolithic nr_passes), optional per-pass full settings and "
+        "per pass (default cycle: Cinematic -> Natural -> Default, 3 passes — the "
+        "owner-validated pattern that beats monolithic nr_passes), optional "
+        "per-pass full settings and "
         "per-pass pre-SR denoise models. Slots left unconnected inherit the "
         "main node's denoise model and strength."
     )

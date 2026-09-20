@@ -150,6 +150,21 @@ python and never registers callbacks.
       ("active CUDA primary context does not use FFmpeg blocking-sync flags")
       → `cuda_flags.py` + the three arming routes + import-time attempt +
       `ANTS_NR_CUDA_FORCE=1`.
+- [x] **OWNER EVIDENCE 22:35 — the CUDA zero-copy path is SOLVED (legacy engine)**: same frame
+      1.18 s vs 14-18 s on host staging. The blocking-sync flag armed at import (~ ants/__init__.py
+      -> cuda_flags) opened the engine's own gate; the log's `0x0C (unknown scheduling)` was a WRONG
+      MASK (scheduling is the low 3 bits: 0x0C = blocking-sync + map-host) — fixed, and the line now
+      names the route that armed it. CLOSED: no more CUDA-path debugging, no --cuda-device/pinned
+      experiments for the native node either.
+- [x] **OWNER EVIDENCE 23:08 — native host, new wall**: `CreateCommittedResource(nr motion)
+      E_INVALIDARG` because the shader-resource recipe carried the UAV flag. Inputs are now plain
+      shader resources (FLAG_NONE + NON_PIXEL_SHADER_RESOURCE, ladder + loud log of the accepted
+      recipe).
+- [x] **NODE SPLIT + SCHEDULER (owner request)**: `ANTsDLSS5Processor` (ReShade-based legacy engine)
+      and `ANTsDLSS5ProcessorNative` (native NGX, experimental) — subclasses, no engine selector,
+      engine-specific widgets only; own JS header/refresh/greying; both take the same schedule.
+      Scheduler defaults to 3 passes Cinematic -> Natural -> Default; the JS re-fits the node size
+      when per-pass rows are removed (it never shrank before).
 - [ ] **Run 34 (owner, fresh process each time)**: 1) native + a SMALL frame
       (768x768) — the state fix's real test; 2) if that works, 4096x3072;
       3) legacy (GPU) in a fresh process; 4) if anything dies: send the

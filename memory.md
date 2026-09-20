@@ -999,3 +999,26 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   DLL with CUDA zero-copy in 2.65 s vs our 14-18 s.
 - Suite: **434 checks** (dlsssr 93, native_flow 56, dlssnr_bridge 101) +
   pyflakes/scope/smoke green.
+
+### 2026-09-20 (owner runs 22:35 / 23:08) — CUDA zero-copy SOLVED, the native input recipe fixed, and the node split
+- **CUDA zero-copy works (legacy engine)**: 1.18 s per frame vs 14-18 s on host staging, same DLL.
+  The blocking-sync flag armed at IMPORT (`cudaSetDeviceFlags(0x04)` before torch built the primary
+  context) opened the engine's own gate. CLOSED - do not re-debug, do not re-run the
+  `--cuda-device` / pinned-memory experiments.
+  - `0x0C (unknown scheduling)` was a WRONG MASK: scheduling is the low 3 bits (CU_CTX_SCHED_MASK =
+    0x07); 0x0C = blocking-sync + map-host. Fixed, and `log_early` now names the arming ROUTE.
+- **Native host, new wall (23:08)**: `CreateCommittedResource(nr motion) 0x80070057` - D3D12 rejects
+  **(ALLOW_UNORDERED_ACCESS, NON_PIXEL_SHADER_RESOURCE)**. Inputs are now PLAIN shader resources
+  (`FLAG_NONE` + NP_SRV, the proven host's recipe) via `create_input_texture2d`, with a recipe ladder
+  and a LOUD line naming the accepted recipe when the intended one is refused.
+- **Node split (owner request)**: `ANTsDLSS5Processor` "Processor (ReShade based)" = legacy DLL
+  engine forced, drops engine/sr_dll_version/sr_model/pre_denoise_mode/nr_model_preset/fg_dll_version;
+  `ANTsDLSS5ProcessorNative` "Processor (Native NGX, experimental)" = native forced, drops
+  engine/gpu_acceleration/fg_dll_version. Both subclass the full enhancer (one implementation),
+  both take the same scheduler output, each has its own JS header + refresh button + greying.
+  - Naming answer: the DLLs come from the RenoDX DLSS-5 addon (a ReShade addon) -> "ReShade based" is
+    accurate; **OptiScaler is a different project** (DLSS/XeSS/FSR redirector) and is not involved.
+- **Scheduler**: default `passes` = 3 with the cycle **Cinematic -> Natural -> Default** (Python +
+  JS), and the JS now RE-FITS the node after rebuilding the dynamic rows (`fitNode`:
+  computeSize/setSize) - it used to grow on toggle-ON and never shrink back on toggle-OFF.
+- Suite: **440 checks** (dlsssr 98, native_flow 56, dlssnr_bridge 101) + pyflakes/scope/smoke green.

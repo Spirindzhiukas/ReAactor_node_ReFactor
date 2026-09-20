@@ -451,37 +451,95 @@ class D3D12Device(ComObject):
                      D3D12_RESOURCE_STATE_COMMON),
                     (D3D12_RESOURCE_FLAG_NONE,
                      D3D12_RESOURCE_STATE_COMMON))
+    # INPUT textures (what the runtime reads). Rig 23:08: the driver answered
+    # E_INVALIDARG for (ALLOW_UNORDERED_ACCESS, NON_PIXEL_SHADER_RESOURCE), so
+    # the UAV flag must not ride along with a shader-resource initial state -
+    # the proven host creates its inputs as PLAIN shader resources, and so do
+    # we. ``common`` is the emergency landing spot (a barrier from COMMON into
+    # the shader state is always legal).
+    _INPUT_RECIPES = ((D3D12_RESOURCE_FLAG_NONE,
+                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+                      (D3D12_RESOURCE_FLAG_NONE,
+                       D3D12_RESOURCE_STATE_COMMON))
+
+    def _recipe_candidates(self, allow_uav, state):
+        """The (flags, initial state) combos to try, best first."""
+        if state is None:
+            if not allow_uav:
+                return ((D3D12_RESOURCE_FLAG_NONE,
+                         D3D12_RESOURCE_STATE_COMMON),)
+            if self._texture_recipe:
+                return (self._texture_recipe,)
+            return self._UAV_RECIPES
+        if state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS:
+            # a UAV initial state REQUIRES the flag
+            return ((D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, state),
+                    (D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                     D3D12_RESOURCE_STATE_COMMON),
+                    (D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON))
+        if allow_uav:
+            return ((D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, state),
+                    (D3D12_RESOURCE_FLAG_NONE, state),
+                    (D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON))
+        return ((D3D12_RESOURCE_FLAG_NONE, state),) + self._INPUT_RECIPES[1:]
 
     def create_texture2d(self, width, height, fmt, allow_uav=True, label="texture",
                          state=None):
         """One committed 2D texture.
 
-        ``state`` pins the INITIAL state (used by the NR/SR inputs, which must
-        be created in a shader-resource state - see :func:`input_state`);
-        without it the UAV recipe cascade picks the first combination the
-        driver accepts and caches it for every later texture.
+        ``state`` pins the INITIAL state; without it the UAV recipe cascade
+        picks the first combination the driver accepts and caches it for every
+        later texture. A refused combo is not silent: the pack logs which one
+        the driver took instead, because "the texture is not what the runtime
+        expects" is exactly how E_INVALIDARG at Close() and device removals
+        start (rig 18:25 / 20:39 / 21:52 / 23:08).
         """
-        if state is not None:
-            recipes = ((D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS if allow_uav
-                        else D3D12_RESOURCE_FLAG_NONE, state),)
-        elif allow_uav:
-            recipes = (self._texture_recipe,) if self._texture_recipe else self._UAV_RECIPES
-        else:
-            recipes = ((D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON),)
+        candidates = self._recipe_candidates(allow_uav, state)
         last = None
-        for flags, state in recipes:
+        accepted = None
+        for index, (flags, initial) in enumerate(candidates):
             desc = _resource_desc_texture(width, height, fmt, flags)
             try:
-                ptr = self._committed(D3D12_HEAP_TYPE_DEFAULT, desc, state, label)
+                ptr = self._committed(D3D12_HEAP_TYPE_DEFAULT, desc, initial,
+                                      label)
             except DlssSrError as exc:
                 last = exc
                 continue
-            if self._texture_recipe is None and allow_uav and state is None:
-                self._texture_recipe = (flags, state)
-            self.report_texture_recipe()
-            return D3D12Resource(ptr, label, width, height, fmt,
-                                 width * height * BPP[fmt], state)
-        raise last
+            accepted = (flags, initial, index)
+            break
+        if accepted is None:
+            raise last
+        flags, initial, index = accepted
+        if state is None and self._texture_recipe is None and allow_uav:
+            self._texture_recipe = (flags, initial)
+        if index:
+            from ..log import dlss_logger
+            wanted = candidates[0]
+            dlss_logger.warning(
+                "[ANTs] D3D12: the driver REFUSED the intended texture recipe "
+                "for '%s' (flags 0x%X, initial state %s; it answered %s) and "
+                "accepted (flags 0x%X, initial state %s) instead. Send this "
+                "line if the "
+                "engine later reports an invalid parameter or the device is "
+                "removed: the texture is not in the state the runtime expects.",
+                label, wanted[0], state_name(wanted[1]),
+                str(last).strip()[:120], flags, state_name(initial))
+        self.report_texture_recipe()
+        return D3D12Resource(ptr, label, width, height, fmt,
+                             width * height * BPP[fmt], initial)
+
+    def create_input_texture2d(self, width, height, fmt, label="texture"):
+        """An NGX INPUT texture: plain shader resource, no UAV flag.
+
+        This is the contract the runtime validates (see :func:`input_state`
+        and ``_INPUT_RECIPES``); ``ANTS_NR_INPUT_STATE=uav`` restores the old
+        UAV-state behaviour for an A/B run.
+        """
+        want = input_state()
+        return self.create_texture2d(
+            width, height, fmt,
+            allow_uav=(want == D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+            label=label, state=want)
 
     def report_texture_recipe(self):
         """Name the (flags, state) combo the driver accepted - once.

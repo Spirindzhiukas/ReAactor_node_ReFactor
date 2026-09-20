@@ -686,6 +686,22 @@ def _crash_phase_check():
             and "crashlog.set_phase" in (REPO / "ants" / "dlsssr" / "com.py").read_text())
 
 
+def _js_ui_check():
+    """The frontend: the scheduler grows AND shrinks, the default plan matches
+    the Python cycle, and all three enhancer classes get their own UI."""
+    src = (REPO / "web" / "dlss5_nr_schedule.js").read_text()
+    return ("function fitNode" in src
+            and "node.computeSize()" in src
+            and "node.setSize([width, height])" in src
+            and "fitNode(node);" in src
+            and '"Cinematic", "Natural", "Default"' in src
+            and "STYLE_CYCLE_DEFAULT.length" in src
+            and "ANTsDLSS5ProcessorNative" in src
+            and "ENH_CLASSES.includes(nodeData.name)" in src
+            and "ENH_CLASSES.includes(target.comfyClass)" in src
+            and "addEngineHeader" in src)
+
+
 def _cuda_flags_check():
     """The engine's own gate: "active CUDA primary context does not use FFmpeg
     blocking-sync flags". Every arming route must be attempted and reported,
@@ -1176,6 +1192,12 @@ def main():
           "bat - fresh-process A/B, a pinned host copy round-trip, the "
           "single-GPU child, and a verdict the owner can act on",
           _cuda_multigpu_tool_check())
+    check("web: the scheduler node re-fits its size after the per-pass rows "
+          "are rebuilt (it used to grow on ON and never come back), the JS "
+          "default cycle is Cinematic -> Natural -> Default like the Python "
+          "side, and every enhancer class gets its own UI (header + refresh "
+          "button + scheduler-link greying)",
+          _js_ui_check())
     check("cuda: the engine's blocking-sync gate is attacked by every route "
           "(runtime flag, primary-context flag, cuCtxSetFlags), the result is "
           "named in the log, the arming runs at IMPORT (before torch builds "
@@ -1185,9 +1207,19 @@ def main():
     check("nr: the colour/depth/motion INPUTS are handed to NGX in a "
           "shader-resource state and only the OUTPUT is a UAV - the contract "
           "the shipped hosts use, with ANTS_NR_INPUT_STATE=uav as the A/B",
-          "d3d.input_state()" in nr_src and "state=input_state" in nr_src
+          "create_input_texture2d" in nr_src
+          and "d3d.input_state()" in nr_src
           and "d3d.state_name(uav)" in nr_src
-          and "d3d.input_state()" in (REPO / "ants" / "dlsssr" / "sr.py").read_text())
+          and "create_input_texture2d" in (REPO / "ants" / "dlsssr" / "sr.py").read_text())
+    d3d_src = (REPO / "ants" / "dlsssr" / "d3d12.py").read_text()
+    check("d3d12: the INPUT recipe tries (FLAG_NONE, shader-resource) FIRST - "
+          "the driver answered E_INVALIDARG for ALLOW_UNORDERED_ACCESS + "
+          "shader-resource (rig 23:08) - and a refused recipe is logged, not "
+          "silently swapped",
+          "_INPUT_RECIPES" in d3d_src
+          and "D3D12_RESOURCE_FLAG_NONE,\n                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE" in d3d_src
+          and "REFUSED the intended texture recipe" in d3d_src
+          and "def create_input_texture2d" in d3d_src)
     check("tools: import lister flags termination APIs + NGX backend "
           "bindings statically (engine-dll discriminator, no execution)",
           (REPO / "tools" / "list_imports.py").is_file()
@@ -1306,9 +1338,45 @@ def main():
     types_def = pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5Enhancer"].INPUT_TYPES()
     check("dlss5: engine widget present, native default",
           types_def["required"]["engine"][0][0] == "ANTs native NGX")
-    check("dlss5: 20 nodes registered (SR upscaler added)",
-          len(pkg.NODE_CLASS_MAPPINGS) == 20
-          and "ANTsDLSSSRUpscaler" in pkg.NODE_CLASS_MAPPINGS)
+    check("dlss5: 22 nodes registered (SR upscaler + the two focused "
+          "processors)",
+          len(pkg.NODE_CLASS_MAPPINGS) == 22
+          and "ANTsDLSSSRUpscaler" in pkg.NODE_CLASS_MAPPINGS
+          and "ANTsDLSS5Processor" in pkg.NODE_CLASS_MAPPINGS
+          and "ANTsDLSS5ProcessorNative" in pkg.NODE_CLASS_MAPPINGS)
+    enh_t = pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5Enhancer"].INPUT_TYPES()
+    proc = pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5Processor"].INPUT_TYPES()["required"]
+    native = pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5ProcessorNative"].INPUT_TYPES()["required"]
+    enh = pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5Enhancer"].INPUT_TYPES()["required"]
+    check("dlss5: the focused processors carry NO engine selector and only the "
+          "widgets their engine can act on (the legacy helper has no render "
+          "preset; the native host owns the SR pre-denoise)",
+          "engine" not in proc and "engine" not in native
+          and "engine" in enh
+          and {"sr_dll_version", "sr_model", "pre_denoise_mode",
+               "fg_dll_version", "nr_model_preset"}.isdisjoint(proc)
+          and {"gpu_acceleration", "fg_dll_version"}.isdisjoint(native)
+          and "pre_denoise_mode" in native and "nr_model_preset" in native
+          and "gpu_acceleration" in proc)
+    proc_cls = pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5Processor"]
+    native_cls = pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5ProcessorNative"]
+    check("dlss5: each focused processor FORCES its engine (so a run can never "
+          "drift into the other path) and keeps the shared look/bridge/"
+          "schedule surface",
+          proc_cls.ENGINE_MODE == "Legacy neuroframe DLLs"
+          and native_cls.ENGINE_MODE == "ANTs native NGX"
+          and issubclass(proc_cls, pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5Enhancer"])
+          and issubclass(native_cls, pkg.NODE_CLASS_MAPPINGS["ANTsDLSS5Enhancer"])
+          and "nr_schedule" in enh_t["optional"] and "use_nr_schedule" in proc
+          and "hdr_bridge_mode" in native and "style" in native)
+    check("dlss5: the display names + descriptions say which engine each node "
+          "drives, and credit the lineage the owner asked about",
+          "ReShade based" in pkg.NODE_DISPLAY_NAME_MAPPINGS["ANTsDLSS5Processor"]
+          and "experimental" in pkg.NODE_DISPLAY_NAME_MAPPINGS[
+              "ANTsDLSS5ProcessorNative"]
+          and "RenoDX" in proc_cls.DESCRIPTION
+          and "Merserk" in proc_cls.DESCRIPTION
+          and "EXPERIMENTAL" in native_cls.DESCRIPTION)
 
     # ---- IID wire bytes (canonical GUID layout; reference bytes are
     # ---- hand-written literals, NOT derived from guid() - the rig hit

@@ -37,7 +37,9 @@ from .ants.loaders import (
     ReFactorUpscaleModelLoader,
     detection_model_name,
 )
-from .ants.dlssnr import DLSSNRScheduler, ReFactorDLSS5Enhancer
+from .ants.dlssnr import (DLSSNRScheduler, ReFactorDLSS5Enhancer,
+                          ReFactorDLSS5Processor,
+                          ReFactorDLSS5ProcessorNative)
 from .ants.dlsssr.node import DLSSSRUpscaler
 from .ants.torch_utils import normalize_ as normalize, stat_mode
 from .ants.upscaler import upscale_bgr_face
@@ -1197,6 +1199,8 @@ NODE_CLASS_MAPPINGS = {
     "ANTsImageRGBA2RGB": ReFactorImageRGBA2RGB,
     "ANTsUnload": ReFactorUnload,
     "ANTsDLSS5Enhancer": ReFactorDLSS5Enhancer,
+    "ANTsDLSS5Processor": ReFactorDLSS5Processor,
+    "ANTsDLSS5ProcessorNative": ReFactorDLSS5ProcessorNative,
     "ANTsDLSSNRScheduler": DLSSNRScheduler,
     "ANTsDLSSSRUpscaler": DLSSSRUpscaler,
     # --- Model Loaders ---
@@ -1224,6 +1228,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ANTsImageRGBA2RGB": "ANTs⚡Convert RGBA to RGB",
     "ANTsUnload": "ANTs⚡Unload Models",
     "ANTsDLSS5Enhancer": "ANTs⚡DLSS5 Frame Enhancer",
+    "ANTsDLSS5Processor": "ANTs⚡DLSS5 Processor (ReShade based)",
+    "ANTsDLSS5ProcessorNative": "ANTs⚡DLSS5 Processor (Native NGX, experimental)",
     "ANTsDLSSNRScheduler": "ANTs⚡DLSS NR Scheduler",
     "ANTsDLSSSRUpscaler": "ANTs⚡DLSS SR Upscaler",
     # --- Model Loaders ---

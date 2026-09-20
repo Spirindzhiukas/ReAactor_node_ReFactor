@@ -651,6 +651,69 @@ restarted before the 20:40 legacy run, then "cannot match CUDA ordinal 0 by
 LUID" happened in a **fresh** process and is a real bug worth chasing; if it
 was the same window, it is the wedged-process state as assumed.
 
+### Run 22:35 (owner) — the CUDA zero-copy path WORKS now, in the legacy engine
+
+```
+[ANTs] CUDA interop armed (the engine's zero-copy gate is open): ...
+[ANTs] engine: neuroframe_engine.dll (570880 bytes) exports dlss5nr_init + dlss5nr_process_cuda_v6
+DLSS5 processing via CUDA - CUDA device-pointer path
+[INFO] Prompt executed in 1.18 seconds
+```
+
+The same node that took 14-18 s on host staging at 21:47 finished a frame in **1.18 s** — the
+blocking-sync flag arming at import did it. The engine's own gate
+("active CUDA primary context does not use FFmpeg blocking-sync flags") is now satisfied, so this
+was never a missing capability: it was one flag, set before torch built the context. Treat this as
+**closed** — do not re-debug the CUDA path, and do not re-run the `--cuda-device`/pinned-memory
+experiments.
+
+Two details from that log:
+* the flag line read `0x0C (unknown scheduling)` — the scheduling mask is the low **three** bits
+  (`CU_CTX_SCHED_MASK = 0x07`), so 0x0C is blocking-sync (0x04) **plus** map-host (0x08): the arming
+  had worked, the *name* was wrong. Fixed; the line now reads `0x0C (blocking-sync, map-host)`.
+* the log now also names **which route** armed it (`1. cudaSetDeviceFlags(0x04) -> CUDA_SUCCESS`,
+  `2/3` for the driver routes), so a future failure says exactly which call refused.
+
+### Run 23:08 (owner) — the native host's NEXT wall: our new input recipe was invalid
+
+```
+[ERROR] [ANTs] ID3D12Device.CreateCommittedResource(nr motion) failed: HRESULT 0x80070057
+        at nr.py: create_texture2d(..., state=input_state)
+```
+
+The 21:52 fix (inputs in the shader-resource state) went in with the UAV flag still attached, and
+D3D12 answers `E_INVALIDARG` for **(ALLOW_UNORDERED_ACCESS, NON_PIXEL_SHADER_RESOURCE)** — the flag
+may not ride along with that initial state. The pack now creates inputs as **plain shader resources**
+(`D3D12_RESOURCE_FLAG_NONE` + NON_PIXEL_SHADER_RESOURCE, the recipe the proven host uses), tries a
+small ladder of alternatives if the driver refuses the first, and **logs which recipe the driver
+took** instead of silently swapping it. `ANTS_NR_INPUT_STATE=uav` still restores the old behaviour
+for an A/B.
+
+### The node split (owner request) — one engine per node
+
+The native path can now fail without touching the working one:
+
+| node class | engine | dropped widgets |
+|---|---|---|
+| `ANTsDLSS5Enhancer` (unchanged) | both, via the `engine` selector | — |
+| `ANTsDLSS5Processor` — *ANTs⚡DLSS5 Processor (ReShade based)* | legacy DLL engine, forced | `engine`, `sr_dll_version`, `sr_model`, `pre_denoise_mode`, `nr_model_preset`, `fg_dll_version` |
+| `ANTsDLSS5ProcessorNative` — *ANTs⚡DLSS5 Processor (Native NGX, experimental)* | our native NGX host, forced | `engine`, `gpu_acceleration`, `fg_dll_version` |
+
+Both are subclasses of the full node (one implementation, two focused UIs), both consume the same
+**ANTs⚡DLSS NR Scheduler** output, and the frontend gives each its own header line, refresh button
+and scheduler-link greying. Naming: the legacy engine's DLL lineage is the RenoDX DLSS-5 addon — a
+**ReShade** addon — so "ReShade based" is the accurate short name; OptiScaler is a different project
+(a DLSS/XeSS/FSR redirector) and none of its code is involved.
+
+### Scheduler: the default plan is now the showcase, and the node shrinks again
+
+* `passes` defaults to **3**, and the cycle is **Cinematic → Natural → Default** (Python
+  `STYLE_CYCLE_DEFAULT` and the JS default are the same list) — a freshly dropped scheduler shows the
+  owner-validated plan "in its full glory".
+* The JS re-fits the node after every rebuild (`fitNode` → `computeSize` + `setSize`): it used to
+  grow when the per-pass toggles went ON and stay big when they went OFF, because removing widgets
+  never recomputed the size.
+
 ### Run 21:52 / 21:53 (owner) — the first native evaluate, decoded
 
 The 21:52 run got FURTHER than any run before it: NGX initialized, the feature
@@ -738,12 +801,16 @@ sets it.
 
 **Next runs, in order** (each in a FRESH ComfyUI process):
 
+0. Use the **ANTs⚡DLSS5 Processor (Native NGX, experimental)** node for the native runs and the
+   **ANTs⚡DLSS5 Processor (ReShade based)** node for the legacy ones, so one engine's failure can
+   never be confused with the other's (and so the working node stays clean in the workflow).
 1. **Small frame first, native engine** (e.g. 768x768, 1 pass): proves the
    whole D3D12 path end to end, and a small evaluate cannot hit the 2 s TDR
    timeout. If this passes, the device removal is a size/timeout issue. The
    colour input is now in the shader-resource state the runtime expects, so
    this run also tests the 21:52 fix - the contract line now prints
-   `inputs NON_PIXEL_SHADER_RESOURCE, output UNORDERED_ACCESS`.
+   `inputs NON_PIXEL_SHADER_RESOURCE, output UNORDERED_ACCESS`. If a texture recipe is refused the
+   log now says which one the driver took instead.
 2. **Then the 4096x3072 frame, native**: if the device is removed again the
    error now names the reason; if it says DEVICE_HUNG, the fix is a TDR delay
    (`HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\TdrDelay`,

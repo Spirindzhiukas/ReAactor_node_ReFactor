@@ -163,8 +163,7 @@ class DlssNrSession:
         # host uses. Handing NGX an input in the UAV state is what D3D12
         # answers with E_INVALIDARG at Close() (and what the driver can turn
         # into a GPU fault). ANTS_NR_INPUT_STATE=uav restores the old state.
-        input_state = d3d.input_state()
-        self.color = dev.create_texture2d(
+        self.color = dev.create_input_texture2d(
             self.w, self.h, d3d.DXGI_FORMAT_R16G16B16A16_FLOAT,
             label="nr color")
         self.output = dev.create_texture2d(
@@ -177,12 +176,10 @@ class DlssNrSession:
         # thing this session recorded, i.e. the first thing that could go
         # wrong before the feature even exists). They are created straight in
         # the input state, so no barrier is ever needed for them.
-        self.motion = dev.create_texture2d(
-            self.w, self.h, d3d.DXGI_FORMAT_R16G16_FLOAT, label="nr motion",
-            state=input_state)
-        self.depth = dev.create_texture2d(
-            self.w, self.h, d3d.DXGI_FORMAT_R32_FLOAT, label="nr depth",
-            state=input_state)
+        self.motion = dev.create_input_texture2d(
+            self.w, self.h, d3d.DXGI_FORMAT_R16G16_FLOAT, label="nr motion")
+        self.depth = dev.create_input_texture2d(
+            self.w, self.h, d3d.DXGI_FORMAT_R32_FLOAT, label="nr depth")
 
         self._scaling_cb = None
         self._contract_logged = False

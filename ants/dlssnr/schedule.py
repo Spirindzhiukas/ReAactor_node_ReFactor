@@ -3,7 +3,8 @@
 Why this exists: the engine's ``nr_passes`` field simply repeats the SAME
 neural-reconstruction evaluation N times. The owner's experiments (chaining
 node instances that each ran one pass with a different NR style) showed that
-*varied* passes — e.g. Natural → Cinematic → Natural → Default — beat a
+*varied* passes — e.g. Cinematic → Natural → Default (the owner's showcase
+plan, and the scheduler's default) — beat a
 monolithic ``nr_passes = 4`` by a wide margin. Schedules replace the raw
 repeat counter with an explicit, per-pass plan:
 
@@ -38,8 +39,11 @@ MAX_PASSES = 8
 STYLES = {"Default": 0, "Natural": 1, "Cinematic": 2}
 
 # The default plan varies styles instead of repeating one (the whole point
-# of schedules over nr_passes).
-STYLE_CYCLE_DEFAULT = ("Natural", "Cinematic")
+# of schedules over nr_passes). The owner's showcase cycle: 3 passes run
+# Cinematic -> Natural -> Default, i.e. the strongest look first, then a
+# natural pass, then a clean finish - and the scheduler node ships with
+# passes = 3 so a freshly dropped node shows exactly that.
+STYLE_CYCLE_DEFAULT = ("Cinematic", "Natural", "Default")
 
 # Per-pass control keys (main-node widgets they bypass when active)
 PER_PASS_KEYS = (

@@ -104,14 +104,17 @@ class DlssSrSession:
             self.ngx.create_feature(FEATURE_SR)
 
         dev = gpu.device
-        self.color = dev.create_texture2d(self.rw, self.rh, d3d.DXGI_FORMAT_R8G8B8A8_UNORM,
-                                          label="sr color")
+        self.color = dev.create_input_texture2d(self.rw, self.rh,
+                                                d3d.DXGI_FORMAT_R8G8B8A8_UNORM,
+                                                label="sr color")
         self.output = dev.create_texture2d(self.ow, self.oh, d3d.DXGI_FORMAT_R8G8B8A8_UNORM,
                                            label="sr output")
-        self.depth = dev.create_texture2d(self.rw, self.rh, d3d.DXGI_FORMAT_R32_FLOAT,
-                                          label="sr depth")
-        self.motion = dev.create_texture2d(self.rw, self.rh, d3d.DXGI_FORMAT_R16G16_FLOAT,
-                                           label="sr motion")
+        self.depth = dev.create_input_texture2d(self.rw, self.rh,
+                                                d3d.DXGI_FORMAT_R32_FLOAT,
+                                                label="sr depth")
+        self.motion = dev.create_input_texture2d(self.rw, self.rh,
+                                                 d3d.DXGI_FORMAT_R16G16_FLOAT,
+                                                 label="sr motion")
         # Depth + motion are unused for stills: zero once. Both are INPUTS, so
         # they are left in the shader-resource state NGX expects (see
         # d3d12.input_state) - the same contract as the NR path.

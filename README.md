@@ -79,7 +79,20 @@ The engine validates execution providers against the installed build and logs wh
 | DLSS-SR / -FG DLLs | `models/DLSS/SR/`, `models/DLSS/FG/` | manual only |
 | Neuroframe helper pair | `models/DLSS/Merserk_DLLS/` | manual only, **one copy** (author: Merserk) |
 
-## DLSS5 (ANTs⚡DLSS5 Frame Enhancer)
+## DLSS5 (ANTs⚡DLSS5 Frame Enhancer + the two focused processors)
+
+Three nodes, two engines:
+
+| node | engine | notes |
+|---|---|---|
+| **ANTs⚡DLSS5 Frame Enhancer** | both (selector) | the original node — full surface, engine picker |
+| **ANTs⚡DLSS5 Processor (ReShade based)** | legacy DLL engine only | the RenoDX-derived `nvngx_dlssnr.dll` + the neuroframe helper pair (**by Merserk**, credit to **clshortfuse**'s RenoDX work) — the engine that runs the rig today, CUDA zero-copy included. No engine selector and none of the widgets that engine cannot act on (SR pre-denoise host, SR runtime pick, NR render preset, FG picker). |
+| **ANTs⚡DLSS5 Processor (Native NGX, experimental)** | the pack's own native NGX host only | our pure-Python D3D12 + feature-18 path (no 3rd-party helper DLLs, caller shim, SR pre-denoise available). Kept separate so its failures cannot perturb the working node. |
+
+Why "ReShade based": the DLL lineage is the RenoDX DLSS-5 addon, which is a **ReShade addon** —
+*OptiScaler is a different project* (a DLSS/XeSS/FSR call redirector) and none of its code is involved
+here. All three nodes take the **same** ANTs⚡DLSS NR Scheduler output and share the look controls and
+the HDR Colour Bridge.
 
 Hybrid enhancer: our feature-rich DLSS-NR surface + OreX-inspired temporal history management + a RenoDX-inspired HDR Colour Bridge stage. Design notes, comparison and full credits: [docs/RESEARCH_dlss5_hybrid.md](docs/RESEARCH_dlss5_hybrid.md).
 
@@ -118,10 +131,11 @@ that is not a runtime is refused with its path. Duplicate names of the same buil
 content (identical bytes), so the report tells you when two files are one build.
 
 **NR Schedules** — replace the old ``nr_passes`` repeat with the **ANTs⚡DLSS NR Scheduler**: a style
-per pass (Natural/Cinematic cycling is the owner-validated default; varied passes beat monolithic
-`nr_passes = 4` — the engine's author names style 1 **Natural**, not "Nature"; same ABI int,
-corrected display), optional per-pass full settings (bypass the main node's widgets when on), per-pass
-pre-SR denoise with dedicated model slots. Dynamic JS UI on both nodes (pack's `web/` folder); the
+per pass (the default node plan is **3 passes: Cinematic → Natural → Default**, the owner's showcase
+cycle; varied passes beat monolithic `nr_passes = 4` — the engine's author names style 1 **Natural**,
+not "Nature"; same ABI int, corrected display), optional per-pass full settings (bypass the main
+node's widgets when on), per-pass pre-SR denoise with dedicated model slots. Dynamic JS UI on every
+node (pack's `web/` folder), which re-fits the node size when the per-pass rows come and go; the
 Python side validates everything and works headless without it.
 
 **Pre-SR denoise (optional):** connect a 1x denoising/restoration model — `ANTs Upscale Model Loader` →

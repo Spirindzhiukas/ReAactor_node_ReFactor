@@ -41,7 +41,15 @@ CU_CTX_SCHED_SPIN = 0x01
 CU_CTX_SCHED_YIELD = 0x02
 CU_CTX_SCHED_BLOCKING_SYNC = 0x04
 BLOCKING_SYNC = CU_CTX_SCHED_BLOCKING_SYNC
-SCHED_FLAG_MASK = 0x0F
+CU_CTX_MAP_HOST = 0x08
+CU_CTX_LMEM_RESIZE_TO_MAX = 0x10
+# The scheduling policy is the low THREE bits (CU_CTX_SCHED_MASK = 0x07);
+# everything above it is a different flag. The rig's 22:35 line read
+# "0x0C (unknown scheduling)" because this mask used to be 0x0F - 0x0C is
+# blocking-sync (0x04) PLUS map-host (0x08), i.e. the arming had WORKED.
+SCHED_FLAG_MASK = 0x07
+EXTRA_FLAG_NAMES = (("map-host", CU_CTX_MAP_HOST),
+                    ("lmem-resize-to-max", CU_CTX_LMEM_RESIZE_TO_MAX))
 
 CUDA_ERROR_NAMES = {
     0: "CUDA_SUCCESS",
@@ -54,7 +62,7 @@ CUDA_ERROR_NAMES = {
     801: "CUDA_ERROR_NOT_SUPPORTED",
 }
 
-_STATE = {"tried": False, "ok": False, "detail": ""}
+_STATE = {"tried": False, "ok": False, "detail": "", "route": ""}
 
 
 def error_name(rc):
@@ -63,15 +71,18 @@ def error_name(rc):
 
 
 def describe_flags(flags):
-    """``0x04 (blocking-sync)`` for a ``cuCtxGetFlags`` value."""
+    """``0x0C (blocking-sync, map-host)`` for a ``cuCtxGetFlags`` value."""
     if flags is None:
         return "unreadable"
+    value = int(flags)
     sched = {CU_CTX_SCHED_AUTO: "auto/spin",
              CU_CTX_SCHED_SPIN: "spin",
              CU_CTX_SCHED_YIELD: "yield",
              CU_CTX_SCHED_BLOCKING_SYNC: "blocking-sync"}.get(
-                 int(flags) & SCHED_FLAG_MASK, "unknown scheduling")
-    return f"0x{int(flags):02X} ({sched})"
+                 value & SCHED_FLAG_MASK, "unknown scheduling")
+    extras = [name for name, bit in EXTRA_FLAG_NAMES if value & bit]
+    tail = ", ".join([sched] + extras)
+    return f"0x{value:02X} ({tail})"
 
 
 def ctx_flags():
@@ -138,6 +149,7 @@ def set_blocking_sync(device=0):
     and ``lines`` is the human-readable step-by-step log the pack prints.
     """
     lines = []
+    _STATE["route"] = ""
     before, why_before = ctx_flags()
     lines.append("CUDA context flags before: "
                  + (describe_flags(before) if before is not None
@@ -145,6 +157,7 @@ def set_blocking_sync(device=0):
     if before is not None and before & BLOCKING_SYNC:
         lines.append("the engine's blocking-sync condition is ALREADY "
                      "satisfied - the CUDA path should be available")
+        _STATE["route"] = "already armed before this call"
         return True, lines
 
     routes = (("1", _try_runtime_flag), ("2", _try_primary_ctx_flag),
@@ -161,6 +174,7 @@ def set_blocking_sync(device=0):
         after, _why = ctx_flags()
         if rc == CUDA_SUCCESS and (after is None or after & BLOCKING_SYNC):
             lines.append(f"   context flags after: {describe_flags(after)}")
+            _STATE["route"] = f"{number}. {detail}"
             return True, lines
     after, why_after = ctx_flags()
     lines.append("CUDA context flags after: "
@@ -179,6 +193,11 @@ def set_blocking_sync(device=0):
             "the flag could NOT be armed (see the return codes above); the "
             "engine keeps refusing the zero-copy path. Report this block.")
     return False, lines
+
+
+def armed_route():
+    """The route line that armed the flag (empty when it did not)."""
+    return _STATE["route"]
 
 
 def summary():
@@ -209,6 +228,12 @@ def arm_early(force=False):
     return ok, detail
 
 
+def cuda_flags_route():
+    """The armed route as a short string (used by the log lines)."""
+    route = armed_route()
+    return route.strip() if route else "already satisfied before this call"
+
+
 def log_early(logger=None):
     """Arm (once) and put the result in the node log. Never raises."""
     try:
@@ -216,7 +241,11 @@ def log_early(logger=None):
         if logger is None:
             from ..log import dlss_logger as logger
         if ok:
-            logger.status("[ANTs] CUDA interop: %s", detail.splitlines()[-1])
+            flags, _why = ctx_flags()
+            logger.status(
+                "[ANTs] CUDA interop armed (the engine's zero-copy gate is "
+                "open): %s -> context flags now %s",
+                cuda_flags_route(), describe_flags(flags))
         else:
             logger.warning("[ANTs] CUDA interop is OFF for this process - %s",
                            detail)
