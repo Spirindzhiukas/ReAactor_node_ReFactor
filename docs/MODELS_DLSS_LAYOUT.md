@@ -128,16 +128,31 @@ one specific build deliberately.
 The rule orders candidates; it never identifies them: a file is a runtime only if it exports the
 runtime entry points, and anything else is refused loudly with its path.
 
-### The NR safety net (why `auto` sometimes picks the second-newest)
+### Which NR builds exist, and why the community ones are the normal path
 
-The NR engine keeps a short list of builds that were **rig-proven to kill the process** on an
-older host layout (RenoDX-derived builds, runs 14-19). `auto` on the native engine prefers the
-newest build that is NOT on that list, and says so loudly. When **every** candidate is on it —
-which is the owner's own folder, and deliberate: he keeps several names to test the picker — the
-newest is used with a loud warning rather than refusing, because those builds are the active line
-of work (run 30 reached `EvaluateFeature` and threw a catchable exception). A **rename is not a
-different build**: a file byte-identical to a listed build is treated as the same risky build, and
-the report calls that out.
+The official NVIDIA DLSS 5 NR runtime targets **RTX 50-series** hardware. On RTX 30/40 series the
+community **RenoDX-derived** builds are the ones that work — RenoDX by clshortfuse (MIT), reworked
+for 30/40-series support and shipped inside Merserk's `Visual.Enhancer` bundle together with the
+neuroframe helper pair. Most users are on those GPUs, so this pack treats them as the ordinary
+path: **no build is ranked, skipped or refused because of its name**, and `auto` simply loads the
+newest one by the naming rule above. An explicit pick always wins.
+
+Credit note: the NR builds belong to their authors (RenoDX/clshortfuse, community repack), the
+helper pair to Merserk — this pack never bundles them and never downloads them.
+
+Engineering history, kept so it is not re-derived: on the pre-2026-09-20 host contract this family
+killed the process at the first `EvaluateFeature` (runs 14-19: no exception, no log) while
+Merserk's own C++ host ran the same bytes fine — the gap was in our provider, not the build. Run 30
+reached `EvaluateFeature` and threw a **catchable** C++ exception instead, which is where the
+investigation continues. The crash black box and the traps stay armed on every native NR run, so a
+regression is recorded rather than guessed at.
+
+### Duplicate names are detected by content
+
+`nvngx_dlssnr.dll` and `nvngx_dlssnr_RenoDX_4000_series_friendly.dll` on the owner's disk are the
+same build under two names (identical SHA-256) — kept that way on purpose, to test the picker. The
+rig audit prints `[note] the renaming does not change the build ...` for such a pair, and selection
+is unaffected: two names of one build load identically.
 
 ## Legacy locations still scanned (graceful fallbacks)
 

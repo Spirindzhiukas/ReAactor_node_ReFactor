@@ -719,7 +719,9 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   "MODELS/DLSS LAYOUT AUDIT" section (KEEP / SAFE TO DELETE / YOUR CALL),
   including same-size-same-folder pairs with a hash verdict, so the keep/delete
   answer is printed from the owner's own disk, not from a folder map.
-- **OWNER'S 14:02 RIG REPORT PROVED A CONFOUND**: his
+- **OWNER'S 14:02 RIG REPORT PROVED A CONFOUND** *(the risk classification
+  below was removed the same day - see the owner-correction entry further
+  down; keep this only as history)*: his
   `NR/nvngx_dlssnr.dll` and `NR/nvngx_dlssnr_RenoDX_4000_series_friendly.dll`
   are the SAME 165,830,144-byte build (identical SHA-256, and both are the
   RenoDX build). The force-terminator list matches NAMES, so `auto` would
@@ -775,5 +777,33 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
 - **Collector**: the audit now prints `AUTO would load in <category>/: <name>
   (<version>)` for every category and annotates each KEEP line with the
   version it parsed - the owner sees which build wins, in his own report.
-- Suite: **387 checks** (dlsssr 87, dlssnr_bridge 94, native_flow 35) +
+- Suite: **385 checks** (dlsssr 87, dlssnr_bridge 92, native_flow 35) +
   pyflakes/scope/smoke green.
+
+### 2026-09-20 (owner correction #3) — there is NO "safe vs risky" build: the community RenoDX build IS the path
+- **Owner clarification (authoritative):** the official DLSS 5 NR runtime targets
+  RTX 50-series; on RTX 30/40 series (most users, and his own 4090) the
+  community RenoDX-derived builds are the ONLY ones that work. The pair in his
+  tree is that build, from Merserk's `Visual.Enhancer.v10.0` bundle (the
+  neuroframe pair comes from the same bundle, hence the tie-in); the build's
+  lineage is RenoDX's ReShade bundle.
+- **Therefore the whole risk-gating layer is GONE** (`KNOWN_FORCE_TERMINATOR_
+  MARKERS`, `is_known_force_terminator`, `risk_reason`, `twin_of_known_bad`,
+  and the `skip_known_bad` parameter of `resolve_nr_runtime_path`). Selection is
+  now ONE rule: explicit pick wins, otherwise the newest by the naming rule -
+  no name is ranked, skipped or refused. `node.py` no longer prints the
+  scare-warning; it prints an informational `provenance_note` status line
+  (RenoDX/clshortfuse + Merserk credit, RTX 30/40 reality).
+- **The history is kept, but only as history**: a provenance header at the top
+  of `ants/dlssnr/discovery.py` (runs 14-19 killed the process on the
+  pre-run-30 host; run 30 reached EvaluateFeature and threw a catchable
+  exception; the gap was in OUR provider, never in the build). The traps and
+  the black box remain the watchdogs - they were never part of the gate.
+- **`same_bytes` stayed** (duplicate detection, reporting only): the owner
+  keeps two names of one build ON PURPOSE to test the picker, and the rig
+  audit now says `[note] the renaming does not change the build ... both load
+  the same way; the pack does not rank builds by name` instead of the old
+  "[!!] auto will refuse BOTH".
+- Docs updated to the same language: README, `CLAUDE.md` 2b,
+  `docs/MODELS_DLSS_LAYOUT.md` ("Which NR builds exist, and why the community
+  ones are the normal path").

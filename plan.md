@@ -67,11 +67,16 @@ python and never registers callbacks.
       package dll; loud sibling-copy fallback only when no stash exists); auto
       selection refuses to treat a helper DLL as an NR runtime; the collector
       prints a keep/delete audit of the owner's own tree.
-- [x] **Owner 14:02 evidence**: the audit detected that both NR files are the
-      SAME RenoDX build under two names -> `auto` now refuses a renamed copy of
-      a force-terminator build (byte comparison, warning names the twin);
-      explicit selection in `dll_version` is the sanctioned way to run it.
-      The report is one self-contained file now (logs inlined).
+- [x] **Owner 14:02 evidence** → **owner correction**: there is no safe/risky
+      split. The community RenoDX-derived builds are the ONLY ones that work on
+      RTX 30/40 series (the official DLSS 5 NR runtime targets RTX 50), i.e. the
+      normal path for most users. All name-based risk gating was REMOVED
+      (`skip_known_bad`, `is_known_force_terminator`, `risk_reason`): selection
+      is the naming rule alone, an explicit pick always wins, and the engine
+      prints a provenance status line instead of a scare-warning. The runs
+      14-19 history lives in the module header + docs; the traps/black box stay
+      armed. Duplicate names of one build are detected by content for the report
+      (the owner keeps two on purpose to test the picker).
 - [x] **THE BUILD NAMING RULE (owner directive 2026-09-20)** — `auto` loads the newest
       build, version read from the FILE NAME (`nvngx_dlssnr_<date>.dll`,
       `nvngx_dlss_<version>.dll`); date > dotted > bare number > unversioned; selector lists

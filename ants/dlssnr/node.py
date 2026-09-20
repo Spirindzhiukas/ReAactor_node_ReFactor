@@ -8,7 +8,6 @@ useful as new DLSS 5.x DLL releases appear.
 """
 
 import numpy as np
-import os
 import torch
 
 import comfy.model_management as model_management
@@ -252,19 +251,14 @@ class ReFactorDLSS5Enhancer:
                     pass
                 del self.manager
                 self.manager = None
-            dll_path = discovery.resolve_nr_runtime_path(nr_choice, skip_known_bad=True)
-            if discovery.is_known_force_terminator(dll_path):
-                # Explicit pick (or the only build installed): the owner
-                # consents - warn loudly and proceed instead of refusing.
-                logger.warning(
-                    "[ANTs] '" + os.path.basename(dll_path) + "' matches the "
-                    "rig-proven force-terminator list: RenoDX-derived NR builds "
-                    "kill the whole process at the first NGX evaluate on a "
-                    "plain D3D12 host (runs 14-19: instant silent death, no "
-                    "exception, no log). Merserk's own C++ host runs this "
-                    "build fine, so the gap is in our pure-Python provider - "
-                    "under active analysis. Proceeding because you selected "
-                    "it explicitly; a queue run may lose the session.")
+            dll_path = discovery.resolve_nr_runtime_path(nr_choice)
+            note = discovery.provenance_note(dll_path)
+            if note:
+                # Informational, never a gate: the community RenoDX-derived
+                # builds are the working path on RTX 30/40 series (the
+                # official DLSS 5 NR runtime targets RTX 50). The history
+                # behind this line lives at the top of ants/dlssnr/discovery.py.
+                logger.status(f"[ANTs] NR engine: {note}")
             self._ordinal = self.device.index if getattr(self.device, "index", None) is not None else 0
             # Sessions are size-keyed and created lazily on the first frame
             # (see _native_session_for); NGX providers must not be churned.

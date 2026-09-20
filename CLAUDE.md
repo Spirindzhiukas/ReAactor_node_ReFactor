@@ -33,11 +33,15 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
    name); the selector lists builds newest-first; an **explicit pick always wins**. Free text
    after the version is ignored, hardware tags (`4000`, `3090`, `series`, `friendly`) are never
    versions. Implementation + rationale: `ants/dlsssr/versions.py` (shared by NR and SR).
-   Consequences to keep: the NR picker **never refuses** a folder whose builds are all on the
-   rig-proven risk list — it warns loudly and uses the newest (the owner's own rig is exactly
-   that case and he keeps duplicate names on purpose to test the picker); a rename is not a
-   different build (byte-identical twins are treated as the same risky build); an unversioned
-   file that is newer on disk than the picked build is reported, never silently ignored.
+   Consequences to keep: **no build is ever ranked, skipped or refused by NAME.** The official
+   DLSS 5 NR runtime targets RTX 50-series, so on RTX 30/40 the community RenoDX-derived builds
+   (RenoDX/clshortfuse; packaged in Merserk's bundle) are the ordinary path, and the owner keeps
+   two names of one build on purpose to test the picker. Selection = the naming rule and nothing
+   else; an explicit pick always wins; an unversioned file that is newer on disk than the picked
+   build is reported, never silently ignored; duplicates are detected by content (byte-identity)
+   for reporting only. The provenance line the engine prints at startup is informational —
+   `ANTS` history (runs 14-19 killed the process on the pre-run-30 host; run 30 throws a catchable
+   exception) lives in `ants/dlssnr/discovery.py`'s header, never in the selection path.
    The collector prints what `auto` would load per category. Do not "fix" any of this without
    the owner's explicit instruction.
 3. **Loud-failure pattern** for missing dedicated models: raise a `RuntimeError` starting

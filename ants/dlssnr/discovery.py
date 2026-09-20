@@ -271,25 +271,45 @@ def category_choices(category: str):
     return ["auto"] + [e["name"] for e in category_entries(category)]
 
 
-# Rig-proven (runs 14-19): RenoDX-derived NR builds force-terminate the
-# whole process inside their first EvaluateFeature on OUR pure-Python
-# provider - no exception is raised (a first-in-process vectored handler
-# sees nothing) and no NGX log is written (runs 14-19). CAVEAT (run 20):
-# Merserk's plain C++ host runs the SAME build fine, so the earlier
-# "these builds need ReShade" theory is DISPROVEN - the gap is in our
-# provider and is under active analysis (rig probes + his engine's
-# binaries). Until that closes we treat these builds as session-loss
-# risks: 'auto' selection SKIPS them (a queue run must not die), and an
-# EXPLICIT pick is honored with a loud warning (owner consent).
-# Provenance/credit: the RenoDX project (clshortfuse) and the community
-# "4000 series friendly" repack.
-KNOWN_FORCE_TERMINATOR_MARKERS = ("renodx",)
+# PROVENANCE OF THE "ALTERNATIVE" NR BUILDS (read this before adding rules).
+#
+# The official NVIDIA DLSS 5 NR runtime targets RTX 50-series hardware; on RTX
+# 30/40 series the community RenoDX-derived builds are the ONLY ones that work,
+# and they are therefore the NORMAL path for most users - not a risky fallback.
+# They come from RenoDX (clshortfuse, MIT) reworked for 30/40-series support by
+# the community and shipped inside Merserk's Visual.Enhancer bundle (the same
+# bundle the neuroframe helper pair comes from, which is why the two are tied
+# together). Credit stays with them; we only host the runtime.
+#
+# HISTORY, so nobody re-derives it: on our pre-run-30 host contract this family
+# killed the whole process at the first EvaluateFeature (runs 14-19: no
+# exception, no log) while Merserk's own C++ host ran the same bytes fine - so
+# the gap was in our provider, never in the build. Run 30 (2026-09-20) reached
+# EvaluateFeature and threw a CATCHABLE C++ exception instead, which is where
+# the investigation now continues.
+#
+# CONSEQUENCE FOR THE CODE: 'auto' does NOT rank, skip or refuse builds by
+# name. It loads the NEWEST build per THE BUILD NAMING RULE
+# (ants/dlsssr/versions.py) and nothing else - the owner's rig carries two
+# names of the same build ON PURPOSE to test the picker. The provenance note
+# below is informational (printed once when the engine starts); the traps and
+# the crash black box are what watch for a regression.
+COMMUNITY_BUILD_MARKERS = ("renodx",)
 
 
-def is_known_force_terminator(dll_path):
-    """True when the dll filename matches a rig-proven force-terminator."""
+def is_community_build(dll_path):
+    """True when the file name marks a community (RenoDX-derived) NR build."""
     name = os.path.basename(str(dll_path)).lower()
-    return any(marker in name for marker in KNOWN_FORCE_TERMINATOR_MARKERS)
+    return any(marker in name for marker in COMMUNITY_BUILD_MARKERS)
+
+
+def provenance_note(dll_path):
+    """One informational line about the build's origin, or "" when unknown."""
+    if not is_community_build(dll_path):
+        return ""
+    return ("community RenoDX-derived build (RenoDX by clshortfuse, packed into "
+            "Merserk's bundle) - the build that works on RTX 30/40 series; the "
+            "official DLSS 5 NR runtime targets RTX 50 series.")
 
 
 _HASH_CACHE = {}
@@ -300,9 +320,9 @@ def same_bytes(a, b):
 
     Rig 2026-09-20: the owner's `nvngx_dlssnr.dll` and
     `nvngx_dlssnr_RenoDX_4000_series_friendly.dll` are the SAME 165.8 MB
-    build under two names. The force-terminator list matches NAMES, so the
-    "stock"-looking file was one rename away from the risk it exists to
-    avoid - auto selection must not treat a rename as a different build.
+    build under two names (he keeps both on purpose, to test the picker).
+    Two names of one build behave identically - this test is what lets the
+    report say so instead of the owner having to hash files by hand.
     """
     try:
         sa, sb = os.path.getsize(a), os.path.getsize(b)
@@ -335,35 +355,18 @@ def same_bytes(a, b):
         return False
 
 
-def twin_of_known_bad(dll_path):
-    """Name of a force-terminator-named sibling with IDENTICAL bytes, or "".
+def identical_sibling(dll_path):
+    """Name of a byte-identical sibling file in the same folder, or "".
 
-    Called only when the candidate itself does not carry a known-bad name.
+    Duplicate detection only - it never changes what gets loaded.
     """
     folder = os.path.dirname(os.path.abspath(str(dll_path)))
     for name in dll_files(folder):
         other = os.path.join(folder, name)
         if os.path.normcase(other) == os.path.normcase(os.path.abspath(str(dll_path))):
             continue
-        if is_known_force_terminator(other) and same_bytes(dll_path, other):
+        if same_bytes(dll_path, other):
             return name
-    return ""
-
-
-def risk_reason(dll_path):
-    """Why 'auto' should avoid this build, or "" when it is not a risk.
-
-    Two ways onto the list: the name matches a rig-proven force-terminator,
-    or the file is byte-identical to such a build in the same folder (a
-    rename is not a different build - proven on the owner's own disk:
-    `nvngx_dlssnr.dll` and `nvngx_dlssnr_RenoDX_4000_series_friendly.dll`
-    are the same 165,830,144 bytes).
-    """
-    if is_known_force_terminator(dll_path):
-        return "matches the rig-proven force-terminator list"
-    twin = twin_of_known_bad(dll_path)
-    if twin:
-        return f"is byte-identical to the force-terminator build '{twin}'"
     return ""
 
 
@@ -374,23 +377,22 @@ def describe_runtime(dll_path):
     return f"{name} ({versions.describe(name)})"
 
 
-def resolve_nr_runtime_path(choice: str, skip_known_bad: bool = False):
+def resolve_nr_runtime_path(choice: str):
     """The NR runtime .dll for the native host.
 
     An EXPLICIT choice (a name in the node's dll_version widget) is always
-    honored exactly. `auto` follows THE BUILD NAMING RULE (see
-    `ants/dlsssr/versions.py`): the newest build in models/DLSS/NR - read
-    from a date or a version in the file name - across the flat files and
-    the version subfolders together.
+    honored exactly. `auto` follows THE BUILD NAMING RULE
+    (ants/dlsssr/versions.py): the newest build in models/DLSS/NR - read from
+    a date or a version in the file name - across the flat files and the
+    version subfolders together.
 
-    skip_known_bad=True (the native engine) additionally prefers a build
-    that is NOT on the rig-proven force-terminator list when such a build
-    exists: a queue run must not lose the session to a build that was
-    already proven to kill it. When EVERY candidate is on that list - the
-    owner's own folder is exactly this case - the newest one is used with a
-    loud warning instead of refusing: these builds are the live line of work
-    (run 30 reached EvaluateFeature and threw a catchable exception), not a
-    dead end, and refusing would block the owner's own test rig.
+    There is deliberately NO name-based ranking here. The community
+    RenoDX-derived builds are the only ones that work on RTX 30/40 series, so
+    treating them as second-class (skip / prefer-something-else / refuse)
+    would break the normal path for most users; see the provenance block at
+    the top of this module for the history and why it no longer gates
+    anything. A regression would show up in the crash black box, which stays
+    armed on every NR run.
     """
     from ..dlsssr import versions
     from ..dlsssr.discovery import find_nr_runtime_dll  # lazy: no import cycle
@@ -422,43 +424,7 @@ def resolve_nr_runtime_path(choice: str, skip_known_bad: bool = False):
             set_errors.append(str(exc))   # e.g. helper DLLs only - keep looking
 
     if candidates:
-        ranked = versions.newest_first(candidates)
-        pick = ranked[0]
-        if skip_known_bad:
-            avoided = [p for p in ranked if risk_reason(p)]
-            safe = [p for p in ranked if not risk_reason(p)]
-            if safe:
-                pick = safe[0]
-                if avoided:
-                    logger.warning(
-                        "[ANTs] NR auto skipped %d build(s) on the rig-proven "
-                        "force-terminator list (%s) and picked the newest safe "
-                        "build instead. To run a skipped build deliberately, "
-                        "select it in the node's dll_version widget.",
-                        len(avoided),
-                        "; ".join(f"{os.path.basename(p)} - {risk_reason(p)}"
-                                  for p in avoided))
-            else:
-                logger.warning(
-                    "[ANTs] Every NR build found is on the rig-proven "
-                    "force-terminator list (%s) - using the NEWEST one "
-                    "(%s) because these builds are the current line of work "
-                    "and refusing would block your own test rig. Runs 14-19 "
-                    "lost the session on such a build; run 30 reached "
-                    "EvaluateFeature and threw a catchable exception. Pick a "
-                    "specific build in dll_version to override.",
-                    "; ".join(f"{os.path.basename(p)} - {risk_reason(p)}"
-                              for p in ranked),
-                    os.path.basename(pick))
-        elif risk_reason(pick):
-            logger.warning(
-                "[ANTs] NR auto picked '%s' (%s), which is on the rig-proven "
-                "force-terminator list (%s). The native engine passes "
-                "skip_known_bad=True and would avoid it; the legacy neuroframe "
-                "engine gets the newest build as usual. Select another build in "
-                "dll_version to change this.",
-                os.path.basename(pick),
-                versions.describe(os.path.basename(pick)), risk_reason(pick))
+        pick = versions.newest(candidates)
         newer_unversioned = versions.unversioned_newer(candidates, pick)
         if newer_unversioned:
             logger.warning(

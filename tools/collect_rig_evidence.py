@@ -628,16 +628,16 @@ def layout_audit(dlss_root, out_lines, versions=None):
                    f" in {folder} have the same size ({size} bytes): {verdict}"
             if same:
                 note += " - keep one if you do not need both"
-                risky = [os.path.basename(p) for p in paths
-                         if "renodx" in os.path.basename(p).lower()]
-                clean = [os.path.basename(p) for p in paths
+                marked = [os.path.basename(p) for p in paths
+                          if "renodx" in os.path.basename(p).lower()]
+                plain = [os.path.basename(p) for p in paths
                          if "renodx" not in os.path.basename(p).lower()]
-                if risky and clean:
-                    note += (" [!!] the renaming does not change the build: "
-                             + " and ".join(clean) + " IS "
-                             + " and ".join(risky)
-                             + " - the pack's force-terminator list matches"
-                               " names, so 'auto' will refuse BOTH")
+                if marked and plain:
+                    note += (" [note] the renaming does not change the build: "
+                             + " and ".join(plain) + " IS "
+                             + " and ".join(marked)
+                             + " (identical bytes, so both load the same way;"
+                               " the pack does not rank builds by name)")
             review.append(note)
 
     # what 'auto' would load in each category right now (the naming rule)

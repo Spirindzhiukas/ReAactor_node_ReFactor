@@ -449,6 +449,27 @@ def main():
           and versions.describe("nvngx_dlss_310.9.1.dll") == "version 310.9.1"
           and "no version" in versions.describe("nvngx_dlssnr.dll"))
 
+    # ---- provenance is INFORMATIONAL, never a gate (owner, 2026-09-20) ----
+    # The official DLSS 5 NR runtime targets RTX 50-series; on RTX 30/40 the
+    # community RenoDX-derived builds are the ONLY working option, so `auto`
+    # must treat them as normal. History (runs 14-19 killed the process, run
+    # 30 threw a catchable exception) lives in the module header, not in the
+    # selection path.
+    check("provenance: a RenoDX-derived name is recognised (and credited)",
+          discovery.is_community_build(
+              r"C:\m\DLSS\NR\nvngx_dlssnr_RenoDX_4000_series_friendly.dll")
+          and not discovery.is_community_build(
+              r"C:\m\DLSS\NR\nvngx_dlssnr_2026-09-14.dll")
+          and discovery.COMMUNITY_BUILD_MARKERS == ("renodx",))
+    check("provenance: the note names the RTX reality and the authors",
+          "clshortfuse" in discovery.provenance_note(
+              r"C:\m\DLSS\NR\x_renodx.dll")
+          and "Merserk" in discovery.provenance_note(
+              r"C:\m\DLSS\NR\x_renodx.dll")
+          and "RTX 30/40" in discovery.provenance_note(
+              r"C:\m\DLSS\NR\x_renodx.dll")
+          and discovery.provenance_note(r"C:\m\DLSS\NR\plain.dll") == "")
+
     saved = (discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH,
              discovery.PACKAGE_DLL_DIR)
     try:
@@ -458,87 +479,64 @@ def main():
             discovery.PACKAGE_DLL_DIR = os.path.join(td, "_nopkg")
             nr_dir = os.path.join(td, "NR")
             os.makedirs(nr_dir)
-            # the newest build carries a force-terminator NAME; the older one
-            # is safe. Auto (native) must take the newest SAFE build.
+            # a community build with the NEWEST version in its name: auto must
+            # take it - no name is treated as second-class
             open(os.path.join(nr_dir, "nvngx_dlssnr_2026-01-01.dll"),
-                 "wb").write(b"safe-older")
+                 "wb").write(b"older-build")
             open(os.path.join(nr_dir, "nvngx_dlssnr_2026-09-14_renodx4000.dll"),
-                 "wb").write(b"risky-newest")
-            check("auto: picks by the naming rule (date beats nothing)",
-                  discovery.resolve_nr_runtime_path("auto", skip_known_bad=True)
-                  .endswith("nvngx_dlssnr_2026-01-01.dll"))
-            check("auto: without the queue-safety rule it takes the newest",
+                 "wb").write(b"newest-community-build")
+            check("auto: the newest build wins even when it is a community "
+                  "RenoDX build (no name-based ranking)",
                   discovery.resolve_nr_runtime_path("auto")
                   .endswith("nvngx_dlssnr_2026-09-14_renodx4000.dll"))
-            check("auto: an explicit pick of a risky build is honored",
+            check("auto: an explicit pick resolves exactly",
                   discovery.resolve_nr_runtime_path(
-                      "nvngx_dlssnr_2026-09-14_renodx4000.dll",
-                      skip_known_bad=True)
-                  .endswith("nvngx_dlssnr_2026-09-14_renodx4000.dll"))
-            os.remove(os.path.join(nr_dir, "nvngx_dlssnr_2026-01-01.dll"))
-            try:
-                picked = discovery.resolve_nr_runtime_path(
-                    "auto", skip_known_bad=True)
-                check("auto: when EVERY build is risky it uses the newest "
-                      "instead of refusing (the owner's own rig)",
-                      picked.endswith("nvngx_dlssnr_2026-09-14_renodx4000.dll"))
-            except RuntimeError:
-                check("auto: when EVERY build is risky it uses the newest "
-                      "instead of refusing (the owner's own rig)", False)
+                      "nvngx_dlssnr_2026-01-01.dll")
+                  .endswith("nvngx_dlssnr_2026-01-01.dll"))
+            check("auto: no skip_known_bad / risk parameter is left in the API",
+                  "skip_known_bad" not in
+                  (REPO / "ants" / "dlssnr" / "discovery.py").read_text())
             # a set FOLDER resolves to its newest build, not to its first file
             set_dir = os.path.join(nr_dir, "2026-05")
             os.makedirs(set_dir)
             open(os.path.join(set_dir, "nvngx_dlssnr_2026-01-01.dll"),
                  "wb").write(b"set-old")
-            open(os.path.join(set_dir, "nvngx_dlssnr_2026-05-05.dll"),
+            open(os.path.join(set_dir, "nvngx_dlssnr_2026-05-05_renodx.dll"),
                  "wb").write(b"set-new")
             from ants.dlsssr.discovery import find_nr_runtime_dll
             check("naming: a set folder resolves to its NEWEST runtime",
                   find_nr_runtime_dll(set_dir)
-                  .endswith("nvngx_dlssnr_2026-05-05.dll"))
+                  .endswith("nvngx_dlssnr_2026-05-05_renodx.dll"))
             check("naming: an explicit set pick resolves to its newest runtime",
                   discovery.resolve_nr_runtime_path("2026-05")
-                  .endswith("nvngx_dlssnr_2026-05-05.dll"))
+                  .endswith("nvngx_dlssnr_2026-05-05_renodx.dll"))
             check("naming: newest_first ranks by version, then file date",
                   versions.newest_first(["nvngx_dlssnr_2026-01-01.dll",
                                          "nvngx_dlssnr_310.9.1.dll",
                                          "nvngx_dlssnr.dll"])
                   == ["nvngx_dlssnr_2026-01-01.dll", "nvngx_dlssnr_310.9.1.dll",
                       "nvngx_dlssnr.dll"])
-            # an unversioned file that is newer ON DISK than the picked build
-            # is reported, so nobody has to guess why it lost
-            import time as _time
-            versioned = os.path.join(nr_dir, "nvngx_dlssnr_2026-09-14_v2.dll")
-            open(versioned, "wb").write(b"versioned")
-            _time.sleep(0.01)
-            plain = os.path.join(nr_dir, "nvngx_dlssnr.dll")
-            open(plain, "wb").write(b"stock-drop-in-newer-on-disk")
-            check("naming: an unversioned file that is newer on disk is "
-                  "reported as the loser (nobody has to guess why it lost)",
-                  versions.unversioned_newer([versioned, plain], versioned)
-                  == ["nvngx_dlssnr.dll"]
-                  and versions.unversioned_newer([versioned], versioned) == [])
-            os.remove(plain)
-            os.remove(versioned)
-            check("native: RenoDX-named builds match the force-terminator matcher",
-                  discovery.is_known_force_terminator(
-                      r"C:\m\DLSS\NR\nvngx_dlssnr_RenoDX_4000_series_friendly.dll")
-                  and not discovery.is_known_force_terminator(
-                      r"C:\m\DLSS\NR\nvngx_dlssnr_2026-09-14.dll"))
-            node_src_rule = (REPO / "ants" / "dlssnr" / "node.py").read_text()
             check("naming: the widget says the rule out loud (newest first, "
                   "auto loads the newest, explicit pick wins)",
-                  "NEWEST FIRST" in node_src_rule
-                  and "naming rule" in node_src_rule
-                  and "docs/MODELS_DLSS_LAYOUT.md" in node_src_rule)
+                  "NEWEST FIRST" in (REPO / "ants" / "dlssnr" / "node.py").read_text()
+                  and "naming rule" in (REPO / "ants" / "dlssnr" / "node.py").read_text()
+                  and "docs/MODELS_DLSS_LAYOUT.md" in (REPO / "ants" / "dlssnr" / "node.py").read_text())
     finally:
         discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, \
             discovery.PACKAGE_DLL_DIR = saved
+    check("native: the engine prints the provenance note as STATUS, not a "
+          "scary warning, and never refuses the community builds",
+          "provenance_note" in node_src
+          and "logger.status" in node_src
+          and "force-terminator" not in node_src
+          and "ANTS_ALLOW_KNOWN_BAD_NR" not in node_src)
+    check("discovery: the provenance header keeps the credit and the history "
+          "(RenoDX/clshortfuse, Merserk, runs 14-19 vs run 30)",
+          all(token in (REPO / "ants" / "dlssnr" / "discovery.py").read_text()
+              for token in ("clshortfuse", "Merserk", "runs 14-19",
+                            "Run 30", "RTX 30/40")))
 
-    # ---- rig 2026-09-20 14:02: the "stock" file IS the RenoDX build ----
-    # The owner keeps two names of the SAME build on purpose (testing the
-    # picker), so a rename must not be mistaken for a safe build - and the
-    # picker must keep working, not refuse.
+    # ---- duplicate detection is by CONTENT, and never changes selection ----
     saved = (discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH,
              discovery.PACKAGE_DLL_DIR)
     try:
@@ -548,51 +546,38 @@ def main():
             discovery.PACKAGE_DLL_DIR = os.path.join(td, "_nopkg")
             nr_dir = os.path.join(td, "NR")
             os.makedirs(nr_dir)
-            body = b"renodx-build" * 4096          # same bytes, two names
-            open(os.path.join(nr_dir, "nvngx_dlssnr_RenoDX_4000.dll"),
-                 "wb").write(body)
+            body = b"one-build-two-names" * 4096      # the owner's own setup
             open(os.path.join(nr_dir, "nvngx_dlssnr.dll"), "wb").write(body)
-            check("rename: same_bytes() resolves identical files",
+            open(os.path.join(nr_dir, "nvngx_dlssnr_RenoDX_4000_series_friendly.dll"),
+                 "wb").write(body)
+            check("duplicates: same_bytes() resolves identical files",
                   discovery.same_bytes(
                       os.path.join(nr_dir, "nvngx_dlssnr.dll"),
-                      os.path.join(nr_dir, "nvngx_dlssnr_RenoDX_4000.dll"))
+                      os.path.join(nr_dir,
+                                   "nvngx_dlssnr_RenoDX_4000_series_friendly.dll"))
                   and not discovery.same_bytes(
                       os.path.join(nr_dir, "nvngx_dlssnr.dll"),
                       os.path.join(nr_dir, "missing.dll")))
-            check("rename: the rename is recognised as the same risky build",
-                  "byte-identical" in discovery.risk_reason(
+            check("duplicates: the twin is found by content, whatever the names",
+                  discovery.identical_sibling(
                       os.path.join(nr_dir, "nvngx_dlssnr.dll"))
-                  and "force-terminator list" in discovery.risk_reason(
-                      os.path.join(nr_dir, "nvngx_dlssnr_RenoDX_4000.dll")))
-            # a genuinely different (safe) build wins over BOTH names
-            safe = os.path.join(nr_dir, "nvngx_dlssnr_2025-01-01.dll")
-            open(safe, "wb").write(b"stock-build")
-            check("rename: auto avoids the renamed pair when a safe build exists",
-                  discovery.resolve_nr_runtime_path("auto", skip_known_bad=True)
-                  .endswith("nvngx_dlssnr_2025-01-01.dll"))
-            # ... and with only the two risky names left, auto still works
-            os.remove(safe)
-            picked = discovery.resolve_nr_runtime_path("auto", skip_known_bad=True)
-            check("rename: with nothing safe left auto uses the newest "
-                  "instead of refusing (a rename is not a different build)",
-                  os.path.basename(picked) in ("nvngx_dlssnr.dll",
-                                               "nvngx_dlssnr_RenoDX_4000.dll"))
-            check("rename: an explicit pick still resolves exactly",
-                  discovery.resolve_nr_runtime_path("nvngx_dlssnr.dll")
-                  .endswith("nvngx_dlssnr.dll")
-                  and discovery.resolve_nr_runtime_path(
-                      "nvngx_dlssnr_RenoDX_4000.dll")
-                  .endswith("nvngx_dlssnr_RenoDX_4000.dll"))
+                  == "nvngx_dlssnr_RenoDX_4000_series_friendly.dll")
+            versioned = os.path.join(nr_dir, "nvngx_dlssnr_2025-01-01.dll")
+            open(versioned, "wb").write(b"a-build-with-a-version")
+            check("duplicates: selection follows the naming rule alone (the "
+                  "versioned build wins, no name-based ranking)",
+                  discovery.resolve_nr_runtime_path("auto").endswith(
+                      "nvngx_dlssnr_2025-01-01.dll"))
+            os.remove(versioned)
+            picked = discovery.resolve_nr_runtime_path("auto")
+            check("duplicates: with only the two identical names left, auto "
+                  "picks one (never refuses, never warns about risk)",
+                  os.path.basename(picked) in (
+                      "nvngx_dlssnr.dll",
+                      "nvngx_dlssnr_RenoDX_4000_series_friendly.dll"))
     finally:
         discovery.DLSS_ROOT, discovery.LEGACY_DLSSNR_PATH, \
             discovery.PACKAGE_DLL_DIR = saved
-    check("native: the engine warns instead of refusing explicit picks",
-          "is_known_force_terminator(dll_path)" in node_src
-          and "force-terminator" in node_src
-          and "ANTS_ALLOW_KNOWN_BAD_NR" not in node_src)
-    check("native: the force-terminator list credits RenoDX provenance",
-          '"renodx"' in (REPO / "ants" / "dlssnr" / "discovery.py").read_text()
-          and "clshortfuse" in (REPO / "ants" / "dlssnr" / "discovery.py").read_text())
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

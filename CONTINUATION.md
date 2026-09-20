@@ -407,10 +407,10 @@ Rules now enforced in code:
   because the tree had just been nuked).
 - **A rename is not a different build.** The 14:02 audit proved the owner's
   `NR\nvngx_dlssnr.dll` and `NR\nvngx_dlssnr_RenoDX_4000_series_friendly.dll`
-  are the same 165,830,144-byte build (identical SHA-256). `auto` now refuses
-  a candidate that is byte-identical to a force-terminator-listed sibling
-  (warning names the twin; an EXPLICIT widget pick still runs it), so the
-  "stock vs RenoDX" A/B cannot be confounded by a file rename again.
+  are the same 165,830,144-byte build (identical SHA-256), kept on purpose to
+  test the picker. *(Superseded the same day: the "refuse a renamed copy"
+  behaviour was removed by the owner correction below - duplicates are now
+  detected by content for REPORTING only, and selection is the naming rule.)*
 - **THE BUILD NAMING RULE (owner directive, now a standing rule in CLAUDE.md 2b).**
   `auto` loads the newest build of a category, and the version comes from the
   file name: `nvngx_dlssnr_2026-09-14.dll` (date, preferred for the community
@@ -425,6 +425,18 @@ Rules now enforced in code:
   deliberate picker test - so `auto` must never refuse it: it prefers the
   newest SAFE build when one exists, otherwise warns loudly and uses the
   newest (the risk list is a queue-safety preference, not a veto).
+
+### NO "safe vs risky" builds (owner correction, 2026-09-20)
+
+The community RenoDX-derived NR builds are the ONLY ones that work on RTX 30/40
+series (the official DLSS 5 NR runtime targets RTX 50), so they are the normal
+path - nothing is ranked, skipped or refused by name. That supersedes every
+"risk list" note above and below in this file: `resolve_nr_runtime_path` has no
+risk parameter, `node.py` prints an informational provenance line (credit:
+RenoDX/clshortfuse + Merserk), and the runs 14-19 -> run 30 history lives in the
+header of `ants/dlssnr/discovery.py` and the docs. Duplicates are found by
+content (`same_bytes`) for reporting only; the owner keeps two names of one
+build on purpose to test the picker.
 - **The report is ONE file.** The raw logs (nvngx.log etc.) are inlined in
   `rig_evidence.txt` (400 KB per file cap, `[truncated: last ...]` marker when
   hit), on top of the already-inlined black box and resolved offsets. The

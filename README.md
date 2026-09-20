@@ -107,9 +107,15 @@ Free text after the version is ignored: `nvngx_dlssnr_2026-09-14_renodx4000.dll`
 `friendly`) are never mistaken for a version. The selector lists builds **newest first**, and an
 **explicit pick always wins** — that is the way to run one specific build deliberately.
 
-The NR engine additionally avoids builds on the rig-proven risk list (see below) when a safe build
-exists, and tells you loudly when it does either. Names never decide *what a file is*: the runtime is
-identified by probing its exports, and anything that is not a runtime is refused by name and path.
+**Which builds exist, and why the community ones are normal here.** The official NVIDIA DLSS 5 NR
+runtime targets RTX 50-series hardware; on RTX 30/40 series the community RenoDX-derived builds
+(RenoDX by clshortfuse, packaged inside Merserk's Visual.Enhancer bundle) are the ones that work, so
+this pack treats them as the ordinary path — no build is ranked, skipped or refused because of its
+name. Credit for those builds and for the neuroframe helper DLLs stays with their authors.
+
+Names never decide *what a file is*: the runtime is identified by probing its exports, and anything
+that is not a runtime is refused with its path. Duplicate names of the same build are detected by
+content (identical bytes), so the report tells you when two files are one build.
 
 **NR Schedules** — replace the old ``nr_passes`` repeat with the **ANTs⚡DLSS NR Scheduler**: a style
 per pass (Natural/Cinematic cycling is the owner-validated default; varied passes beat monolithic
