@@ -689,6 +689,61 @@ small ladder of alternatives if the driver refuses the first, and **logs which r
 took** instead of silently swapping it. `ANTS_NR_INPUT_STATE=uav` still restores the old behaviour
 for an A/B.
 
+### Run 23:46 / 23:48 (owner) — the UAV refusal is PROCESS STATE, not our description
+
+```
+23:46:41  the legacy (ReShade based) node runs: "DLSS5 processing via CUDA -
+          CUDA device-pointer path", 2.60 s                    <-- SAME PROCESS
+23:46:52  the native node, same console: adapter #0 LUID match OK, NGX init OK,
+          Init_Ext OK ... then
+          [ANTs] D3D12 cannot create the texture 'nr output' (2368x1760) ...
+                 CreateCommittedResource -> 0x80070057
+                 Device status right now: 0x00000000 (healthy)
+```
+
+The important part is what the new loud line proves:
+
+* the **description is valid** - `nr color` (a plain shader resource) was created
+  a moment earlier, and the very same UAV description was accepted at 21:52;
+* the device is **healthy** right then;
+* and every UAV recipe is refused while non-UAV textures are fine.
+
+Put the runs side by side and the pattern is unambiguous:
+
+| run | legacy CUDA work in the process before? | UAV texture |
+|---|---|---|
+| 21:52 | no  | created |
+| 23:08 | no  | created ('nr output') |
+| 23:32 | yes (22:35 legacy CUDA run) | **refused** |
+| 23:46 | yes (23:46 legacy CUDA run, 11 s earlier) | **refused** |
+| 23:48 | same session | **refused** |
+
+So: **a process in which the legacy engine's CUDA zero-copy path has run no
+longer accepts UAV-capable D3D12 textures**, while the device still reports
+healthy. (Which also explains why the CPU/GPU widget makes no difference on the
+native node - the widget only chooses how the legacy engine moves pixels.)
+
+Two things ship with this commit:
+
+1. **`tools\check_d3d12_uav.bat` / `check_d3d12_uav.py`** - the decisive probe,
+   ~20 s, no ComfyUI. Four phases through the pack's own d3d12 code:
+   A fresh device at feature level 11_0, B fresh device at 12_0, C after plain
+   CUDA work (cuInit + cuCtxCreate + 512 MiB alloc/memset/free), D after the
+   already-staged legacy engine is initialized (read-only; it never stages).
+   Verdict + exit code: **10 = REPRODUCED** (works fresh, fails after CUDA work
+   = the legacy engine is the trigger), 11 = fails even fresh, 12 = a feature
+   level decides it, 0 = no reproduction, 2 = not Windows.
+   READ-ONLY, CRLF, clipboard, no parens on executable lines - the owner's rules.
+2. **`ANTS_D3D12_FEATURE_LEVEL=12_0`** - the pack creates its D3D12 device at
+   11_0; the shipped reference host asks for **12_0**. The knob exists so the A/B
+   is one `set` away, and the level in use is now printed with the adapter pick.
+   The texture-creation error also names this whole route instead of just saying
+   "restart ComfyUI".
+
+**The immediate workaround for the owner:** restart ComfyUI and run the
+**native** node FIRST and alone (the split nodes make that easy). That is the
+configuration in which the native path has always got past texture creation.
+
 ### Run 23:32 (owner) — the 23:08 fix exposed the NEXT layer, and it was ours
 
 ```

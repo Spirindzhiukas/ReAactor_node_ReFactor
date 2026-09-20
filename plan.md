@@ -177,9 +177,20 @@ python and never registers callbacks.
 - [x] **NODE PARITY (owner rule)**: both focused processors now drop ONLY the
       `engine` selector — `set(proc) == set(enh) - {"engine"}` is pinned by a
       test; the engine-only widgets stay visible and say what they mean.
-- [ ] **Run 34 (owner, fresh process each time)**: 1) native + a SMALL frame
-      (768x768) — the state fix's real test; 2) if that works, 4096x3072;
-      3) legacy (GPU) in a fresh process; 4) if anything dies: send the
+- [x] **OWNER EVIDENCE 23:46/23:48 — the UAV refusal is PROCESS STATE**: the
+      description is valid (a plain texture in the same call sequence succeeds,
+      and the same UAV description worked at 21:52), the device is healthy, and
+      every UAV recipe is refused. Every failing run had the LEGACY CUDA path
+      active in the same process seconds earlier; every succeeding run did not.
+      Shipped: `tools\check_d3d12_uav.bat` (4-phase A/B, exit 10 = REPRODUCED,
+      READ-ONLY) and `ANTS_D3D12_FEATURE_LEVEL=12_0` (the reference host asks
+      for 12_0; the pack default stays 11_0, now printed with the adapter pick).
+- [ ] **Run 34 (owner, fresh process each time)**: 0) NATIVE NODE FIRST, in a ComfyUI
+      just restarted - do not run the legacy node in that process; 1) native +
+      a SMALL frame (768x768); 2) if that works, 4096x3072;
+      3) legacy (GPU) in a fresh process; 4) run
+      `tools\check_d3d12_uav.bat` once and send its verdict; 5) if anything
+      dies: send the
       `[in-flight call: ...]` line, then once with
       `set "ANTS_NR_BLOCK_TERMINATION=1"`; 5) always send the new
       `[ANTs] CUDA context flags ...` block — that is the 20-25x answer.

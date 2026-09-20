@@ -138,6 +138,14 @@ node's widgets when on), per-pass pre-SR denoise with dedicated model slots. Dyn
 node (pack's `web/` folder), which re-fits the node size when the per-pass rows come and go; the
 Python side validates everything and works headless without it.
 
+**If the native node reports `CreateCommittedResource ... 0x80070057` while the device says "healthy"**
+(rig 23:32/23:46): the pack refuses to silently fall back to a texture without the UAV flag (that only
+moves the failure to an illegal barrier later), so it stops and names the state. Run
+`tools\check_d3d12_uav.bat` once - it answers in ~20 s, without ComfyUI, whether UAV textures work in a
+fresh process (A/B 11_0 vs 12_0, after plain CUDA work, after the staged legacy engine). Until it is
+settled: restart ComfyUI and run the **native** node first and alone. `ANTS_D3D12_FEATURE_LEVEL=12_0`
+switches the device to the feature level the reference host asks for.
+
 **Pre-SR denoise (optional):** connect a 1x denoising/restoration model — `ANTs Upscale Model Loader` →
 the node's `denoise_model` socket (SCUNet, PureScale2 `1x_PureVision`, …) — it runs through the
 comfy-native tiled pipeline *before* the DLSS-NR engine, with a `pre_denoise_strength` blend.

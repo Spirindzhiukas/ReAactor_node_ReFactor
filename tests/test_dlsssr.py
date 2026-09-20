@@ -628,6 +628,62 @@ def _collector_bat_check():
             and not risky)
 
 
+def _uav_probe_check():
+    """The D3D12 UAV probe: four phases through the pack's own code path, a
+    verdict the owner can act on, and it soft-fails anywhere (exit 2)."""
+    import subprocess
+    import sys as _sys
+    probe = REPO / "tools" / "check_d3d12_uav.py"
+    if not probe.is_file():
+        return False
+    out = subprocess.run([_sys.executable, str(probe)], capture_output=True,
+                         text=True, timeout=120)
+    text = (out.stdout or "") + (out.stderr or "")
+    soft = (out.returncode == 2
+            and "is not Windows" in text
+            and "UAV probe" in text)
+    src = probe.read_text()
+    phases = (all(tag in src for tag in ("phase A - fresh device",
+                                         "phase B - fresh device",
+                                         "phase C - after plain CUDA work",
+                                         "phase D - after the legacy engine ran"))
+              and "REPRODUCED" in src
+              and "is NOT the trigger" in src
+              and "feature level decides" in src
+              and "return 10" in src and "return 11" in src and "return 12" in src)
+    real_path = ("d3d12.D3D12Device.create" in src
+                 and "create_texture2d" in src
+                 and "cuMemAlloc_v2" in src
+                 and "DLSSStandaloneManager" in src)
+    read_only = ("READ-ONLY" in src and "never stages" in src
+                 and "ANTS_DLSS_MODELS" in src)
+    return soft and phases and real_path and read_only
+
+
+def _uav_probe_bat_check():
+    """The probe bat: owner-facing conventions (CRLF, clipboard, READ-ONLY,
+    no risky parens) plus the verdict echoes."""
+    bat = (REPO / "tools" / "check_d3d12_uav.bat")
+    raw = bat.read_bytes() if bat.is_file() else b""
+    risky = []
+    for line in raw_exec_lines(raw):
+        lowered = line.lower()
+        first = lowered.find(b" (")
+        if first == -1:
+            continue
+        if b"for " in lowered[:first]:
+            continue
+        risky.append(line)
+    return (raw.startswith(b"@echo off\r\n")
+            and b"clip <" in raw
+            and b"READ-ONLY" in raw
+            and b"THE ONLY BLOCK YOU MAY EDIT" in raw
+            and b"check_d3d12_uav.py" in raw
+            and b"REPRODUCED" in raw
+            and b"ants_d3d12_uav.txt" in raw
+            and not risky)
+
+
 def _crash_phase_check():
     """set_phase/phase + the label reaching every kill line, and the wires
     that set it around the NGX / engine / vtable calls."""
@@ -1199,6 +1255,15 @@ def main():
           "bat - fresh-process A/B, a pinned host copy round-trip, the "
           "single-GPU child, and a verdict the owner can act on",
           _cuda_multigpu_tool_check())
+    check("tools: the D3D12 UAV probe runs anywhere (soft-fails with exit 2 "
+          "off Windows), drives the pack's OWN d3d12 code through four phases "
+          "(fresh 11_0, fresh 12_0, after plain CUDA work, after the staged "
+          "legacy engine), and turns them into one verdict the owner can act "
+          "on",
+          _uav_probe_check())
+    check("tools: the UAV probe bat is CRLF, clipboard-returning, marked "
+          "READ-ONLY and has no parens on executable lines",
+          _uav_probe_bat_check())
     check("web: the scheduler node re-fits its size after the per-pass rows "
           "are rebuilt (it used to grow on ON and never come back), the JS "
           "default cycle is Cinematic -> Natural -> Default like the Python "
@@ -1219,6 +1284,21 @@ def main():
           and "d3d.state_name(uav)" in nr_src
           and "create_input_texture2d" in (REPO / "ants" / "dlsssr" / "sr.py").read_text())
     d3d_src = (REPO / "ants" / "dlsssr" / "d3d12.py").read_text()
+    import os as _os
+    _os.environ["ANTS_D3D12_FEATURE_LEVEL"] = "12_0"
+    from ants.dlsssr import d3d12 as _d3
+    lvl12 = _d3.feature_level()
+    names12 = _d3.feature_level_name(lvl12)
+    _os.environ.pop("ANTS_D3D12_FEATURE_LEVEL")
+    lvl11 = _d3.feature_level()
+    check("d3d12: the feature level the device asks for is a documented knob "
+          "(the proven reference host asks for 12_0, this host defaults to the "
+          "11_0 that created every texture until rig 23:46) and the level in "
+          "use is logged with the adapter pick",
+          lvl12 == _d3.D3D_FEATURE_LEVEL_12_0 and names12 == "12_0"
+          and lvl11 == _d3.D3D_FEATURE_LEVEL_11_0
+          and "ANTS_D3D12_FEATURE_LEVEL" in d3d_src
+          and "feature level {feature_level_name(level)}" in d3d_src)
     check("d3d12: the INPUT recipe tries (FLAG_NONE, shader-resource) FIRST - "
           "the driver answered E_INVALIDARG for ALLOW_UNORDERED_ACCESS + "
           "shader-resource (rig 23:08) - and a refused recipe is logged, not "

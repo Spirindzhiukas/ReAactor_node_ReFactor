@@ -25,6 +25,7 @@ IID_ID3D12Fence = guid("{0a753dcf-c4d8-4b91-adf6-be5a60d95a76}")
 
 # --- enums / constants (d3d12.h) ---
 D3D_FEATURE_LEVEL_11_0 = 0xB000
+D3D_FEATURE_LEVEL_12_0 = 0xC000
 D3D12_COMMAND_LIST_TYPE_DIRECT = 0
 D3D12_HEAP_TYPE_UNKNOWN = 0
 D3D12_HEAP_TYPE_DEFAULT = 1  # NOT 0 - 0 is UNKNOWN (rig run 11: E_INVALIDARG)
@@ -150,6 +151,28 @@ def describe_hresult(hr):
     code = hr & 0xFFFFFFFF
     name = HRESULT_NAMES.get(code)
     return f"0x{code:08X} ({name})" if name else f"0x{code:08X}"
+
+
+def feature_level():
+    """The level D3D12CreateDevice asks for (``ANTS_D3D12_FEATURE_LEVEL``).
+
+    Default 11_0 - the level this host has always used, and the one that
+    created every texture up to and including the 21:52 run. The shipped
+    reference host asks for **12_0**, so the knob exists to A/B exactly that
+    when a driver starts refusing resource descriptions (rig 23:32/23:46:
+    `CreateCommittedResource(ALLOW_UNORDERED_ACCESS)` -> E_INVALIDARG with a
+    healthy device, in a process where the legacy CUDA engine had run).
+    """
+    raw = os.environ.get("ANTS_D3D12_FEATURE_LEVEL", "").strip().lower()
+    if raw in ("12", "12_0", "12.0", "0xc000", "c000"):
+        return D3D_FEATURE_LEVEL_12_0
+    return D3D_FEATURE_LEVEL_11_0
+
+
+def feature_level_name(level):
+    """``11_0`` / ``12_0`` - for log lines."""
+    return {D3D_FEATURE_LEVEL_11_0: "11_0",
+            D3D_FEATURE_LEVEL_12_0: "12_0"}.get(level, f"0x{level:04X}")
 
 
 def input_state():
@@ -519,11 +542,19 @@ class D3D12Device(ComObject):
                 "recipe this path needs: %s. Device status right now: %s. "
                 "A UAV-capable texture is not optional - NGX feature 18 "
                 "writes its output through one - so the creation path stops "
-                "here instead of recording an illegal barrier later. If the "
-                "device reports HEALTHY, the driver itself is refusing the "
-                "resource descriptions (rig 23:32) - restart ComfyUI and send "
-                "this line with the console.", label, int(width), int(height),
-                str(last).strip(), status)
+                "here instead of recording an illegal barrier later. With a "
+                "HEALTHY device this is the rig 23:32/23:46 state: the same "
+                "description was accepted in a process where the native node "
+                "ran alone and is refused here. Until that is settled: "
+                "(1) RESTART ComfyUI and run the native node FIRST, without "
+                "the legacy (ReShade based) node in the same process - its "
+                "CUDA path is the prime suspect; (2) if you want the answer in "
+                "20 seconds, run tools\check_d3d12_uav.bat (it reproduces or "
+                "clears it without ComfyUI); (3) "
+                "set ANTS_D3D12_FEATURE_LEVEL=12_0 to ask for the level the "
+                "proven reference host uses. Feature level in use: %s.",
+                label, int(width), int(height), str(last).strip(), status,
+                feature_level_name(feature_level()))
             raise DlssSrError(
                 "[ANTs] Could not create the D3D12 texture '%s' (%dx%d): %s. "
                 "Device status: %s." % (label, int(width), int(height),
@@ -730,7 +761,11 @@ def make_gpu_context(ordinal=0):
     belongs to CUDA ``ordinal`` (see :func:`pick_adapter`)."""
     _factory, adapters = enumerate_adapters()
     info, reason = pick_adapter(adapters, ordinal)
-    device = D3D12Device.create(info.ptr if info else None)
+    level = feature_level()
+    device = D3D12Device.create(info.ptr if info else None, level)
+    reason = f"{reason} [feature level {feature_level_name(level)}" \
+             + (", ANTS_D3D12_FEATURE_LEVEL]" if level == D3D_FEATURE_LEVEL_12_0
+                else "]")
     context = GpuContext(device, adapter_index=info.index if info else 0,
                          adapter=info, ordinal=ordinal, pick_reason=reason)
     _multi_gpu_advisory(ordinal, reason)

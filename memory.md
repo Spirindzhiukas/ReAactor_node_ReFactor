@@ -1039,3 +1039,17 @@ sandbox (DLL zips can't be downloaded there — verify engine versions on the ow
   widgets stay and explain themselves (SR pre-denoise warns on the legacy node, CPU/host-staging says
   "native is always a GPU path").
 - Suite: **444 checks** (dlsssr 100, native_flow 58, dlssnr_bridge 101, nr_schedule 33).
+
+### 2026-09-20 (owner runs 23:46 / 23:48) — the UAV refusal is process state, and the suspect is our own CUDA path
+- The new loud failure proves the description is VALID: `nr color` (plain shader resource) is created in
+  the same sequence, the device reports healthy, and every UAV recipe is refused.
+- Correlation across all runs: native-only processes created UAV textures (21:52, 23:08); every process
+  where the LEGACY CUDA zero-copy path had run created NONE (23:32, 23:46, 23:48). Prime suspect:
+  **a process that ran the legacy CUDA path no longer accepts UAV-capable D3D12 textures**.
+- Shipped `tools/check_d3d12_uav.{bat,py}`: 4 phases (fresh 11_0 / fresh 12_0 / after plain CUDA work /
+  after the staged legacy engine), verdict + exit code (10 = REPRODUCED, 11 = fails fresh, 12 = level
+  decides, 2 = not Windows), READ-ONLY, uses the pack's own d3d12 path.
+- Shipped `ANTS_D3D12_FEATURE_LEVEL=12_0` (the reference host asks for 12_0; we default to 11_0) and
+  the level is printed with the adapter pick; the texture error names the workaround.
+- WORKAROUND for the owner: restart ComfyUI, run the NATIVE node FIRST and alone.
+- Suite: **446 checks** (dlsssr 103, native_flow 58, dlssnr_bridge 101, nr_schedule 33).
