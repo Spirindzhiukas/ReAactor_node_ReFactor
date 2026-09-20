@@ -26,8 +26,10 @@ ComfyUI/models/DLSS/
 │   └── neuroframe_engine.dll
 └── staged/                  ← WORKING COPIES, created by this pack
     ├── <build-name>-<bytes>/nvngx_dlssnr.dll   one folder per selected build
-    ├── sr_staged/<build-name>/nvngx_dlss.dll
-    └── ANTs/{shim,appdata}/                    shim PE, NGX log, crash box
+    └── ANTs/
+        ├── sr_staged/<build-name>/nvngx_dlss.dll
+        ├── shim/                               the nvngx.dll forwarder PE
+        └── appdata/logs/                        nvngx.log, native-crash.log
 ```
 
 ## Why `staged/` exists at all
@@ -37,12 +39,13 @@ Three hard requirements, all about **names** and **folder contents**:
 1. **The NGX core looks for the literal file name `nvngx_dlssnr.dll`** inside
    its search paths, and for `nvngx_dlss.dll` in the SR case. A build under
    any other name therefore has to appear under the canonical name somewhere.
-2. **The snippet loads its dependencies from its own directory** (NGX loads
-   it with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR`), so the helper pair has to sit
-   next to the runtime copy that gets loaded.
-3. **The legacy "neuroframe DLLs" engine is handed a folder** and looks for
-   `nvngx_dlssnr.dll` inside it (`dlss5nr_init(ordinal, dll_dir, ...)`), so
-   that folder must be self-contained too.
+2. **The parts find each other by their neighbours.** The snippet and the
+   neuroframe caller resolve their companion files from the folder they were
+   loaded out of, and NGX loads the snippet from the folder it is given - so
+   that folder has to be self-contained (the pair next to the runtime copy).
+3. **The legacy "neuroframe" engine host is handed a bare directory**
+   (`dlss5nr_init(ordinal, dll_dir, ...)`): it probes the DLLs inside for its
+   own entry points, so the same folder must carry everything.
 
 The staging folder is content-addressed by `<name>-<size>`, so a loaded DLL
 is never rewritten and never locked, and it lives in your models tree (not in
