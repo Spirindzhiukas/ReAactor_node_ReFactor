@@ -150,6 +150,32 @@ params callback at first evaluate, works in his host, dodges IAT traps.
    shim (we control the builder — make the shim version-indistinguishable
    from a real nvngx.dll) — the permanent cure that keeps the shim.
 
+### UPDATE (run-28+ layout) — the community caller shims are now readable
+
+`ComfyUI-DLSS5-NR-Linux` / `DLSS5-Video` (MIT, credited) ship
+`native/caller_shim.cpp`, the source of the 91 KB `nvngx.dll_comfy.dll` we
+only had as a binary. Facts from it and from their bridges:
+
+- The caller check is real and documented there: *"The NR runtime validates
+  the module that owns its RETURN ADDRESS. A trivial wrapper built with /O2
+  can be tail-call-optimized into a JMP, which would leave the return address
+  in dlss5nr_bridge.dll and trigger 0xBAD00002."* Their helper is a separate
+  module with 5 `DLSSNR_Call*` exports, KERNEL32+msvcrt only, and — pefile —
+  **no resources at all, i.e. no VERSION resource**. So a missing VERSION
+  resource is demonstrably NOT fatal to the caller check in a working host.
+- Their helper's file name is `nvngx.dll_comfy.dll`; the bare `nvngx.dll`
+  name appears only as a *legacy fallback* for older release ZIPs.
+- The snippet's `Init_Ext` order is `(app, path, device, FeatureCommonInfo*,
+  sdkVersion)` — swapped against the public header order (their helper does
+  the reorder, ours does it in `fwd_init_ext`).
+
+Consequence for this hypothesis: the *name* mechanism is now testable
+directly — our shim default moved off `nvngx.dll` (`nvngx.dll_ants.dll`,
+`ANTS_NR_SHIM_NAME` restores the old name), so run 28's E1 (`ANTS_NR_USE_SHIM=0`)
+tests shim **presence**, while run-29 candidate 1 (`ANTS_NR_SHIM_NAME=nvngx.dll`)
+tests the **name** hypothesis on its own. The version-resource variant stays a
+valid cure candidate if E1 outcome 1 fires.
+
 ## 4. The CUDA hypothesis (the next big move if run 27 fails)
 
 His NR bridge calls itself the "D3D12/NGX CUDA bridge" (runtime.py

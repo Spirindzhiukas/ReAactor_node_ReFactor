@@ -14,13 +14,18 @@ DLLs, no compiled bridge. Two providers are implemented:
 Technique provenance (documented per the owner's directive — we implement,
 we do not copy):
 
-- **HicirTech/DLSS-Video-Transcoder** — the proof that a dynamic-language
-  FFI host can drive NGX end to end, including the caller-module-check
-  workaround (a generated, position-independent ``nvngx.dll`` thunk shim:
-  the NR runtime verifies that NGX calls return into a module literally
-  named ``nvngx.dll``; the shim parks the real function addresses in data
-  slots and ``call``s them so the return address lives inside the trusted
-  image). No license — technique reference only, zero code taken.
+- **HicirTech/DLSS-Video-Transcoder**, **ComfyUI-DLSS5-NR(-Linux)**,
+  **ComfyUI-DLSS5-Video** — the proof that a dynamic-language FFI host can
+  drive NGX end to end, including the caller-module-check workaround (a
+  generated, position-independent thunk shim: the NR runtime validates the
+  module NGX calls RETURN into and answers ``0xBAD00002`` otherwise, so the
+  shim parks the real function addresses in data slots and ``call``s them
+  with a real ``call`` — never a tail ``jmp`` — leaving the return address
+  inside the helper image). The community shim ships as
+  ``nvngx.dll_comfy.dll`` (not the bare ``nvngx.dll``, which only survives
+  there as a legacy fallback) and that is why our default module name is
+  ``nvngx.dll_ants.dll``. No license (DVT) / MIT technique reference: we
+  implement from the documented ABI, zero code taken.
 - **Merserk (github.com/Merserk/dlss5-visual-enhancer)** — the reference
   client for the feature-18 control surface and the author of the
   neuroframe helper pair this package REPLACES. His repository is the

@@ -220,8 +220,9 @@ class NgxModule:
                     "be loaded as a distinct module.\n"
                     f"    We loaded: {fwd_path}"
                     f"\n    Windows returned: {loaded_from}"
-                    "\n    Another nvngx.dll is already loaded in this process - "
-                    "restart ComfyUI so the ANTs host loads first.")
+                    f"\n    Another module named {os.path.basename(fwd_path)} is "
+                    "already loaded in this process - restart ComfyUI so the "
+                    "ANTs host loads first (ANTS_NR_SHIM_NAME renames ours).")
             _, exports = shim_mod.build_shim_dll()
             _log().status(
                 f"[ANTs] caller shim loaded as {os.path.basename(fwd_path)} "
@@ -326,12 +327,12 @@ class NgxSession:
         """
         self.gpu = gpu
         # E1 gate (runs 14-27c: deliberate kernel-direct kill surviving ALL
-        # user-mode nets). ANTS_NR_USE_SHIM=0 = direct bind, no shim module
-        # in the process - Merserk's host geometry: no module NAMED
-        # nvngx.dll exists, so the snippet's module/version probes fall
-        # through to System32's real driver dll (with a valid VERSION
-        # resource). If the death disappears without the shim, the
-        # VERSION-gate-vs-shim hypothesis is confirmed.
+        # user-mode nets). ANTS_NR_USE_SHIM=0 = direct bind: no helper module
+        # in the process at all, i.e. Merserk's host geometry as far as the
+        # module table is concerned (nothing extra loaded, the name probes
+        # fall through to the real driver dlls). If the death disappears
+        # without the shim, the shim itself (its presence or its name) is
+        # implicated rather than our parameter/ABI contract.
         if os.environ.get("ANTS_NR_USE_SHIM", "1") == "0" and use_shim:
             use_shim = False
             _log().status("[ANTs] E1 EXPERIMENT: shim disabled (ANTS_NR_USE_SHIM=0) "
