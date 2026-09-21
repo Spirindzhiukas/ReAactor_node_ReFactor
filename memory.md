@@ -16,8 +16,8 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   itself now RUNS** (core init, feature 1, Evaluate all `hr=0x1`) while the legacy engine's own
   pass threw a swallowed C++ exception and returned a black frame with no error - both blind
   spots now have loud verdicts
-- **Suite:** ALL GREEN — 486 checks + 2 scanners + smoke_import (22 nodes)
-  (`test_dlssnr_bridge` 121, `test_dlsssr` 111, `test_native_flow` 67,
+- **Suite:** ALL GREEN — 493 checks + 2 scanners + smoke_import (22 nodes)
+  (`test_dlssnr_bridge` 124, `test_dlsssr` 111, `test_native_flow` 71,
   `test_runtime_surface` 58, `test_nr_schedule` 35, `test_upres` 27,
   `test_pure_helpers` 26, `test_facerestore_routing` 21, `test_swapper_state`
   13, `test_detection_state_dict` 7)
@@ -122,7 +122,7 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | smoke_import.py | — | import + 22-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 486 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.10`; 22 nodes; package `ants/`).**
+**Total: 493 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.11`; 22 nodes; package `ants/`).**
 Sandbox venv: numpy, opencv-python-headless, pillow, pyflakes, pefile (NO torch — stub harness only).
 huggingface.co is TLS-blocked from the sandbox (DLL zips can't be downloaded there — verify engine
 versions on the owner rig).
@@ -1409,10 +1409,79 @@ guide's 8 phases for DLAA, in pixel space, each phase a sub-pixel-shifted copy o
 matching `Jitter.Offset` and history kept - which is what would give the network the multi-sample
 contract it exists to resolve. That is 8 evaluations per image and a real design change, so it is an
 option with a price, tracked in plan.md, not a decision taken here.
-- Suite: **486 checks** (dlssnr_bridge 121, dlsssr 111, native_flow 67, runtime_surface 58,
-  nr_schedule 35, upres 27, pure_helpers 26, facerestore 21, swapper 13, detection 7).
-  `HOST_BUILD` `2026-09-21.10`. The next rig run decides the preset question and, with
-  `ANTS_SR_ACCUM=1`, the temporal one.
+- Suite: **486 checks** at that commit (dlssnr_bridge 121, dlsssr 111, native_flow 67,
+  runtime_surface 58, nr_schedule 35, upres 27, pure_helpers 26, facerestore 21, swapper 13,
+  detection 7). `HOST_BUILD` `2026-09-21.10`. The next rig run decides the preset question and,
+  with `ANTS_SR_ACCUM=1`, the temporal one.
+
+### 2026-09-21 (owner request, rig run 33b) - BIT-DEPTH AUDIT: the native path was 8-bit in and out, and the bridge is an identity at its defaults
+**The owner's report**: feeding a 16-bit image, the node's output (saved with ComfyUI's own
+`Save Image (Advanced)`, 16-bit sRGB) "looks like it expands dynamic range - the real one which
+allows for higher and lower values of exposure in post" - and, the weird part, it looks equally
+better on **8-bit and 16-bit saves**, which "can't be right compared to the original 16-bit image".
+Asked to investigate the incoming bit depth and what the pipeline actually works in.
+
+**THE MEASUREMENT (read-only audit, numpy, the pack's own conversion helpers; no GPU involved)** -
+a 65536-level ramp (a true 16-bit source) through each stage:
+
+| stage | before this commit | levels surviving |
+| --- | --- | --- |
+| ComfyUI hands a node | `float32` [0,1] (`Load Image` decodes 16-bit PNGs; VHS-style batch loaders crush to 8-bit at load - external) | 65536 |
+| native NR stage, IN | `_frame_to_rgba8` -> RGBA8 payload -> `_rgba8_to_fp16` -> the RGBA16F surface | **256** (mean error 0.250/255) |
+| native NR stage, OUT | RGBA16F readback -> `_fp16_to_rgba8` (clamp, x255+0.5) -> RGBA8 -> float32/255 | the readback held **7169** levels per channel; **256** reached the user |
+| pre-denoise SR stage | its own D3D12 textures are `R8G8B8A8_UNORM` | 8-bit in AND out |
+| legacy engine (both paths) | float32 in, float32 out - no quantisation by the host | 65536 |
+| HDR Colour Bridge | ON by default, `Classic` | see below |
+
+A 2-stop exposure push (+x4) of the same ramp, then an 8-bit save, is the owner's Photoshop test in
+numbers: **65 of 256 output levels used** after the 8-bit round trip, **256 of 256** for the
+untouched source. That banding is what an 8-bit middle does to a 16-bit workflow.
+
+**TWO THINGS THE AUDIT CLEARED, with numbers:**
+1. **The HDR Colour Bridge is NOT the dynamic-range change.** At its defaults (`Classic`, 220 nits,
+   paper-white scale 1.0, transfer strength 1.0, colour strength 1.0) the math degenerates exactly:
+   `w = 220/220 = 1`, `mapped = x*(1+x)/(1+x) = x`, `out = x/w = x`, `blend = 1` - i.e.
+   sRGB->linear->sRGB, an identity. Measured: max |delta| **1.8e-07** (float32 round-trip noise) and,
+   after 8-bit rounding, **0 of 196608 bytes differ** on a 16-bit ramp. It DOES clip to [0,1]
+   (`_finalize`), and that is the only reason the legacy path's float output respects the IMAGE
+   contract while it is on.
+2. **No host stage adds information.** The change the owner sees in post is the engine's own look
+   (the RenoDX-DLSS5-derived neural addon plus our style/intensity/tone settings): a redistribution
+   of tones INSIDE [0,1], which is exactly what "more recoverable range when I push exposure" looks
+   like after a flattening tone map. And the observation that the 8- and 16-bit saves look the same
+   is *explained by* the audit rather than contradicting it: on the native path the frame carried at
+   most 256 levels per channel, so a 16-bit container could not hold more than an 8-bit one. The
+   file was 16-bit; the data was not.
+
+**SHIPPED (this commit) - the native NR stage keeps the frame in the domain its surfaces already
+are:**
+- `DlssNrSession.evaluate_frame(frame_f32)` (+ `_frame_to_fp16`/`_fp16_to_frame`): the same call
+  sequence, the same RGBA16F surfaces, but the payload is float16 instead of an 8-bit image expanded
+  to float16. Measured on the same ramp: **7169 levels survive**, max error 0.062/255, and the +2-stop
+  push uses all 256 output levels (no banding).
+- `ANTS_NR_RGBA8=1` restores the rig-proven 8-bit byte payload byte for byte (`evaluate()` is
+  untouched and still the tested path) - the A/B is one env var.
+- `_evaluate_run()` is the shared body now, and it keeps `last_input_bytes`/`last_output_bytes` on the
+  session, so `_check_native_output(same_as_input, sess)` measures identity in whichever domain the
+  run used (the old "byte-identical" verdict, without re-encoding).
+- `bit_depth_line(native, use_cuda, sr_active, fp16)`: one console line per run, from the settings
+  actually in force, e.g. `[ANTs] bit depth: in float32 [0,1] -> ANTs native NGX host, color/output
+  RGBA16F (float16 payload) -> no pre-denoise SR stage -> out float32 [0,1].` The owner's question is
+  now answerable from the console instead of from the code.
+- Suite: **493 checks** (native_flow 71 - the float16 route, its 8-byte payloads, the shape guard and
+  the untouched byte route; dlssnr_bridge 124 - the switch, the line, the wiring).
+  `HOST_BUILD` `2026-09-21.11`.
+
+**LEFT OPEN (plan.md, in order):**
+1. the **SR stage's own textures are RGBA8**: with `pre_denoise_mode: SR` the 8-bit boundary comes
+   back (and it is the stage that runs before a `Denoise Model` pass anyway). Raising it means
+   creating its colour/output as RGBA16F and deciding the HDR create flag - a change to a
+   rig-proven feature contract, so it needs its own rig evidence, not a hunch;
+2. the **legacy paths return float32 unclamped**: while the bridge is ON they are clipped to [0,1] by
+   `_finalize`; with the bridge Off, values outside [0,1] reach ComfyUI (and `Save Image` clips them
+   silently). Worth a report line, not a silent clip;
+3. the **jitter-sequence SR option** stays UNDER CONSIDERATION for the next investigation round
+   (owner, rig 33b) - see plan.md; nothing about it is built.
 
 ### 2026-09-21 (rig run 29) - the SR pre-denoise stage FAULTED at init; the route is fixed
 - **Owner's A/B**: `pre_denoise_strength` 0 = "ran as usual" (the rule skips the stage); strength 1

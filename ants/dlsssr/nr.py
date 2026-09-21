@@ -72,6 +72,34 @@ def _fp16_to_rgba8(payload, width, height):
     return (arr * 255.0 + 0.5).astype(np.uint8).tobytes()
 
 
+def _frame_to_fp16(frame, width, height):
+    """float32 HWC RGB [0,1] -> RGBA float16 bytes.
+
+    THE POINT (rig-33 bit-depth audit): the runtime's colour surface is
+    ``R16G16B16A16_FLOAT``, but the byte route puts an **8-bit** image into it
+    (``_rgba8_to_fp16``: 65536 source levels -> 256). This keeps the frame in
+    the surface's own domain, where the only loss is float16's own - about 11
+    significant bits, and far finer than 8-bit in the shadows because of the
+    exponent (rig-33 measurement: 7169 levels over [0,1] per channel).
+    """
+    arr = np.clip(np.asarray(frame, dtype=np.float32), 0.0, 1.0)
+    rgba = np.empty((height, width, 4), dtype=np.float16)
+    rgba[:, :, :3] = arr.reshape(height, width, 3).astype(np.float16)
+    rgba[:, :, 3] = np.float16(1.0)
+    return rgba.tobytes()
+
+
+def _fp16_to_frame(payload, width, height):
+    """RGBA float16 readback -> float32 HWC RGB clipped to [0, 1].
+
+    The byte route clamps to 8 bits here (``_fp16_to_rgba8``) - which throws
+    away everything the engine wrote below the 1/255 step. This keeps the
+    readback's own precision and still ends at the IMAGE contract's [0, 1].
+    """
+    arr = np.frombuffer(payload, dtype=np.float16).reshape(height, width, 4)
+    return np.clip(arr[:, :, :3].astype(np.float32), 0.0, 1.0)
+
+
 def fp16_anomalies(payload):
     """(nonfinite, out_of_range, values) counts for an RGBA16F readback.
 
@@ -325,23 +353,50 @@ class DlssNrSession:
     def evaluate(self, color_rgba, reset=True, check_anomalies=False):
         """Enhance one RGBA8 frame 1:1; returns the enhanced RGBA8 frame.
 
-        ``check_anomalies`` scans the RGBA16F readback for NaN/Inf and for
-        out-of-range values before they are clamped away (see
-        :func:`fp16_anomalies`); the result lands in
-        ``self.last_output_anomalies``. The node asks for it on the first frame
-        of a prompt - see ``_check_native_output``.
+        The 8-bit payload route - the one the rig proved - kept for A/B
+        (``ANTS_NR_RGBA8=1``); see :meth:`evaluate_frame` for the float route
+        the node uses by default.
         """
-        self.evaluates += 1
         expected = self.w * self.h * 4
         if len(color_rgba) != expected:
             raise DlssSrError(
                 f"[ANTs] DLSS NR expected {expected} color bytes, got {len(color_rgba)}.")
+        raw = self._evaluate_run(_rgba8_to_fp16(color_rgba, self.w, self.h),
+                                 reset, check_anomalies)
+        return _fp16_to_rgba8(raw, self.w, self.h)
+
+    def evaluate_frame(self, frame, reset=True, check_anomalies=False):
+        """Enhance one float32 HWC [0,1] frame 1:1, IN THE FLOAT16 DOMAIN.
+
+        Returns a float32 HWC frame clipped to [0, 1]. Same call sequence and
+        the same RGBA16F surfaces as :meth:`evaluate` - only the payload keeps
+        the frame's own precision instead of quantizing it to 8 bits.
+        ``check_anomalies`` behaves exactly as it does there.
+        """
+        arr = np.asarray(frame, dtype=np.float32)
+        if arr.shape != (self.h, self.w, 3):
+            raise DlssSrError(
+                f"[ANTs] DLSS NR expected a {self.h}x{self.w}x3 frame, got "
+                f"{tuple(arr.shape)}.")
+        raw = self._evaluate_run(_frame_to_fp16(arr, self.w, self.h),
+                                 reset, check_anomalies)
+        return _fp16_to_frame(raw, self.w, self.h)
+
+    def _evaluate_run(self, upload, reset, check_anomalies):
+        """Upload -> drain -> feature call -> execute its recording -> read back.
+
+        ``upload`` is the RGBA16F payload in the caller's domain (8-bit
+        expanded or float16); ``raw`` is the RGBA16F readback. Both are kept on
+        the session so a caller can ask whether the engine changed the frame
+        without re-encoding anything (``last_input_bytes`` /
+        ``last_output_bytes``).
+        """
+        self.evaluates += 1
+        self.last_input_bytes = upload
         uav = d3d.D3D12_RESOURCE_STATE_UNORDERED_ACCESS
         # Colour goes in as a shader-resource read (see the note in __init__):
         # the upload leaves it in the INPUT state, not in UAV.
-        self.gpu.upload_texture(self.color,
-                                _rgba8_to_fp16(color_rgba, self.w, self.h),
-                                d3d.input_state())
+        self.gpu.upload_texture(self.color, upload, d3d.input_state())
         self.gpu.transition(self.output, uav)
         # Drain before the feature call: the proven hosts close, execute and
         # fence-wait every copy they make, so the runtime always receives a
@@ -394,9 +449,10 @@ class DlssNrSession:
         # runtime that poisons its list cannot take the frame upload with it.
         self.gpu.runtime_submit_and_wait()
         raw = self.gpu.readback_texture(self.output, uav)
+        self.last_output_bytes = raw
         self.last_output_anomalies = (fp16_anomalies(raw) if check_anomalies
                                       else None)
-        return _fp16_to_rgba8(raw, self.w, self.h)
+        return raw
 
     def close(self):
         self.ngx.close()

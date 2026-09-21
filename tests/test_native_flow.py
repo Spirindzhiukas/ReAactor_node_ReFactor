@@ -671,7 +671,7 @@ def main():
     nr_dll = nr_source / "nvngx_dlssnr_ANY_name.dll"
     nr_dll.write_bytes(b"MZ" + bytes(4094))
     ngx.locate_ngx_core = lambda: "fake/DriverStore/_nvngx.dll"
-    from ants.dlsssr.nr import DlssNrSession
+    from ants.dlsssr.nr import DlssNrSession, _rgba8_to_fp16 as _rgba8_to_fp16_ref
     from ants.dlsssr.ngx import FEATURE_NR
     W, H = 60, 48  # 240-byte rows != 256 pitch: exercises row padding
     PARAMS.clear()
@@ -776,6 +776,42 @@ def main():
     check("nr: fence-wait path engaged, frame still correct",
           any(entry[0] == "SetEventOnCompletion" for entry in RECORD)
           and out3 == want)
+
+    # ---- rig-33 bit-depth audit: the FLOAT16 payload route ----------------
+    # The colour/output surfaces are RGBA16F; the byte route above puts an
+    # 8-bit image into them (65536 source levels -> 256). evaluate_frame()
+    # keeps the frame's own precision, and the READBACK keeps the engine's -
+    # the path the node uses by default (ANTS_NR_RGBA8=1 restores the route
+    # above). Measured on the rig-33 audit: 65536 -> 256 levels in, 7169 ->
+    # 256 out.
+    frame = (_np.linspace(0.5, 0.5078125, W * H * 3, dtype=_np.float32)
+             .reshape(H, W, 3))
+    out_frame = sess.evaluate_frame(frame, reset=True)
+    half_round = frame.astype(_np.float16).astype(_np.float32)
+    eight_bit = _np.round(frame * 255.0) / 255.0
+    check("nr: evaluate_frame keeps the frame in the RGBA16F domain - the "
+          "engine's identity answer comes back as the float16 round trip, NOT "
+          "as the 8-bit one",
+          out_frame.shape == (H, W, 3)
+          and _np.array_equal(out_frame, half_round)
+          and not _np.allclose(out_frame, eight_bit)
+          and _np.abs(out_frame - frame).max() < 1e-3)
+    check("nr: the float route uses the surface's own bytes (8 per pixel) and "
+          "keeps both payloads for the caller's identity test",
+          len(sess.last_input_bytes) == W * H * 8
+          and len(sess.last_output_bytes) == W * H * 8
+          and sess.last_output_bytes == sess.last_input_bytes
+          and sess.last_input_bytes != _rgba8_to_fp16_ref(payload, W, H))
+    try:
+        sess.evaluate_frame(_np.zeros((H, W, 4), dtype=_np.float32))
+        shape_guard = False
+    except Exception as exc:
+        shape_guard = "[ANTs]" in str(exc) and "x3 frame" in str(exc)
+    check("nr: evaluate_frame refuses a frame that is not HxWx3 [0,1] - loudly",
+          shape_guard)
+    out4 = sess.evaluate(payload, reset=True)
+    check("nr: the 8-bit byte route is unchanged next to it (the A/B path)",
+          out4 == want)
     sess.close()
 
     # ---- Close resilience: an unconclosable list is recovered loudly -------

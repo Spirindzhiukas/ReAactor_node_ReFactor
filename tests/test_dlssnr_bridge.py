@@ -166,8 +166,10 @@ def main():
     # hr=1 from CreateFeature and EvaluateFeature). A smoke test on a synthetic
     # image is what keeps it honest without a GPU: the payload round-trips, a
     # real change passes, a no-op and a NaN do not.
-    from ants.dlssnr.node import (ReFactorDLSS5Enhancer, _byte_stats, _delta_text,
-                                  engine_output_verdict, native_output_verdict,
+    from ants.dlssnr.node import (PRE_DENOISE_OFF, PRE_DENOISE_SR,
+                                  ReFactorDLSS5Enhancer, _byte_stats, _delta_text,
+                                  bit_depth_line, engine_output_verdict,
+                                  native_output_verdict, nr_fp16_enabled,
                                   rgba_bytes_from_rgb8, session_cache_enabled,
                                   soak_enabled, soak_line, sr_accum_enabled,
                                   sr_output_verdict)
@@ -250,6 +252,44 @@ def main():
     _bare._sr_accum = 0
     _off_seq = [_bare._sr_reset_for(True), _bare._sr_reset_for(False),
                 _bare._sr_reset_for(True)]
+    # ---- rig-33 bit-depth audit: what precision does a run actually use? ----
+    # The owner's question ("a 16-bit image comes in - what comes out?") has to
+    # be answerable from the console, and the answer must follow the settings.
+    _os.environ["ANTS_NR_RGBA8"] = "1"
+    _byte_route = nr_fp16_enabled()
+    del _os.environ["ANTS_NR_RGBA8"]
+    check("bits: the native NR stage keeps the frame in the RGBA16F domain by "
+          "default (the surfaces' own domain) and ANTS_NR_RGBA8=1 restores the "
+          "rig-proven 8-bit payload for an A/B",
+          nr_fp16_enabled() and not _byte_route
+          and "ANTS_NR_RGBA8" in _pl.Path(REPO / "ants" / "dlssnr" / "node.py"
+                                          ).read_text())
+    _bits_src = _pl.Path(REPO / "ants" / "dlssnr" / "node.py").read_text()
+    _native_line = bit_depth_line(True, False, False, True)
+    _byte_line = bit_depth_line(True, False, False, False)
+    _cuda_line = bit_depth_line(False, True, True, True)
+    _host_line = bit_depth_line(False, False, False, True)
+    check("bits: the bit-depth line names the precision of every stage the run "
+          "uses - native float16 vs the A/B byte payload, the legacy engine's "
+          "float32 paths, and the SR stage's own 8-bit textures",
+          "float16 payload" in _native_line
+          and "RGBA16F" in _native_line
+          and "8-bit payload" in _byte_line
+          and "ANTS_NR_RGBA8=1" in _byte_line
+          and "float32 in/out" in _cuda_line and "CUDA" in _cuda_line
+          and "host-staging" in _host_line
+          and "8-bit" in _cuda_line and "pre-denoise SR stage RGBA8" in _cuda_line
+          and "no pre-denoise SR stage" in _native_line
+          and "float32 [0,1]" in _host_line)
+    check("bits: the node emits that line once per run, before any frame is "
+          "processed, and the native branch routes through evaluate_frame with "
+          "the byte route one knob away",
+          "logger.status(\"%s\", bit_depth_line(" in _bits_src
+          and "self._bit_depth_logged = True" in _bits_src
+          and "sess.evaluate_frame(" in _bits_src
+          and "fp16 = nr_fp16_enabled()" in _bits_src
+          and "sess.evaluate(\n" in _bits_src
+          and "sess.last_output_bytes" in _bits_src)
     check("smoke: ANTS_SR_ACCUM=1 is opt-in, keeps history only for the LATER "
           "passes of one image (the first keeps temporal_history), and does "
           "nothing at all when unset",
@@ -345,7 +385,7 @@ def main():
           soak_line(7).startswith("[ANTs] soak:") and "frames 7" in soak_line(7))
     check("native: the output check and the soak line are wired into the "
           "evaluate path, and a closed session is evicted from the cache",
-          "self._check_native_output(out, payload, sess)" in node_src
+          "self._check_native_output(same, sess)" in node_src
           and "soak_line(" in node_src
           and "def _check_native_output" in node_src
           and "def _drop_session" in node_src

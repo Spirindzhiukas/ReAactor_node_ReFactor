@@ -338,10 +338,25 @@ python and never registers callbacks.
       image (only its first pass resets). If the image changes visibly with it, the weakness is the
       reset pattern; if it does not, it is the synthetic contract.
       The SR verdict's new `[mean |delta| x.xx/255 ...]` number quantifies both.
-- [ ] **DECISION AFTER THAT (not built)**: if a stronger SR stage is wanted, the only honest route is
-      a synthesized jitter sequence (guide's 8 phases for DLAA, pixel space, sub-pixel-shifted copies
-      of the still with matching `Jitter.Offset`, history kept) - ~8 evaluations per image. Otherwise
-      SR stays a light AA resolve and `Denoise Model` (the new default) is the denoise stage.
+- [-] **UNDER CONSIDERATION FOR THE NEXT INVESTIGATION (owner, rig run 33b)** - the synthesized
+      jitter sequence: guide's 8 phases for DLAA, pixel space, sub-pixel-shifted copies of the still
+      with a matching `Jitter.Offset`, history kept, ~8 evaluations per image. This is the only
+      honest route to a genuinely STRONG SR stage, because it gives the network the multi-sample
+      contract it exists to resolve. Not built, nothing started: it is on the table for the next
+      investigation round with its price known. Until the owner rules on it, SR stays a light AA
+      resolve and `Denoise Model` (the default) is the denoise stage.
+- [ ] **BIT-DEPTH FOLLOW-UPS (rig run 33b audit)**: the native NR stage now keeps the frame in the
+      RGBA16F domain (float16 payload; `ANTS_NR_RGBA8=1` = the rig-proven byte route for an A/B).
+      Open, in order:
+      (1) **the pre-denoise SR stage's textures are `R8G8B8A8_UNORM`** - with `pre_denoise_mode: SR`
+        (or any SR pass) the 8-bit boundary is back. Fixing it = create its colour/output as RGBA16F
+        and decide the HDR create flag (`DLSS_CREATE_FLAG_IS_HDR`); that touches a rig-proven feature
+        contract, so it needs its own rig evidence first;
+      (2) **the legacy engine paths return float32 unclamped** - clipped to [0,1] only while the HDR
+        bridge is ON (`_finalize`). With the bridge Off, out-of-range values reach ComfyUI and
+        `Save Image` clips them silently: report the count (a `[ANTs]` line), do not clip silently;
+      (3) the console's `[ANTs] bit depth:` line is the answer to "what comes out" - keep it true when
+        any of the above changes.
 - [ ] **SR + LEGACY ENGINE (rig run 32/33, open)**: with the SR image fix in, the remaining question
       is the `dlss5nr_process_cuda_v6` C++ throw from run 32 (`0xE06D7363`) - the engine's own
       handler swallows it, the destination is never written and the prompt used to end with a black

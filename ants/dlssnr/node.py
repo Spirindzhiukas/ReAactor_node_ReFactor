@@ -292,6 +292,49 @@ def engine_output_verdict(dest_all_zero, source_has_content, cxx_report):
     return None, ""
 
 
+def nr_fp16_enabled():
+    """Does the native NR stage keep the frame's own precision? (rig-33 audit)
+
+    YES by default: the runtime's colour/output surfaces are
+    ``R16G16B16A16_FLOAT``, so the frame belongs in the float16 domain - the
+    byte route (``_rgba8_to_fp16``) quantized it to 256 levels on the way IN
+    and ``_fp16_to_rgba8`` clamped the engine's answer back to 256 on the way
+    OUT, which is a silent precision loss for a 16-bit source (measurement in
+    memory.md: 65536 -> 256 levels in, 7169 -> 256 out).
+
+    ``ANTS_NR_RGBA8=1`` restores the rig-proven 8-bit payload byte for byte,
+    for an A/B. The legacy engine paths are float32 either way.
+    """
+    return os.environ.get("ANTS_NR_RGBA8", "").strip().lower() not in (
+        "1", "true", "yes", "on")
+
+
+def bit_depth_line(native, use_cuda, sr_active, fp16):
+    """One line naming the precision of every stage this run uses.
+
+    The owner's question (rig 33): "if a 16-bit image comes in, what actually
+    comes out of our pipeline?" - ComfyUI hands a node float32 [0,1] whatever
+    the file was (the reference Load Image decodes 16-bit PNGs; batch loaders
+    that go through ``convert("RGB")`` crush them to 8 bits first, which is
+    their business, not ours), so the answer is entirely about what we do with
+    it afterwards. This is that answer, from the settings actually in force.
+    """
+    if native:
+        engine = ("ANTs native NGX host, color/output RGBA16F (float16 payload)"
+                  if fp16 else
+                  "ANTs native NGX host, color/output RGBA16F carrying an "
+                  "8-bit payload (ANTS_NR_RGBA8=1)")
+    elif use_cuda:
+        engine = "legacy engine, CUDA path (float32 in/out)"
+    else:
+        engine = "legacy engine, host-staging path (float32 in/out)"
+    stages = ["in float32 [0,1]", engine,
+              "pre-denoise SR stage RGBA8 (8-bit, its own textures)"
+              if sr_active else "no pre-denoise SR stage"]
+    return ("[ANTs] bit depth: " + " -> ".join(stages)
+            + " -> out float32 [0,1].")
+
+
 def sr_accum_enabled():
     """``ANTS_SR_ACCUM=1`` - let the SR stage keep its temporal history across
     the passes of one prompt (diagnostic, rig run 33).
@@ -382,6 +425,7 @@ class ReFactorDLSS5Enhancer:
         self._soak_logged = False
         self._sr_checked = False         # the SR pass's output verdict (rig 32)
         self._sr_accum = 0               # SR stage passes seen for this image
+        self._bit_depth_logged = False   # the run's precision line (rig 33)
         self._engine_warned = False      # "did your C++ throw recover?" (rig 32)
         self._nr_preset = 0
         self._sr_choice = "auto"
@@ -693,19 +737,22 @@ class ReFactorDLSS5Enhancer:
         self.native_session.settings.update(pass_settings)
         return self.native_session
 
-    def _check_native_output(self, out, payload, sess):
+    def _check_native_output(self, same_as_input, sess):
         """Log once per prompt whether the engine actually changed the frame.
 
-        See :func:`native_output_verdict`. The counts come from the RGBA16F
-        readback (``sess.last_output_anomalies``) - by the time the frame is a
-        tensor it has passed the host clamp, which is exactly what would hide a
-        NaN or a saturated output.
+        See :func:`native_output_verdict`. ``same_as_input`` is the caller's
+        byte comparison in the payload domain the run used (8-bit or float16 -
+        both are the engine's own domain), so the verdict means the same thing
+        on either route. The counts come from the RGBA16F readback
+        (``sess.last_output_anomalies``) - by the time the frame is a tensor it
+        has passed the host clamp, which is exactly what would hide a NaN or a
+        saturated output.
         """
         if self._native_checked:
             return
         self._native_checked = True
         anomalies = getattr(sess, "last_output_anomalies", None) or (0, 0, 0)
-        level, text = native_output_verdict(out == payload, anomalies[0],
+        level, text = native_output_verdict(bool(same_as_input), anomalies[0],
                                             anomalies[1], anomalies[2])
         if level == "error":
             logger.error("%s", text)
@@ -1116,6 +1163,16 @@ class ReFactorDLSS5Enhancer:
         _reset_next = True
         _prev_thumb = None
 
+        # Rig-33 audit: say which precision each stage works in, from the
+        # settings in force - the owner asked exactly this and it must not be
+        # something to guess at from the code.
+        if not self._bit_depth_logged:
+            self._bit_depth_logged = True
+            logger.status("%s", bit_depth_line(
+                bool(native), bool(use_cuda),
+                pre_denoise_mode == PRE_DENOISE_SR,
+                nr_fp16_enabled()))
+
         src_np = None
         cpu_bufs = None
         if not use_cuda:
@@ -1190,11 +1247,23 @@ class ReFactorDLSS5Enhancer:
                     look = {"style": pass_spec["style"], **pass_spec["settings"]}
                     sess = self._native_session_for(int(frame_t.shape[1]),
                                                     int(frame_t.shape[0]), look)
-                    payload, w_px, h_px = self._frame_to_rgba8(frame_t)
+                    fp16 = nr_fp16_enabled()
+                    if not fp16:
+                        payload, w_px, h_px = self._frame_to_rgba8(frame_t)
                     try:
-                        out = sess.evaluate(
-                            payload, reset=do_reset,
-                            check_anomalies=not self._native_checked)
+                        if fp16:
+                            # The frame stays in the domain its surface already
+                            # is (RGBA16F): a 16-bit source keeps its levels.
+                            out_frame = sess.evaluate_frame(
+                                frame_t, reset=do_reset,
+                                check_anomalies=not self._native_checked)
+                            same = (sess.last_output_bytes
+                                    == sess.last_input_bytes)
+                        else:
+                            out = sess.evaluate(
+                                payload, reset=do_reset,
+                                check_anomalies=not self._native_checked)
+                            same = out == payload
                     except Exception as exc:
                         # A failing evaluate can leave the NGX feature (and the
                         # snippet's internal state) mid-flight; run 30 showed a
@@ -1218,8 +1287,13 @@ class ReFactorDLSS5Enhancer:
                                 "stays wedged, restart ComfyUI).") from exc
                         self._close_native()
                         raise
-                    frame_t = self._rgba8_to_frame(out, w_px, h_px, self.device)
-                    self._check_native_output(out, payload, sess)
+                    if fp16:
+                        frame_t = torch.from_numpy(
+                            np.ascontiguousarray(out_frame)).to(self.device)
+                    else:
+                        frame_t = self._rgba8_to_frame(out, w_px, h_px,
+                                                       self.device)
+                    self._check_native_output(same, sess)
                     if soak_enabled() and not self._soak_logged:
                         self._soak_logged = True
                         logger.status("%s", soak_line(

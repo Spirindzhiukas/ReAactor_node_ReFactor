@@ -116,6 +116,19 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
    the UI greys `pre_denoise_strength` as `(no model - stage OFF)`. Never "fix" the default by
    collapsing SR's strength or re-gating the stage - `SR` stays exactly as selectable as before,
    and `ANTS_SR_ACCUM=1` is a MEASUREMENT (history across one image's passes), not a new default.
+   The synthesized **jitter sequence** (the guide's 8 DLAA phases, pixel space, matching
+   `Jitter.Offset`, history kept, ~8 evaluations per image) is the only honest route to a stronger
+   SR stage - it is **UNDER CONSIDERATION for the next investigation round** (owner, rig 33b):
+   nothing about it is built, so do not start it without the owner's word.
+8. **Bit depth is a contract, not a detail** (rig-33b audit): the native NR feature's colour/output
+   surfaces are `R16G16B16A16_FLOAT`, so the frame belongs in the **float16 domain** in both
+   directions (`evaluate_frame` / `_frame_to_fp16` / `_fp16_to_frame`). Never re-introduce an 8-bit
+   quantisation on that path: the byte route (`evaluate` + `_rgba8_to_fp16`/`_fp16_to_rgba8`) put 256
+   levels into the 16F surface and clamped the engine's answer back to 256 - a silent precision loss
+   for a 16-bit source, and the reason a "16-bit save" of the output could not look different from an
+   8-bit one. `ANTS_NR_RGBA8=1` is the A/B knob, never a default. The legacy engine paths are float32
+   (no host quantisation). The pre-denoise SR stage is still RGBA8 (its own textures) - documented,
+   not hidden. Every run prints `[ANTs] bit depth: ...` from the settings in force; keep it true.
 
 ## Engineering conventions
 
@@ -127,7 +140,7 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
 - **Gates before every commit:** `pyflakes` over `ants/`, `nodes.py`, `tests/`
   (benign exceptions: star-import notes in `codeformer_arch.py`); `tests/test_pyflakes.py`,
   `tests/test_scope_check.py`, `tests/smoke_import.py` (asserts exactly 22 nodes), plus
-  the full suite. Current tally: **486 checks** (see `memory.md`).
+  the full suite. Current tally: **493 checks** (see `memory.md`).
 - **NGX has ONE context per process** (rig runs 29/30 + Claude Sonnet 5): the FIRST `Init` pins the
   app id, the project id and the **feature-library search paths** - a later session can only re-use
   that context, never add a folder. Every ANTs session therefore goes through the same geometry:

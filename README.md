@@ -180,6 +180,23 @@ vectors, so what is left is a small spatial resolve, not a restoration. Expect a
 (`[ANTs] SR stage: ... [mean |delta| x.xx/255 over RGB ...]`), so "how weak" is measurable rather than
 a matter of opinion.
 
+**Bit depth — what actually happens to a 16-bit image.** ComfyUI hands a node `float32` in [0, 1]
+whatever the file was (the reference `Load Image` decodes 16-bit PNGs; some batch loaders crush them
+to 8 bits on load — that part is not ours). From there:
+
+* **native NGX engine** — the NR feature's colour/output surfaces are `RGBA16F`, and the frame now
+  stays in that domain end to end (float16 payload in, float16 readback kept): a 16-bit source keeps
+  its fine steps instead of being rounded to 256 levels. `ANTS_NR_RGBA8=1` restores the older 8-bit
+  payload for an A/B.
+* **legacy neuroframe engine** — float32 in, float32 out, no quantisation by us.
+* **pre-denoise `SR (DLSS denoise)` stage** — works in its own `RGBA8` textures, so that stage is
+  8-bit in and out. Keep it in mind when chasing banding with `pre_denoise_mode: SR`.
+* **HDR Colour Bridge** — at its default settings the `Classic` transfer is mathematically an
+  identity (it only clips to [0, 1]); it becomes a real tone change once its sliders move.
+* Every run prints one line naming exactly this: `[ANTs] bit depth: in float32 [0,1] -> ... -> out
+  float32 [0,1].` If a "16-bit" save of the output looks no different from an 8-bit one, that line
+  says which stage is the reason.
+
 **GPU acceleration needs a CUDA-capable helper engine.** The zero-copy path (`dlss5nr_process_cuda_v6`
 in the neuroframe engine) is ~20-25x faster than CPU staging. The node logs which engine build it
 loaded and whether that entry point exists; if it is missing, the run still works but on CPU, and the
