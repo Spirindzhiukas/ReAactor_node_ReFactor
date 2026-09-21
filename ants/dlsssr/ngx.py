@@ -17,16 +17,29 @@ One class serves every layout, because the API surface is identical:
   ``NVSDK_NGX_D3D12_*`` exports are the PUBLIC API in the PUBLIC argument
   order (``Init_Ext(appId, path, device, sdkVersion, featureInfo)``) and the
   runtime loads the driver core itself. Handing the driver core the SR folder
-  in the search-path list is NOT enough: on the rig the core answered
-  ``0xBAD0000B`` (no provider module for feature 1), and calling the runtime
-  in the snippet order below faults inside ``Init_Ext`` — the swap puts the
-  version constant 0x15 into the feature-info pointer slot (rig 29);
+  in the search-path list is NOT enough on its own: on the rig the core
+  answered ``0xBAD0000B``, which the header decodes as
+  **``Fail|11 UnableToInitializeFeature``** ("feature misconfigured or not
+  available on the system") — the feature is simply not in the context the
+  core already holds. Calling the runtime in the snippet order below faults
+  inside ``Init_Ext`` — the swap puts the version constant 0x15 into the
+  feature-info pointer slot (rig 29);
 - **driver core alone** (`_nvngx.dll`) — kept as the SR fallback for sets
   where the core does own the SR implementation;
 - **snippet direct** (`use_own_parameters=True`) — the legacy fallback where
   the snippet itself is the provider and is handed our own parameter object
   (the SWAPPED ``Init_Ext`` order). Kept for NR diagnostics and for an opt-in
   SR route (``ANTS_SR_SNIPPET_DIRECT=1``), NOT a default anywhere.
+
+**One NGX context per process** (rig 02:48 + Claude Sonnet 5, round 3): the
+core keeps the FIRST Init's app id, app data path and feature-library search
+paths; a later session can only reuse that context - it cannot add a folder
+or change the identity. Every stage therefore uses the SAME geometry
+(``feature_search_paths`` unions the staged feature dirs - the selected SR
+build is staged on demand - and NVIDIA's models dir; the SR stage inits with
+the NR stage's app id, project id and app data path), and ``_note_geometry``
+prints what the core was handed on every init, so a mismatch is a line in the
+log instead of a silent 0xBAD0000B.
 
 Every NGX call is routed through the generated caller shim (``shim.py``):
 the target address is parked in a slot immediately before each call and the
@@ -85,7 +98,7 @@ NGX_ENGINE_TYPE_CUSTOM = 0
 # Console deployment marker: bumped with every host-layout change so the
 # owner's console unambiguously says WHICH build ran (run-28 attempt #1 was
 # diagnosed from a stack trace because the old file was still deployed).
-HOST_BUILD = "2026-09-21.5"
+HOST_BUILD = "2026-09-21.6"
 
 FEATURE_SR = 1    # NVSDK_NGX_Feature_SuperSampling
 FEATURE_NR = 18   # NVSDK_NGX_Feature_NeuralRendering ("CG2R")
@@ -100,6 +113,159 @@ APP_ID = 0x4E5254530001            # the customary 'NRTS' test-app id
 NR_APP_ID = 141959980
 NR_PROJECT_ID = "53f803cc-a12f-4d69-90d5-19b7599cad19"
 NGX_MODELS_DIR = r"C:\ProgramData\NVIDIA\NGX\models"
+
+# NVSDK_NGX_Result, verbatim from nvsdk_ngx_defs.h (Fail | n). The rig-visible
+# names matter: a wrong name sends the whole investigation the wrong way (our
+# old table called 0xBAD0000B "FeatureNotSupported", which is Fail|1; the
+# header says 0xBAD0000B is UnableToInitializeFeature - "feature is
+# misconfigured or not available on the system" - and 0xBAD00003 is
+# FeatureAlreadyExists, not InvalidParameter; 0xBAD0000C is OutOfDate, not
+# "PlatformNotSupported"). Verified against the header text 2026-09-21.
+NGX_RESULT_NAMES = {
+    0x1: "Success",
+    0xBAD00000: "Fail",
+    0xBAD00001: "FeatureNotSupported",
+    0xBAD00002: "PlatformError",
+    0xBAD00003: "FeatureAlreadyExists",
+    0xBAD00004: "FeatureNotFound",
+    0xBAD00005: "InvalidParameter",
+    0xBAD00006: "ScratchBufferTooSmall",
+    0xBAD00007: "NotInitialized",
+    0xBAD00008: "UnsupportedInputFormat",
+    0xBAD00009: "RWFlagMissing",
+    0xBAD0000A: "MissingInput",
+    0xBAD0000B: "UnableToInitializeFeature",
+    0xBAD0000C: "OutOfDate",
+    0xBAD0000D: "OutOfGPUMemory",
+    0xBAD0000E: "UnsupportedFormat",
+    0xBAD0000F: "UnableToWriteToAppDataPath",
+    0xBAD00010: "UnsupportedParameter",
+    0xBAD00011: "Denied",
+    0xBAD00012: "NotImplemented",
+}
+
+
+def ngx_result_name(code):
+    """The header's name for a result code (never a made-up one)."""
+    return NGX_RESULT_NAMES.get(int(code) & 0xFFFFFFFF,
+                                "unknown NGX result")
+
+
+def feature_lib_dirs(root):
+    """Every dir under ``<root>/staged`` that holds a canonical feature lib.
+
+    The core loads feature libraries by LITERAL name from the search paths:
+    ``nvngx_dlssnr.dll`` (our NR staging: ``staged/<name>-<size>/``) and
+    ``nvngx_dlss.dll`` (our SR staging: ``staged/ANTs/sr_staged/<stem>/``).
+    Bounded walk (depth 3, names only - no file is opened), ordered NEWEST
+    FIRST by the pack's naming rule so the core's first match is the build the
+    selector would have picked.
+    """
+    staged = os.path.join(str(root), "staged")
+    if not os.path.isdir(staged):
+        return []
+    names = ("nvngx_dlss.dll", "nvngx_dlssnr.dll")
+    found = []
+    for current, subdirs, files in os.walk(staged):
+        rel = os.path.relpath(current, staged)
+        depth = 0 if rel == "." else rel.count(os.sep) + 1
+        if depth >= 3:
+            subdirs[:] = []
+        lowered = {name.lower() for name in files}
+        if any(name in lowered for name in names):
+            found.append(current)
+    try:
+        from . import versions
+        return versions.newest_first(found)
+    except Exception:
+        return sorted(found, reverse=True)
+
+
+def feature_search_paths(primary=()):
+    """The search-path list EVERY NgxSession hands the core (the union).
+
+    The core resolves feature libraries at its FIRST ``Init`` in the process
+    and keeps that list: a session created later cannot add a folder (rig
+    02:48, Claude Sonnet 5 round 3 - the earlier NR init pinned a list with no
+    SR folder, so ``CreateFeature(1)`` answered ``0xBAD0000B`` =
+    UnableToInitializeFeature). Every init therefore offers the same union -
+    the caller's own folders first, then every ANTs staged feature folder (the
+    selected SR build is staged on demand), then NVIDIA's models dir - so
+    whichever stage inits first, the other one's library is already there.
+    """
+    paths = [str(p) for p in primary if p]
+    try:
+        from . import discovery as sr_discovery
+        sr_dir = sr_discovery.ensure_staged_sr_dir()
+    except Exception:
+        sr_dir = None
+    if sr_dir:
+        paths.append(sr_dir)
+    try:
+        from ..dlssnr.discovery import DLSS_ROOT
+        paths.extend(feature_lib_dirs(DLSS_ROOT))
+    except Exception:
+        pass
+    paths.append(NGX_MODELS_DIR)
+    seen, out = set(), []
+    for path in paths:
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(os.path.abspath(path))
+    return out
+
+
+_INIT_GEOMETRY = None      # the first NGX init's identity + search paths
+
+
+def _note_geometry(app_id, project_id, paths):
+    """Print what this init hands the core; name any later difference.
+
+    Returns "first" / "same" / "changed" so the decision stays testable. The
+    core keeps the FIRST init's app id and search paths for the whole process;
+    a later session silently re-uses that context, which is exactly how an SR
+    session ends up unable to see its own DLL (rig 02:48).
+    """
+    global _INIT_GEOMETRY
+    identity = {"app_id": int(app_id) & 0xFFFFFFFF, "project": project_id,
+                "paths": [os.path.normcase(os.path.abspath(p)) for p in paths]}
+    shown = ", ".join(paths) if paths else "<none>"
+    if _INIT_GEOMETRY is None:
+        _INIT_GEOMETRY = identity
+        _log().status(
+            "[ANTs] NGX init (first in this process): app id 0x%08X, project "
+            "%s, %d search path(s): %s",
+            identity["app_id"], project_id or "<none>", len(paths), shown)
+        return "first"
+    if identity == _INIT_GEOMETRY:
+        _log().status(
+            "[ANTs] NGX init: same geometry as the first init in this process "
+            "(app id 0x%08X, %d search path(s)) - the core re-uses the context "
+            "it pinned then", identity["app_id"], len(paths))
+        return "same"
+    only_first = [p for p in _INIT_GEOMETRY["paths"]
+                  if p not in identity["paths"]]
+    only_now = [p for p in identity["paths"]
+                if p not in _INIT_GEOMETRY["paths"]]
+    _log().warning(
+        "[ANTs] NGX init geometry CHANGED (app id 0x%08X -> 0x%08X, project "
+        "%s -> %s): the core KEEPS the first context - it will not resolve a "
+        "feature library from a folder that only this init lists. Missing "
+        "from the first init: %s. New here: %s",
+        _INIT_GEOMETRY["app_id"], identity["app_id"],
+        _INIT_GEOMETRY["project"] or "<none>", project_id or "<none>",
+        ", ".join(only_first) or "<none>", ", ".join(only_now) or "<none>")
+    return "changed"
+
+# NVSDK_NGX_Result, verbatim from nvsdk_ngx_defs.h (Fail | n). A returned code
+# is only useful if we NAME it right: the 02:48 rig run was read against a
+# wrong table (0xBAD0000B was called "FeatureNotSupported" - that is Fail|1,
+# while 0xBAD0000B is Fail|11 UnableToInitializeFeature, "feature is
+# misconfigured or not available on the system" per the NGX programming
+# guide). Same trap for 0xBAD00003 (FeatureAlreadyExists, not InvalidParameter)
+# and 0xBAD0000C (OutOfDate, not "PlatformNotSupported").
 
 _SYSTEM_CPARAMS_ARGS = None
 
@@ -207,7 +373,7 @@ def writable_cache_dir(tag):
 
 _SHIM_LOGGED = set()   # shim paths already announced (console triage hygiene)
 
-
+# The literal file names the driver core loads from its search paths.
 def _tagged_call(call, name):
     """Wrap one NGX export so the crash box knows what was in flight.
 
@@ -368,7 +534,7 @@ class NgxSession:
     def __init__(self, gpu, module_path, app_id=APP_ID, search_paths=(),
                  use_own_parameters=False, app_data_path=None, use_shim=True,
                  feature_module_path=None, project_id=None,
-                 preload_core=False, ngx_log=None):
+                 preload_core=False, ngx_log=None, owner_via_shim=None):
         """module_path: the session OWNER (the driver core for NR/SR; the
         snippet itself only in the legacy snippet-direct fallback).
 
@@ -378,6 +544,17 @@ class NgxSession:
         capability parameters, the snippet receives Create/Evaluate/Release
         through the caller shim). Its Init_Ext is called with the snippet's
         own argument order - see ``_init_feature_module``.
+
+        owner_via_shim: route the OWNER's own calls through the caller shim.
+        The driver core takes a direct call (rig-proven), but a feature
+        provider validates the module its caller returns into: the SR runtime
+        answered a direct public-order Init_Ext with 0xBAD00002 (PlatformError
+        - the code the NR snippet produced before the shim existed), while the
+        same call with the SWAPPED order through the shim faulted inside the
+        runtime reading the version constant out of the feature-info slot
+        (rig 29). Direct+public and shim+swapped are therefore both wrong for
+        it; shim+public is the one combination left - that is this flag. None
+        = the reference-host default (direct for the core, shim for a snippet).
         """
         self.gpu = gpu
         _log().status(f"[ANTs] NR/SR host build {HOST_BUILD} - core-owned "
@@ -399,10 +576,20 @@ class NgxSession:
         # (the geometry every run up to 2026-09-20 used).
         core_direct = os.environ.get("ANTS_NR_CORE_VIA_SHIM") != "1"
         self._owner_is_snippet = bool(use_own_parameters)
+        route_owner = self._owner_is_snippet or not core_direct
+        if owner_via_shim is not None:
+            route_owner = bool(owner_via_shim) and use_shim
+            if owner_via_shim:
+                _log().status(
+                    "[ANTs] caller geometry: the OWNER %s is called through "
+                    "the caller shim (direct+public and shim+swapped were "
+                    "both rejected by this runtime)",
+                    os.path.basename(str(module_path)))
+        self.owner_via_shim = bool(owner_via_shim)
         self.module = NgxModule(
             module_path, use_shim=use_shim,
             forwarder_dir=writable_cache_dir("shim"),
-            route_through_shim=self._owner_is_snippet or not core_direct)
+            route_through_shim=route_owner)
         self._own_parameters = None
         self.params = None
         self.handle = None
@@ -505,10 +692,21 @@ class NgxSession:
         self._log_cb = None
         if ngx_log or os.environ.get("ANTS_NR_NGX_LOG", "1") != "0":
             self._log_cb = self._make_log_callback(ngx_log)
-        info = FeatureCommonInfo(list(search_paths) or [os.path.dirname(module_path)],
+        # ONE geometry for every stage (NR, SR, legacy snippet-direct): the
+        # core keeps the FIRST init's app id and feature-library search paths
+        # for the whole process, so every session offers the same union
+        # instead of only its own folder - see feature_search_paths.
+        self.app_id = int(app_id)
+        self.search_paths = feature_search_paths(search_paths) or \
+            [os.path.dirname(module_path)]
+        info = FeatureCommonInfo(list(self.search_paths),
                                  log_callback=self._log_cb)
         self._init_keep += [app_data_wide, info, info._wide]
         project_id = project_id or (NR_PROJECT_ID if feature_module_path else None)
+        self.project_id = project_id
+        self.app_data = app_data
+        self.geometry = _note_geometry(self.app_id, project_id,
+                                       self.search_paths)
         # Reference-host pre-step: NvAPI is initialized before the NGX core
         # (the core asks NvAPI for the D3D12 device LUID during Init; the
         # Wine/vkd3d-NVAPI hosts MUST do this because their NvAPI is lazy,
@@ -661,9 +859,12 @@ class NgxSession:
             return 1
         _log().status(f"NGX init <- failed (last hr=0x{last & 0xFFFFFFFF:08X})")
         raise DlssSrError(
-            f"[ANTs] NGX Init failed (0x{last & 0xFFFFFFFF:08X}) for "
-            f"{owner.path} - the runtime rejected the session. Check the "
-            "driver version and the DLL set folder.")
+            f"[ANTs] NGX Init failed (0x{last & 0xFFFFFFFF:08X} = "
+            f"{ngx_result_name(last)}) for {owner.path} - the runtime "
+            "rejected the session. 0xBAD00002 (PlatformError) after another "
+            "stage already inited this process means the two stages disagree "
+            "about the app identity; check the '[ANTs] NGX init' lines "
+            "before this one.")
 
     def _preload_nvapi(self):
         """NvAPI_Initialize before the NGX core Init - the reference host's
@@ -785,9 +986,10 @@ class NgxSession:
         _log().status(f"[ANTs] snippet Init_Ext <- hr=0x{hr & 0xFFFFFFFF:08X}")
         if hr != 1:
             raise DlssSrError(
-                f"[ANTs] snippet Init_Ext failed (0x{hr & 0xFFFFFFFF:08X}) for "
-                f"{label}. 0xBAD00002 means the runtime rejected the caller "
-                "(the caller shim is required); a driver/FEATURE-mismatch "
+                f"[ANTs] snippet Init_Ext failed (0x{hr & 0xFFFFFFFF:08X} = "
+                f"{ngx_result_name(hr)}) for {label}. 0xBAD00002 "
+                "(PlatformError) means the runtime rejected the caller (the "
+                "caller shim is required); a driver/feature mismatch "
                 "otherwise.")
 
     def _bind_feature_lifecycle(self):
@@ -886,15 +1088,26 @@ class NgxSession:
         _log().status(f"NGX CreateFeature <- hr=0x{hr & 0xFFFFFFFF:08X}")
         if hr != 1:
             code = hr & 0xFFFFFFFF
-            known = {0xBAD0000B: "FeatureNotSupported",
-                     0xBAD00003: "InvalidParameter",
-                     0xBAD00004: "FeatureNotFound",
-                     0xBAD0000C: "PlatformNotSupported"}
-            name = known.get(code, "NGX error")
+            if code == 0xBAD0000B:
+                # UnableToInitializeFeature: the feature is not available in
+                # the context the core holds - on this rig the first init
+                # pinned search paths without this DLL's folder (rig 02:48).
+                hint = (" The core resolves feature libraries from the FIRST "
+                        "Init in this process: this session can only re-use "
+                        "the context that init pinned. Restart ComfyUI and run "
+                        "this stage first, or make sure the first init's "
+                        "search path list (logged above) covers this DLL's "
+                        "folder.")
+            elif code == 0xBAD00002:
+                hint = (" A caller that NGX does not accept gets the same "
+                        "result: this is a calling-module check, not a "
+                        "feature/parameter problem.")
+            else:
+                hint = (" The installed runtime may not support this feature "
+                        "or this parameter set.")
             raise DlssSrError(
                 f"[ANTs] NGX CreateFeature(feature {feature_id}) failed "
-                f"(0x{code:08X} = {name}). The installed runtime may not "
-                "support this feature or parameter set.")
+                f"(0x{code:08X} = {ngx_result_name(code)}).{hint}")
         self.handle = out.value
         if not self.handle:
             raise DlssSrError(

@@ -296,6 +296,13 @@ python and never registers callbacks.
       history Auto/Continuous/Per-frame reset, DLLs in `models/DLSS/dlssnr_<version>/` under any
       filenames. If the engine zip is old (no CUDA export) the node says so loudly — update
       neuroframe_dlls.zip from Gourieff's HF dataset.
+- [ ] **SR pre-denoise retry (one restart, one variable)**: `pre_denoise_strength` 1 with SR mode,
+      run FIRST in a fresh ComfyUI process, then again after the usual NR prompt. Expect
+      `[ANTs] NGX init (first in this process): app id 0x…, project …, N search path(s): …` with the
+      SR folder in the list, and one of the ladder routes to create feature 1. If the direct route
+      still answers `0xBAD00002`, the shim route must be the one that creates it (log line
+      `[ANTs] SR session route: the SR runtime '…' as the app-facing module, called through the
+      caller shim`); if BOTH fail, send the console (the error names file, route and result code).
 - [ ] Owner tests the OPTIONS-socket part of `88305cb` (ANTsOptions → ANTsFaceDancer merge).
 - [ ] If both pass → tag **v1.1.0** and open/merge the PR to `main`.
 
@@ -399,4 +406,11 @@ python and never registers callbacks.
       PUBLIC `Init_Ext` order, with the driver core preloaded for presence; the core-alone route is
       the fallback; the NR-style swapped-ABI route is opt-in (`ANTS_SR_SNIPPET_DIRECT=1`); a runtime
       fault stops the ladder with one loud RESTART error. `HOST_BUILD` `2026-09-21.5`.
+- [x] SR init round 2 (rig run 30): the result-code names are the header's own
+      (`ngx_result_name()` - `0xBAD0000B` is `UnableToInitializeFeature`, not `FeatureNotSupported`),
+      every ANTs session inits with ONE identity and ONE union search path list
+      (`ngx.feature_search_paths`, the selected SR build staged on demand, `_note_geometry` logging
+      the first init and warning on later differences), and the ladder gained the caller-shim
+      geometry (`owner_via_shim=True`) - the only combination of {direct, shim} x {public, swapped}
+      that neither rig run has tried. `HOST_BUILD` `2026-09-21.6`. Rig confirmation PENDING.
 - [x] `4e483f1` — `ALLOW_UNORDERED_ACCESS = 0x4` (the one-bit root cause of the whole native saga).

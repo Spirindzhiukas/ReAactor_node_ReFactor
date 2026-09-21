@@ -663,6 +663,14 @@ class ReFactorDLSS5Enhancer:
         self._nr_preset = int(_NR_PRESET_TO_INT.get(nr_model_preset, 0))
         self._sr_choice = sr_dll_version
         self._sr_preset = _PRESET_TO_LETTER.get(sr_model, "Default")
+        # The FIRST NGX init in a process pins the core's feature-library
+        # search paths (rig 02:48): record the selection NOW so that init can
+        # already list the SR build - see dlsssr.discovery.ensure_staged_sr_dir.
+        try:
+            from ..dlsssr import discovery as _sr_discovery
+            _sr_discovery.remember_sr_choice(self._sr_choice)
+        except Exception:
+            pass
         if fg_dll_version not in ("auto",):
             logger.status(f"FG build '{fg_dll_version}' selected - Frame Generation "
                           "is reserved for a future release; no effect yet.")

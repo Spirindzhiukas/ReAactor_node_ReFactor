@@ -79,6 +79,8 @@ class DLSSSRUpscaler:
 
         mode_key = _MODE_KEY[sr_mode]
         preset_letter = sr_preset.split(" - ")[0]
+        # the process-wide selection, for the NGX search-path union
+        discovery.remember_sr_choice(sr_model)
         dll_path = discovery.resolve_sr_dll(sr_model)
         height, width = int(image.shape[1]), int(image.shape[2])
         ratio = PERF_RATIO[mode_key]

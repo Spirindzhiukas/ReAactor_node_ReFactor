@@ -217,3 +217,40 @@ def stage_sr_dll(dll_path):
             or os.path.getsize(target) != os.path.getsize(dll_path)):
         shutil.copyfile(dll_path, target)
     return staged_dir
+
+
+_SR_CHOICE = {"value": "auto"}
+_SR_STAGE_LOGGED = {"done": False}
+
+
+def remember_sr_choice(choice):
+    """The process's SR selector value (the newest node construction wins).
+
+    The FIRST NGX init in a process fixes the core's feature-library search
+    paths (rig 02:48 + Claude Sonnet 5), so the NR stage has to know the SR
+    build the owner actually selected BEFORE that init - and the selection
+    lives in a node widget. This is the one place that carries it across
+    stages.
+    """
+    _SR_CHOICE["value"] = choice or "auto"
+
+
+def ensure_staged_sr_dir():
+    """The staged folder of the SELECTED SR build, staged on demand.
+
+    Called by the search-path union before every NGX init, so the process's
+    first init can already list ``nvngx_dlss.dll``. None when no SR build can
+    be resolved/staged - logged once per process at status level (an owner
+    without an SR build must not see a warning on every prompt; the SR stage
+    itself fails loudly when it runs).
+    """
+    try:
+        return stage_sr_dll(resolve_sr_dll(_SR_CHOICE["value"]))
+    except Exception as exc:
+        if not _SR_STAGE_LOGGED["done"]:
+            _SR_STAGE_LOGGED["done"] = True
+            logger.status(
+                "[ANTs] SR build not staged for the NGX search-path union: %s "
+                "(only matters if an SR stage runs this session)",
+                str(exc).splitlines()[0])
+        return None

@@ -8,9 +8,20 @@ Session routes (rig 2026-09-21, run 29 — the full story in
    order, and the runtime loads the driver core itself. This is the route
    every DLSS application uses, and the only one that creates feature 1;
 2. **the driver core alone**, with the SR folder in the search-path list
-   (the previous primary — on the rig the core answered 0xBAD0000B);
+   (the previous primary);
 3. **snippet-direct** (opt-in, ``ANTS_SR_SNIPPET_DIRECT=1``) for NR-style
    builds whose ``Init_Ext`` takes the SWAPPED argument order.
+
+Rig 02:48 (fresh build, no crash) failed BOTH working routes because of ONE
+process-wide fact: the NR stage had already inited the driver core in prompt
+1, and NGX keeps the FIRST init's app id and feature-library search paths.
+Route 1 inited with a different app id -> ``0xBAD00002 PlatformError``; route
+2 landed in the old context, whose paths contained no ``nvngx_dlss.dll`` ->
+``CreateFeature(1)`` answered ``0xBAD0000B`` = **UnableToInitializeFeature**
+(Fail|11 - not "FeatureNotSupported", which is Fail|1). Both stages now init
+with the same app id / project id / app data path and the same union search
+paths (``ngx.feature_search_paths``), so whichever stage runs first, the other
+one's library is already on the list.
 
 Modes map to fixed ratios (per the public SDK: DLAA 1.0, Quality 1.5,
 Balanced ~1.724, Performance 2.0, Ultra Performance 3.0); the model presets
@@ -26,7 +37,32 @@ import os
 
 from . import d3d12 as d3d
 from .errors import DlssSrError
-from .ngx import FEATURE_SR, NgxSession, locate_ngx_core
+from .ngx import (FEATURE_SR, NR_APP_ID, NR_PROJECT_ID, NgxSession,
+                  locate_ngx_core)
+
+
+def sr_app_id():
+    """The app id every ANTs NGX session inits with (rig 02:48).
+
+    NGX keeps the FIRST Init's context for the whole process; a second stage
+    that inits with a different app id is refused (route 1 answered
+    0xBAD00002 = PlatformError) or lands in a context whose search paths never
+    saw its feature library (route 2 answered 0xBAD0000B =
+    UnableToInitializeFeature). One app id, one project id, one app data path,
+    one search-path list - so the SR stage inits exactly like the NR stage.
+    ``ANTS_SR_APP_ID`` (int, 0x allowed) restores an A/B against another
+    identity without a code change.
+    """
+    raw = os.environ.get("ANTS_SR_APP_ID", "").strip()
+    if raw:
+        try:
+            return int(raw, 0)
+        except ValueError:
+            from ..log import dlss_logger
+            dlss_logger.warning(
+                "[ANTs] ANTS_SR_APP_ID='%s' is not an integer - using the "
+                "shared ANTs app id %d.", raw, NR_APP_ID)
+    return NR_APP_ID
 
 # NVSDK_NGX_PerfQuality_Value (public SDK enum; UltraQuality is unavailable
 # in current nvngx_dlss.dll builds - CreateFeature rejects it)
@@ -122,11 +158,12 @@ class DlssSrSession:
         self.ow, self.oh = int(output_width), int(output_height)
         quality = PERF_QUALITY[mode]
 
-        from .ngx import NGX_MODELS_DIR
         core_path = locate_ngx_core()
-        # Stage dir FIRST (owner's chosen build), then NVIDIA's own managed
-        # models dir - the stock core prefers its properly-installed runtime.
-        search = [d for d in (sr_dll_dir, NGX_MODELS_DIR) if d]
+        # The session unions the staged feature dirs and NVIDIA's own managed
+        # models dir onto this list (ngx.feature_search_paths) - the core keeps
+        # the FIRST init's paths for the whole process, so the SR folder alone
+        # is not enough when the NR stage inited first (rig 02:48).
+        search = [sr_dll_dir] if sr_dll_dir else []
         self.ngx = self._open_first_working(core_path, search, sr_dll_dir,
                                             app_data_path, quality, hdr, preset)
 
@@ -158,9 +195,11 @@ class DlssSrSession:
 
         Rig 29 (2026-09-21, owner) decided the order:
 
-        * route 2 below was the old primary and returned ``0xBAD0000B``: the
-          driver core has no provider module for feature 1 unless the runtime
-          itself registered it, so the core alone cannot create it;
+        * route 2 below was the old primary and returned ``0xBAD0000B`` =
+          ``Fail|11 UnableToInitializeFeature``: the feature is not available
+          in the NGX context the core already holds (rig 02:48: that context
+          was inited by the NR stage in an earlier prompt, and its
+          feature-library search paths held no ``nvngx_dlss.dll`` at all);
         * the old fallback was route 3's SWAPPED ``Init_Ext`` layout against
           the SDK runtime, and it faulted INSIDE the runtime: ctypes reported
           ``access violation reading 0x15`` - 0x15 is ``NGX_VERSION_API``, so
@@ -182,19 +221,29 @@ class DlssSrSession:
                 "[ANTs] SR stage: no %s under %s - starting from the driver "
                 "core alone.", _SR_DLL_NAME, sr_dll_dir)
 
+        # (label, path, own parameters?, preload the core?, owner via shim?)
         routes = []
         if runtime:
             routes.append((
                 f"the SR runtime '{os.path.basename(runtime)}' as the "
                 "app-facing module (public Init_Ext order)",
-                runtime, False, True))     # own params? core preloaded?
+                runtime, False, True, False))
+            # The one geometry both rig runs left standing: a direct
+            # public-order call is rejected as coming from the wrong caller
+            # (0xBAD00002, run 30) and the shim with the snippet's SWAPPED
+            # order faults inside the runtime (rig 29) - so a feature
+            # provider's caller check needs the shim AND the public order.
+            routes.append((
+                f"the SR runtime '{os.path.basename(runtime)}' as the "
+                "app-facing module, called through the caller shim",
+                runtime, False, True, True))
         if core_path:
             routes.append((
                 f"the driver core '{os.path.basename(str(core_path))}' with "
-                "the SR search path", core_path, False, False))
+                "the SR search path", core_path, False, False, None))
         if runtime and os.environ.get("ANTS_SR_SNIPPET_DIRECT") == "1":
             routes.append(("snippet-direct (NR-style build, swapped Init_Ext "
-                           "argument order)", runtime, True, False))
+                           "argument order)", runtime, True, False, None))
         if not routes:
             raise DlssSrError(
                 "[ANTs] No DLSS SR runtime and no NGX driver core to start the "
@@ -203,13 +252,28 @@ class DlssSrSession:
                 "it in sr_dll_version and press refresh.")
 
         failures = []
-        for label, path, own_params, preload_core in routes:
+        for label, path, own_params, preload_core, owner_shim in routes:
             session = None
             try:
+                # ONE identity for every ANTs NGX session (rig 02:48 + Claude
+                # Sonnet 5: the core keeps the FIRST init's app id and search
+                # paths for the whole process), so the SR stage inits exactly
+                # like the NR stage - same app id, same project id, same app
+                # data path, same union search paths. ANTS_SR_APP_ID restores
+                # an A/B against a different identity without a code change.
+                # The project-id init call is the shape the NR stage uses for
+                # a CORE-owned session, so it stays on that lane: the SR
+                # runtime (routes 1/1b) keeps the public Init_Ext form the rig
+                # has already seen, now with the shared app id and the shim
+                # geometry.
                 session = NgxSession(self.gpu, path, search_paths=search,
+                                     app_id=sr_app_id(),
+                                     project_id=(None if (own_params or preload_core)
+                                                 else NR_PROJECT_ID),
                                      use_own_parameters=own_params,
                                      preload_core=preload_core,
-                                     app_data_path=app_data_path)
+                                     app_data_path=app_data_path,
+                                     owner_via_shim=owner_shim)
                 self._apply_create_params(session, quality, hdr, preset)
                 session.create_feature(FEATURE_SR)
             except OSError as exc:
@@ -242,6 +306,14 @@ class DlssSrSession:
             "    Check that ComfyUI/models/DLSS/SR holds a real nvngx_dlss*.dll "
             "(tens of MB), pick it in sr_dll_version and press refresh; the "
             "driver must be DLSS-capable.\n"
+            "    NGX keeps ONE context per process: the app id and the "
+            "feature-library search paths come from the FIRST init in this "
+            "ComfyUI run. If an earlier prompt inited the NR stage, that "
+            "context is the one this stage must fit into; the '[ANTs] NGX "
+            "init' lines above list what it saw, and a CONTEXT MISMATCH "
+            "warning names the folders it does not have. Restarting ComfyUI "
+            "and running this stage first is the quick way to tell the two "
+            "apart.\n"
             "    To skip the stage: pre_denoise_mode OFF or sr_strength 0.")
 
     @staticmethod

@@ -36,7 +36,7 @@ import numpy as np
 
 from . import d3d12 as d3d
 from .errors import DlssSrError
-from .ngx import FEATURE_NR, NGX_MODELS_DIR, NR_APP_ID, NgxSession
+from .ngx import FEATURE_NR, NR_APP_ID, NgxSession
 
 _CVOID = ctypes.c_void_p
 _CI32 = ctypes.c_int32
@@ -167,7 +167,12 @@ class DlssNrSession:
         if use_own_parameters is None:
             use_own_parameters = os.environ.get("ANTS_NR_USE_OWN_PARAMS") == "1"
 
-        search = [self.stage_dir, NGX_MODELS_DIR]
+        # The session unions this with every staged feature dir and NVIDIA's
+        # models dir (ngx.feature_search_paths): the core keeps the FIRST init's
+        # search paths for the whole process, so the NR stage must hand it a
+        # list that already contains the SR library - otherwise the SR stage
+        # in a later prompt cannot register its provider (rig 02:48).
+        search = [self.stage_dir]
         if use_own_parameters:
             # legacy snippet-direct: the snippet is the session owner (and the
             # core is merely preloaded for the snippet's evaluate path)

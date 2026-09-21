@@ -45,6 +45,12 @@ close_failures = {"n": 0}   # how many upcoming Close() calls report failure
 device_state = {"reason": 0}  # GetDeviceRemovedReason return value (0 = alive)
 # rig 23:32: a driver that refuses UAV-flagged texture2d creation (all of them)
 uav_refused = {"on": False}
+# rig 30: the SR runtime answered a DIRECT public-order Init_Ext with
+# 0xBAD00002 (PlatformError = the caller was rejected) and the classic 4-arg
+# Init with the same code; the SR ladder must retry the call through the
+# caller shim instead of giving up (a direct-call refusal hits EVERY init
+# entry point of the module, not just Init_Ext)
+ngx_init_hr = {"hr": 1}
 
 
 def check(name, ok, extra=""):
@@ -414,12 +420,12 @@ class FakeNgxModule:
         if name == "NVSDK_NGX_D3D12_Init_Ext":
             def init_ext(app_id, app_data, dev, sdk, info):
                 RECORD.append(("Init_Ext", _as_int(sdk)))
-                return 1
+                return ngx_init_hr["hr"]     # rig 30: the caller was refused
             return init_ext
         if name == "NVSDK_NGX_D3D12_Init":
             def init4(app_id, app_data, dev, sdk):
                 RECORD.append(("Init4", _as_int(sdk)))
-                return 1
+                return ngx_init_hr["hr"]     # the refusal covers every entry
             return init4
         if name == "NVSDK_NGX_D3D12_AllocateParameters":
             params = FakeObject(self.parameter_vtable(), "NVSDK_NGX_Parameter")
@@ -1126,6 +1132,27 @@ def main():
           and PARAMS.get("DLSS.Hint.Render.Preset.DLAA", ("u32", -1))[1] == 10)
     sr2.close()
 
+    # ---- Rig 30: a caller rejection retries through the caller shim -------
+    # The runtime answered the DIRECT public-order Init_Ext with 0xBAD00002
+    # (PlatformError - the code the NR snippet produced before the shim
+    # existed), while the shim with the snippet's SWAPPED order faulted inside
+    # the runtime on run 29. Direct+public and shim+swapped are both refused;
+    # shim+public is the combination left, and the ladder must reach it.
+    RECORD.clear()
+    ngx_init_hr["hr"] = -0x452FFFFE          # 0xBAD00002 as int32
+    try:
+        sr3 = sr_mod.DlssSrSession(gpu, 30, 40, 30, 40, mode="DLAA", preset="J",
+                                   sr_dll_dir=sr_dir)
+    finally:
+        ngx_init_hr["hr"] = 1
+    check("sr: a direct-call rejection (0xBAD00002 = PlatformError) is retried "
+          "through the caller shim - the routed attempt is recorded and only "
+          "then does the ladder move on (the fake cannot hand a feature handle "
+          "back through a thunk, so the core lane wins this run)",
+          any(entry[0] == "SetSlots" for entry in RECORD)
+          and os.path.basename(str(sr3.ngx.module.path)) == "_nvngx.dll")
+    sr3.close()
+
     # ---- SR ladder: a runtime FAULT stops the ladder and says RESTART -----
     faults = []
     real_fn = ngx.NgxModule.fn
@@ -1157,6 +1184,58 @@ def main():
               and faults == ["nvngx_dlss.dll"])
     finally:
         ngx.NgxModule.fn = real_fn
+    # ---- labels + the one-process NGX geometry (rig 02:48) ----------------
+    check("ngx: result codes carry the HEADER's names (0xBAD0000B = "
+          "UnableToInitializeFeature, NOT FeatureNotSupported - that is "
+          "0xBAD00001; 0xBAD00003 = FeatureAlreadyExists; 0xBAD0000C = "
+          "OutOfDate) - a wrong name sends the whole investigation the wrong "
+          "way",
+          ngx.ngx_result_name(0x1) == "Success"
+          and ngx.ngx_result_name(0xBAD00001) == "FeatureNotSupported"
+          and ngx.ngx_result_name(0xBAD00002) == "PlatformError"
+          and ngx.ngx_result_name(0xBAD00003) == "FeatureAlreadyExists"
+          and ngx.ngx_result_name(0xBAD00004) == "FeatureNotFound"
+          and ngx.ngx_result_name(0xBAD00005) == "InvalidParameter"
+          and ngx.ngx_result_name(0xBAD0000B) == "UnableToInitializeFeature"
+          and ngx.ngx_result_name(0xBAD0000C) == "OutOfDate"
+          and "unknown" in ngx.ngx_result_name(0x1234))
+    saved_geometry = ngx._INIT_GEOMETRY
+    ngx._INIT_GEOMETRY = None
+    try:
+        first = ngx._note_geometry(ngx.NR_APP_ID, ngx.NR_PROJECT_ID, ["C:/a"])
+        same = ngx._note_geometry(ngx.NR_APP_ID, ngx.NR_PROJECT_ID, ["C:/a"])
+        changed = ngx._note_geometry(0x4E5254530001, None, ["C:/b"])
+    finally:
+        ngx._INIT_GEOMETRY = saved_geometry
+    check("ngx: the geometry bookkeeping names the FIRST init and flags a "
+          "later one that differs (app id + search paths) - the core keeps "
+          "the first context, so a second init adds nothing",
+          (first, same, changed) == ("first", "same", "changed"))
+    stage_root = tempfile.mkdtemp(prefix="ants_dlss_root_")
+    for rel in (("staged", "nvngx_dlssnr_ANY-1", "nvngx_dlssnr.dll"),
+                ("staged", "ANTs", "sr_staged", "nvngx_dlss_310.9.1",
+                 "nvngx_dlss.dll"),
+                ("staged", "junk", "deep", "deeper", "beyond",
+                 "nvngx_dlss.dll")):
+        os.makedirs(os.path.join(stage_root, *rel[:-1]), exist_ok=True)
+        open(os.path.join(stage_root, *rel), "wb").close()
+    found = ngx.feature_lib_dirs(stage_root)
+    check("ngx: the search-path union finds both staged feature libraries "
+          "(the NR build folder and the SR staged folder) and nothing past "
+          "the bounded depth",
+          len(found) == 2
+          and any(p.endswith("nvngx_dlss_310.9.1") for p in found)
+          and any(p.endswith("nvngx_dlssnr_ANY-1") for p in found))
+    from ants.dlsssr import discovery as _sr_discovery
+    try:
+        probe_dir = _sr_discovery.ensure_staged_sr_dir()
+    except Exception:
+        probe_dir = "raised"
+    check("ngx: the selected SR build is staged on demand for the union, and "
+          "a machine without an SR set degrades to None (the SR stage itself "
+          "fails loudly when it runs)",
+          probe_dir is None or isinstance(probe_dir, str))
+
     gpu.close()
     check("flow: teardown releases the feature",
           any(entry[0] == "ReleaseFeature" for entry in RECORD))

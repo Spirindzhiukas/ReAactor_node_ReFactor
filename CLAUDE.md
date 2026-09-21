@@ -119,7 +119,16 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
 - **Gates before every commit:** `pyflakes` over `ants/`, `nodes.py`, `tests/`
   (benign exceptions: star-import notes in `codeformer_arch.py`); `tests/test_pyflakes.py`,
   `tests/test_scope_check.py`, `tests/smoke_import.py` (asserts exactly 22 nodes), plus
-  the full suite. Current tally: **468 checks** (see `memory.md`).
+  the full suite. Current tally: **473 checks** (see `memory.md`).
+- **NGX has ONE context per process** (rig runs 29/30 + Claude Sonnet 5): the FIRST `Init` pins the
+  app id, the project id and the **feature-library search paths** - a later session can only re-use
+  that context, never add a folder. Every ANTs session therefore goes through the same geometry:
+  `ngx.feature_search_paths()` (caller folders + every staged feature library under
+  `models/DLSS/staged`, the selected SR build staged on demand + NVIDIA's models dir), the same app
+  id (the SR stage uses `NR_APP_ID` too) and the same project id on the core lane; `_note_geometry()`
+  logs the first init and warns on any later difference. Never name an NGX result code by hand -
+  use `ngx.ngx_result_name()` (the header's table: `0xBAD0000B` = `UnableToInitializeFeature`,
+  `0xBAD00001` = `FeatureNotSupported`; a wrong name sends the investigation the wrong way).
 - **Rebrand hygiene:** no `ReFactor` outside the historical H1 note and the git clone URL
   in `README.md`; `CATEGORY` attrs are `ANTs` / `ANTs/loaders`; `[ANTs]` log prefix.
 - **Commits:** conventional prefixes (`feat:`, `fix:`, `docs:`), body bullets explaining

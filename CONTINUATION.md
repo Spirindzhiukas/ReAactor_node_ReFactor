@@ -1131,17 +1131,40 @@ the shim, the callbacks or the process state was ever wrong.
 RGBA16F readback before the clamp, plus byte-identity against the input; one log line, never raises),
 `ANTS_NR_SOAK=1` (handles + torch VRAM per prompt) and the opt-in `ANTS_NR_SESSION_CACHE=1`
 (cross-prompt session reuse; default OFF — per-prompt init is what the working run used, and the knob
-exists to measure its ~1 s). `HOST_BUILD` is `2026-09-21.5`.
+exists to measure its ~1 s). `HOST_BUILD` is `2026-09-21.6`.
 
 **UPDATE 2026-09-21 (run 29) - the SR pre-denoise stage faulted at init; fixed.** With
 `pre_denoise_strength` > 0 the ladder did two wrong things: the driver core alone answered
-`0xBAD0000B` (a core has no provider module for feature 1 unless the runtime registered it), and the
+`0xBAD0000B` (header name: `Fail|11 UnableToInitializeFeature`; this block used to repeat the wrong
+`FeatureNotSupported` label - see the run-30 update below), and the
 fallback then handed the SDK runtime the NR snippet's SWAPPED `Init_Ext` order - it faulted reading
 address `0x15`, the version constant landing in the feature-info pointer slot. The runtime is now the
 session OWNER, called in the PUBLIC order (`Init_Ext(appId, path, device, sdkVersion, featureInfo)`)
 with the driver core preloaded for presence; the core-only route stays second, the swapped-ABI route
 is opt-in (`ANTS_SR_SNIPPET_DIRECT=1`), and a runtime FAULT stops the ladder with one loud `[ANTs]`
 error that says RESTART (never a second guess).
+
+**UPDATE 2026-09-21 (run 30) — the crash stayed fixed; the init still failed, and the reason is now
+known and addressed.** The 02:48 retry of `5c1b8f3` produced a loud `DlssSrError` with a surviving
+process (0.40 s prompt) and two route results: route 1 (runtime as the app-facing module, called
+DIRECTLY) `NGX init <- failed (last hr=0xBAD00002)` and route 2 (driver core alone) `CreateFeature(1)
+hr=0xBAD0000B` with the core log `[NVSDK_NGX_CreateFeature_Validate:729] app id is 141959980` and no
+path scan. Two causes, both fixed in `HOST_BUILD` `2026-09-21.6`:
+  * the result-code names are now the header's own (`ngx.ngx_result_name()`): `0xBAD0000B` is
+    `Fail|11 UnableToInitializeFeature`, NOT `FeatureNotSupported` (= `Fail|1`) - Claude Sonnet 5
+    caught the mislabel and the header text confirms it;
+  * NGX keeps ONE context per process: the FIRST `Init` pins the app id and the feature-library
+    search paths, so the SR stage in a LATER prompt cannot register `nvngx_dlss.dll`. Every ANTs
+    session now inits with the same app id (`NR_APP_ID`), the same project id on the core lane, and
+    the union list from `ngx.feature_search_paths()` (caller folders + every staged feature library
+    under `models/DLSS/staged`, the selected SR build staged on demand + NVIDIA's models dir),
+    with `_note_geometry()` printing the first init's identity/paths and warning on any later
+    difference. The SR ladder also gained the caller geometry neither run had tried: the runtime as
+    the app-facing module called THROUGH the caller shim in the public order (`owner_via_shim`).
+**Next rig test (one restart, one variable at a time)**: pull, restart ComfyUI, and run the SR
+pre-denoise prompt FIRST (before any NR prompt) - then the normal order (NR prompt, then the SR
+one). The new log lines to look for: `[ANTs] NGX init (first in this process): app id 0x…, project
+…, N search path(s): …` (the SR folder must be in that list) and `[ANTs] SR session route: …`.
 
 **Next, owner-run:** the synthetic-image smoke prompt, the ~50-prompt soak, and the still-image depth
 A/B (flat zero depth vs a real estimated depth map). Keep the literal-name staging rule.

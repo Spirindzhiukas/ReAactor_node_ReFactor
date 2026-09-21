@@ -10,9 +10,11 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
 - **Head at last update:** the native NGX host **RIG-VERIFIED** — UAV flag byte fix (`4e483f1`),
   documented rule + D3D12 debug layer (`cb7c572`), first-frame output smoke test + `ANTS_NR_SOAK` +
   opt-in `ANTS_NR_SESSION_CACHE` (`a3f2c47`), the SR pre-denoise stage alive on BOTH engines
-  (`794d34e`), and its SR session route fixed after rig run 29 (`HOST_BUILD` `2026-09-21.5`)
-- **Suite:** ALL GREEN — 468 checks + 2 scanners + smoke_import (22 nodes)
-  (`test_dlssnr_bridge` 112, `test_dlsssr` 109, `test_native_flow` 60,
+  (`794d34e`), its SR session route fixed after rig run 29, and rig run 30's two remaining
+  causes fixed (the calling-module geometry + the ONE NGX context per process), with the
+  result-code names taken from the header (`HOST_BUILD` `2026-09-21.6`)
+- **Suite:** ALL GREEN — 473 checks + 2 scanners + smoke_import (22 nodes)
+  (`test_dlssnr_bridge` 112, `test_dlsssr` 109, `test_native_flow` 65,
   `test_runtime_surface` 58, `test_nr_schedule` 35, `test_upres` 27,
   `test_pure_helpers` 26, `test_facerestore_routing` 21, `test_swapper_state`
   13, `test_detection_state_dict` 7)
@@ -117,7 +119,7 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | smoke_import.py | — | import + 22-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 468 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.5`; 22 nodes; package `ants/`).**
+**Total: 473 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.6`; 22 nodes; package `ants/`).**
 Sandbox venv: numpy, opencv-python-headless, pillow, pyflakes, pefile (NO torch — stub harness only).
 huggingface.co is TLS-blocked from the sandbox (DLL zips can't be downloaded there — verify engine
 versions on the owner rig).
@@ -168,7 +170,9 @@ versions on the owner rig).
 - RIG run 11 = **NGX CONVERSATION LIVE**: SR path passed Init_Ext +
   AllocateParameters + CreateFeature THROUGH THE SHIM on the real driver
   core (caller-check satisfied - no fault); core ANSWERED 0xBAD0000B
-  (FeatureNotSupported) for feature 1 -> most likely the core refusing a
+  (this entry used to call it FeatureNotSupported - WRONG: the header says
+  Fail|11 UnableToInitializeFeature; FeatureNotSupported is Fail|1. See the
+  run-30 entry) for feature 1 -> most likely the core refusing a
   snippet outside its managed models root (SR 310.9.1 IS 40-series-ok;
   the 50-series lock is the NR runtime - already solved by using the
   RenoDX-unlocked build). SR now: search_paths include NGX_MODELS_DIR +
@@ -1199,15 +1203,50 @@ versions on the owner rig).
   AI-generated images, and no render-pass-grade depth exists outside render-time apps (which already
   ship their own DLSS5 NR path). Revisit only if a real depth source appears; it would need an
   optional depth socket on the native node first.
-- Suite: **468 checks** (dlssnr_bridge 112, dlsssr 109, native_flow 60, runtime_surface 58,
-  nr_schedule 35).
+- Suite: **468 checks** at that commit (dlssnr_bridge 112, dlsssr 109, native_flow 60,
+  runtime_surface 58, nr_schedule 35).
+
+### 2026-09-21 (rig run 30) - SR init, round 2: the caller geometry + the ONE NGX context
+**Rig facts (owner's 02:48 retry of `5c1b8f3`)**: no crash any more - the fault is gone and the
+stage fails LOUDLY (loud `DlssSrError` + traceback, process survives, prompt finishes in 0.40 s).
+But SR still could not init, on both routes:
+  1. route 1 (staged `nvngx_dlss.dll` 58 956 912 B as the app-facing module, direct) ->
+     `NGX init <- failed (last hr=0xBAD00002)`;
+  2. route 2 (driver core alone) -> init OK, `CreateFeature(feature 1) <- hr=0xBAD0000B`, with the
+     core's own log line `[NVSDK_NGX_CreateFeature_Validate:729] app id is 141959980` (= 0x876232C,
+     the NR session's CMS id from prompt 1) and NO path scan / config load at all.
+**What that means (Claude Sonnet 5 round 3, corroborated by the core's log)**: NGX has ONE context
+per process. The core's FIRST `Init` pins the app id and the feature-library search paths; every
+later init (or a second Init_Ext) only re-uses that context - it cannot add a folder. Prompt 1's NR
+init had searched only its own staged dir + `ProgramData\NVIDIA\NGX\models` + `python_embeded`,
+so the SR stage in prompt 2 had no way to register `nvngx_dlss.dll`.
+**Label correction (Claude's catch, verified against `nvsdk_ngx_defs.h`)**: `0xBAD0000B` is
+`Fail|11 UnableToInitializeFeature` ("feature misconfigured or not available on the system"), NOT
+`FeatureNotSupported` (= `Fail|1`/`0xBAD00001`). Our old hand-written table was wrong on three of
+its four entries (`0xBAD00003` = FeatureAlreadyExists, not InvalidParameter; `0xBAD0000C` =
+OutOfDate, not "PlatformNotSupported"). It is now the full header table, decoded by
+`ngx.ngx_result_name()` everywhere a code is printed.
+**Fixed in code**: (a) the complete result-name table; (b) ONE geometry for every ANTs session -
+`ngx.feature_search_paths()` unions the caller's folders, every staged feature library under
+`models/DLSS/staged` (the SELECTED SR build is staged on demand by
+`discovery.ensure_staged_sr_dir()`, whose choice is recorded by the nodes through
+`discovery.remember_sr_choice()`) and NVIDIA's models dir; the SR stage now inits with the same app
+id (`NR_APP_ID`) and, on the core lane, the same project id as NR; (c) `_note_geometry()` prints the
+first init's identity + path list and WARNs loudly when a later init differs (app id / paths);
+(d) the SR ladder gained the one caller geometry neither run had tried: the runtime as the
+app-facing module called THROUGH THE CALLER SHIM in the public order (`owner_via_shim=True`) -
+run 30 proved direct+public is refused with `0xBAD00002` and run 29 proved shim+swapped faults
+reading the version constant (0x15) out of the feature-info slot.
+- Suite: **473 checks** (native_flow 65, dlsssr 109, dlssnr_bridge 112, runtime_surface 58,
+  nr_schedule 35). `HOST_BUILD` `2026-09-21.6`. Rig confirmation of the new geometry is PENDING.
 
 ### 2026-09-21 (rig run 29) - the SR pre-denoise stage FAULTED at init; the route is fixed
 - **Owner's A/B**: `pre_denoise_strength` 0 = "ran as usual" (the rule skips the stage); strength 1
   died in the SR session init. Two nested causes:
   1. the primary route asked the DRIVER CORE alone to create feature 1 -> `0xBAD0000B`
-     (FeatureNotSupported): a core has no provider module for a feature nobody registered, so the
-     core-alone route can never create feature 1;
+     (name corrected in the run-30 entry: `Fail|11 UnableToInitializeFeature` - the feature is
+     not available in the context the core holds: a core has no provider module for a feature
+     nobody registered, so the core-alone route cannot create feature 1);
   2. the fallback then loaded `nvngx_dlss.dll` as a snippet with the SWAPPED `Init_Ext` order (the
      order `nvngx_dlssnr.dll` wants) - ctypes reported
      `OSError: exception: access violation reading 0x0000000000000015`, and `0x15` IS
