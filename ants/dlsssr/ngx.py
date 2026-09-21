@@ -98,7 +98,7 @@ NGX_ENGINE_TYPE_CUSTOM = 0
 # Console deployment marker: bumped with every host-layout change so the
 # owner's console unambiguously says WHICH build ran (run-28 attempt #1 was
 # diagnosed from a stack trace because the old file was still deployed).
-HOST_BUILD = "2026-09-21.6"
+HOST_BUILD = "2026-09-21.7"
 
 FEATURE_SR = 1    # NVSDK_NGX_Feature_SuperSampling
 FEATURE_NR = 18   # NVSDK_NGX_Feature_NeuralRendering ("CG2R")
@@ -227,10 +227,16 @@ def _note_geometry(app_id, project_id, paths):
     core keeps the FIRST init's app id and search paths for the whole process;
     a later session silently re-uses that context, which is exactly how an SR
     session ends up unable to see its own DLL (rig 02:48).
+
+    The path comparison is a SET comparison: each stage puts its own folder
+    first in the list it hands over (resolution priority), so the same folders
+    in a different order still describe the same pinned context - what matters
+    for ``CreateFeature`` is whether the DLL's folder is on the list at all.
     """
     global _INIT_GEOMETRY
     identity = {"app_id": int(app_id) & 0xFFFFFFFF, "project": project_id,
-                "paths": [os.path.normcase(os.path.abspath(p)) for p in paths]}
+                "paths": sorted(os.path.normcase(os.path.abspath(p))
+                                for p in paths)}
     shown = ", ".join(paths) if paths else "<none>"
     if _INIT_GEOMETRY is None:
         _INIT_GEOMETRY = identity

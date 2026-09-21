@@ -296,7 +296,12 @@ python and never registers callbacks.
       history Auto/Continuous/Per-frame reset, DLLs in `models/DLSS/dlssnr_<version>/` under any
       filenames. If the engine zip is old (no CUDA export) the node says so loudly — update
       neuroframe_dlls.zip from Gourieff's HF dataset.
-- [ ] **SR pre-denoise retry (one restart, one variable)**: `pre_denoise_strength` 1 with SR mode,
+- [ ] **SR pre-denoise retry, round 2 (one restart, one variable)**: rig 31 confirmed the union
+      paths (the first init listed the SR staged dir and the core registered `app 876232C feature
+      dlss snippet`) but the old ladder's two routes failed: direct runtime `0xBAD00002`, shim
+      runtime FAULT writing `0x1E73BF0` (both dead ends, the second now opt-in via
+      `ANTS_SR_OWNER_SHIM=1`). The ladder now leads with the DRIVER CORE, which is the route the
+      core's own log endorses. Test: `pre_denoise_strength` 1 with SR mode,
       run FIRST in a fresh ComfyUI process, then again after the usual NR prompt. Expect
       `[ANTs] NGX init (first in this process): app id 0x…, project …, N search path(s): …` with the
       SR folder in the list, and one of the ladder routes to create feature 1. If the direct route
@@ -312,6 +317,13 @@ python and never registers callbacks.
       on the first frame of every prompt (`[ANTs] the native NR output ...` - non-finite, saturated, or
       byte-identical to the input). Run one small native prompt and confirm no line appears; the
       NaN/range/identity logic is already unit-tested pure.
+- [ ] **Legacy-path NGX context ordering** (raised by rig run 31): `DLSS-5 Bridge initialized`
+      is logged BEFORE `[ANTs] SR stage:`, so a FRESH process whose first prompt is the legacy
+      engine may have the process NGX context pinned by the bridge's own init instead of our
+      union list. Only act if the rig shows it (SR-first passes, legacy-first SR fails): the fix
+      is to prime the context with the union (a core `Init` + capability map, no feature) before
+      `load_bridge`, using the same `ngx.feature_search_paths()` list. Do NOT do this
+      speculatively - it is a second change on a fix that is not rig-confirmed yet.
 - [ ] **~50-prompt soak with `ANTS_NR_SOAK=1`** (item 2): process handles + torch VRAM should stay
       flat. Per-prompt NGX re-init (~1 s - ComfyUI makes a new node object per prompt) is expected;
       `ANTS_NR_SESSION_CACHE=1` A/Bs reuse across prompts (default OFF).
@@ -413,4 +425,9 @@ python and never registers callbacks.
       the first init and warning on later differences), and the ladder gained the caller-shim
       geometry (`owner_via_shim=True`) - the only combination of {direct, shim} x {public, swapped}
       that neither rig run has tried. `HOST_BUILD` `2026-09-21.6`. Rig confirmation PENDING.
+- [x] SR ladder reordered onto the core registry (rig run 31): the driver core leads with the
+      union search paths; the runtime-as-owner route stays second (its `0xBAD00002` is an error,
+      not a fault); both faulting geometries are opt-in (`ANTS_SR_OWNER_SHIM=1` for the caller
+      shim, `ANTS_SR_SNIPPET_DIRECT=1` for the NR ABIs); the fault message names the route and
+      both fingerprints. `HOST_BUILD` `2026-09-21.7`. Rig confirmation PENDING.
 - [x] `4e483f1` — `ALLOW_UNORDERED_ACCESS = 0x4` (the one-bit root cause of the whole native saga).

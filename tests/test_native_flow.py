@@ -45,12 +45,6 @@ close_failures = {"n": 0}   # how many upcoming Close() calls report failure
 device_state = {"reason": 0}  # GetDeviceRemovedReason return value (0 = alive)
 # rig 23:32: a driver that refuses UAV-flagged texture2d creation (all of them)
 uav_refused = {"on": False}
-# rig 30: the SR runtime answered a DIRECT public-order Init_Ext with
-# 0xBAD00002 (PlatformError = the caller was rejected) and the classic 4-arg
-# Init with the same code; the SR ladder must retry the call through the
-# caller shim instead of giving up (a direct-call refusal hits EVERY init
-# entry point of the module, not just Init_Ext)
-ngx_init_hr = {"hr": 1}
 
 
 def check(name, ok, extra=""):
@@ -420,12 +414,12 @@ class FakeNgxModule:
         if name == "NVSDK_NGX_D3D12_Init_Ext":
             def init_ext(app_id, app_data, dev, sdk, info):
                 RECORD.append(("Init_Ext", _as_int(sdk)))
-                return ngx_init_hr["hr"]     # rig 30: the caller was refused
+                return 1
             return init_ext
         if name == "NVSDK_NGX_D3D12_Init":
             def init4(app_id, app_data, dev, sdk):
                 RECORD.append(("Init4", _as_int(sdk)))
-                return ngx_init_hr["hr"]     # the refusal covers every entry
+                return 1
             return init4
         if name == "NVSDK_NGX_D3D12_AllocateParameters":
             params = FakeObject(self.parameter_vtable(), "NVSDK_NGX_Parameter")
@@ -480,6 +474,9 @@ class FakeNgxModule:
         if name == "fwd_set_slots":
             def set_slots(target, a, b):
                 RECORD.append(("SetSlots", _as_int(target)))
+                if _as_int(target) == 0:
+                    import traceback
+                    traceback.print_stack()
             return set_slots
         if name == "fwd_probe":
             def probe(a1, a2, a3, a4):
@@ -1107,65 +1104,168 @@ def main():
 
     sr.close()
 
-    # ---- SR ladder: the staged runtime IS the app-facing module -----------
-    # Rig 29: the old primary (driver core + search path) answered 0xBAD0000B
-    # and the old fallback handed the SDK runtime the NR snippet's SWAPPED
-    # Init_Ext order - it faulted reading address 0x15 (the version constant
-    # in the feature-info pointer slot). The runtime itself must own the
-    # session and be called in the PUBLIC order.
+    # the sessions closed so far released their features (pinned at the end of
+    # this flow; the SR ladder blocks below clear RECORD for their own runs)
+    saw_release = any(entry[0] == "ReleaseFeature" for entry in RECORD)
+
+    # ---- SR ladder (rig 31): the DRIVER CORE leads -----------------------
+    # Rig 03:49 proved the union search paths do their job: during the FIRST
+    # init the core validated the staged nvngx_dlss.dll and registered "app
+    # 876232C feature dlss snippet" - a provider CreateFeature(1) can use, and
+    # the reason the old 0xBAD0000B (UnableToInitializeFeature) route now
+    # leads. The SDK runtime as the app-facing module stays second: it is the
+    # documented application geometry, and its refusal is an ERROR (0xBAD00002,
+    # runs 30/31) that the ladder simply steps over - it never faults on that
+    # route. The shim-owner geometry measured on rig 31 leaves the default
+    # ladder (a fault stops it by design).
+    #
+    # NOTE: the flow's harness has ngx.NgxModule.fn replaced by fake_fn, so
+    # these pins count init attempts and check the chosen owner module - the
+    # production routing itself is pinned earlier in this file.
+    real_fn = ngx.NgxModule.fn
+    calls = {"init_ext": 0, "init4": 0}
+
+    def patch_fn(export, pattern, result, counter=None):
+        """Make `export` on modules whose path matches return `result`.
+
+        `result` is an NGX ERROR code, so the ladder keeps going. Patches
+        CHAIN (each wraps the previous wrapper), so two independent patches
+        both stay effective.
+        """
+        base = ngx.NgxModule.fn
+
+        def patched(self, name, argtypes, restype=ctypes.c_int32, thunk="call"):
+            if name == export and pattern in str(getattr(self, "path", "")):
+                if counter:
+                    calls[counter] += 1
+                return lambda *args: result
+            return base(self, name, argtypes, restype, thunk)
+        ngx.NgxModule.fn = patched
+
+    def refuse_runtime_caller():
+        """The rig's 0xBAD00002: EVERY init entry point of the runtime refuses.
+
+        Runs 30/31 show a direct caller being rejected, and the classic 4-arg
+        Init is answered the same way - one attempt per route.
+        """
+        patch_fn("NVSDK_NGX_D3D12_Init_Ext", "nvngx_dlss.dll", -0x452FFFFE,
+                 counter="init_ext")
+        patch_fn("NVSDK_NGX_D3D12_Init", "nvngx_dlss.dll", -0x452FFFFE,
+                 counter="init4")
+
+    def core_cannot_create():
+        patch_fn("NVSDK_NGX_D3D12_CreateFeature", "_nvngx.dll", -0x452FFFFE)
+
     sr_dir = tempfile.mkdtemp(prefix="ants_sr_stage_")
     with open(os.path.join(sr_dir, "nvngx_dlss.dll"), "wb") as handle:
         handle.write(b"MZ" + b"\x00" * 1024)
+
+    # (a) core lane healthy -> it creates feature 1 from the union paths and
+    #     the runtime is never asked (the refusal is armed to prove the ladder
+    #     does not have to walk into it)
+    RECORD.clear()
     PARAMS.clear()
-    sr2 = sr_mod.DlssSrSession(gpu, 30, 40, 30, 40, mode="DLAA", preset="J",
-                               sr_dll_dir=sr_dir)
-    check("sr: the staged runtime is the session OWNER and the feature "
-          "provider (the public-ABI route every DLSS application uses), the "
-          "capability map comes from it, and the driver core is preloaded for "
-          "presence - not the old core-alone plus swapped-ABI fallback",
-          os.path.basename(str(sr2.ngx.module.path)) == "nvngx_dlss.dll"
-          and sr2.ngx.feature_module is None
-          and sr2.ngx._own_parameters is None
-          and sr2.ngx._core_handle == 4242
+    calls["init_ext"] = calls["init4"] = 0
+    refuse_runtime_caller()
+    try:
+        sr2 = sr_mod.DlssSrSession(gpu, 30, 40, 30, 40, mode="DLAA", preset="J",
+                                   sr_dll_dir=sr_dir)
+    finally:
+        ngx.NgxModule.fn = real_fn
+    check("sr: the DRIVER CORE leads and creates feature 1 from the union "
+          "search paths - the SDK runtime is never asked, so the refusal it "
+          "gives a direct caller (0xBAD00002 = PlatformError, runs 30/31) "
+          "never has to be stepped over",
+          os.path.basename(str(sr2.ngx.module.path)) == "_nvngx.dll"
           and any(entry[0] == "CreateFeature" and entry[1] == 1
                   for entry in RECORD)
-          and PARAMS.get("DLSS.Hint.Render.Preset.DLAA", ("u32", -1))[1] == 10)
+          and calls["init_ext"] == 0 and calls["init4"] == 0)
     sr2.close()
 
-    # ---- Rig 30: a caller rejection retries through the caller shim -------
-    # The runtime answered the DIRECT public-order Init_Ext with 0xBAD00002
-    # (PlatformError - the code the NR snippet produced before the shim
-    # existed), while the shim with the snippet's SWAPPED order faulted inside
-    # the runtime on run 29. Direct+public and shim+swapped are both refused;
-    # shim+public is the combination left, and the ladder must reach it.
+    # (b) core lane fails with an ERROR (not a fault) -> the staged runtime
+    #     becomes the owner, in the PUBLIC order, core preloaded for presence
     RECORD.clear()
-    ngx_init_hr["hr"] = -0x452FFFFE          # 0xBAD00002 as int32
+    PARAMS.clear()
+    core_cannot_create()
     try:
         sr3 = sr_mod.DlssSrSession(gpu, 30, 40, 30, 40, mode="DLAA", preset="J",
                                    sr_dll_dir=sr_dir)
     finally:
-        ngx_init_hr["hr"] = 1
-    check("sr: a direct-call rejection (0xBAD00002 = PlatformError) is retried "
-          "through the caller shim - the routed attempt is recorded and only "
-          "then does the ladder move on (the fake cannot hand a feature handle "
-          "back through a thunk, so the core lane wins this run)",
-          any(entry[0] == "SetSlots" for entry in RECORD)
-          and os.path.basename(str(sr3.ngx.module.path)) == "_nvngx.dll")
+        ngx.NgxModule.fn = real_fn
+    check("sr: when the core lane fails with an error the staged runtime "
+          "becomes the session OWNER and the feature provider (the public-ABI "
+          "route every DLSS application uses), the capability map comes from "
+          "it, and the driver core is preloaded for presence",
+          os.path.basename(str(sr3.ngx.module.path)) == "nvngx_dlss.dll"
+          and sr3.ngx.feature_module is None
+          and sr3.ngx._own_parameters is None
+          and sr3.ngx._core_handle == 4242
+          and any(entry[0] == "CreateFeature" and entry[1] == 1
+                  for entry in RECORD)
+          and PARAMS.get("DLSS.Hint.Render.Preset.DLAA", ("u32", -1))[1] == 10)
     sr3.close()
 
-    # ---- SR ladder: a runtime FAULT stops the ladder and says RESTART -----
+    # (c) the caller-shim owner geometry is OPT-IN; an error that exhausts the
+    #     ladder raises the aggregate error naming every route that was tried
+    RECORD.clear()
+    calls["init_ext"] = calls["init4"] = 0
+    core_cannot_create()
+    refuse_runtime_caller()
+    try:
+        try:
+            sr_mod.DlssSrSession(gpu, 30, 40, 30, 40, mode="DLAA", preset="J",
+                                 sr_dll_dir=sr_dir)
+            text = ""
+        except _Exc as exc:
+            text = str(exc)
+        one_route = calls["init_ext"]
+    finally:
+        ngx.NgxModule.fn = real_fn
+    check("sr: without the opt-in the runtime-as-owner route is tried ONCE "
+          "(one direct public-order attempt, refused like the rig's) and the "
+          "aggregate [ANTs] error names both routes and the way out "
+          "(pre_denoise_mode OFF / sr_strength 0)",
+          one_route == 1 and "[ANTs]" in text and "OFF" in text
+          and "nvngx_dlss.dll" in text and "_nvngx.dll" in text)
+
+    RECORD.clear()
+    calls["init_ext"] = calls["init4"] = 0
+    os.environ["ANTS_SR_OWNER_SHIM"] = "1"
+    core_cannot_create()
+    refuse_runtime_caller()
+    try:
+        try:
+            sr_mod.DlssSrSession(gpu, 30, 40, 30, 40, mode="DLAA", preset="J",
+                                 sr_dll_dir=sr_dir)
+            text = ""
+        except _Exc as exc:
+            text = str(exc)
+        shim_route = calls["init_ext"]
+    finally:
+        ngx.NgxModule.fn = real_fn
+        os.environ.pop("ANTS_SR_OWNER_SHIM", None)
+    check("sr: ANTS_SR_OWNER_SHIM=1 adds rig 31's measured geometry (the "
+          "runtime through the caller shim) as a SECOND attempt - it stays out "
+          "of the default ladder because a fault there stops the ladder",
+          shim_route == 2 and "[ANTs]" in text)
+
+    # (d) a runtime FAULT stops the ladder with ONE loud RESTART error - and it
+    #     must not reach the shim route even with the opt-in enabled
     faults = []
-    real_fn = ngx.NgxModule.fn
+    os.environ["ANTS_SR_OWNER_SHIM"] = "1"
+    core_cannot_create()
+    base_fn = ngx.NgxModule.fn
 
     def faulting_fn(self, name, argtypes, restype=ctypes.c_int32, thunk="call"):
-        if name == "NVSDK_NGX_D3D12_Init_Ext":
+        if name == "NVSDK_NGX_D3D12_Init_Ext" and "nvngx_dlss" in str(
+                getattr(self, "path", "")):
             faults.append(os.path.basename(str(getattr(self, "path", ""))))
 
             def boom(*args):
                 raise OSError(
-                    "exception: access violation reading 0x0000000000000015")
+                    "exception: access violation writing 0x0000000001E73BF0")
             return boom
-        return real_fn(self, name, argtypes, restype, thunk)
+        return base_fn(self, name, argtypes, restype, thunk)
 
     ngx.NgxModule.fn = faulting_fn
     try:
@@ -1176,14 +1276,17 @@ def main():
         except _Exc as exc:
             text = str(exc)
         check("sr: a runtime fault becomes ONE loud [ANTs] error naming the "
-              "file, saying RESTART and offering OFF/0 as the way out - the "
-              "ladder is NOT continued into the next route (a process whose "
-              "NGX runtime faulted must not keep working)",
+              "file and the route, saying RESTART and offering OFF/0 as the "
+              "way out - the ladder is NOT continued into the next route (the "
+              "shim attempt never happens even with the opt-in on: a process "
+              "whose NGX runtime faulted must not keep working)",
               "access violation" in text and "RESTART" in text
               and "nvngx_dlss.dll" in text and "OFF" in text
-              and faults == ["nvngx_dlss.dll"])
+              and "route:" in text and faults == ["nvngx_dlss.dll"])
     finally:
         ngx.NgxModule.fn = real_fn
+        os.environ.pop("ANTS_SR_OWNER_SHIM", None)
+
     # ---- labels + the one-process NGX geometry (rig 02:48) ----------------
     check("ngx: result codes carry the HEADER's names (0xBAD0000B = "
           "UnableToInitializeFeature, NOT FeatureNotSupported - that is "
@@ -1238,7 +1341,8 @@ def main():
 
     gpu.close()
     check("flow: teardown releases the feature",
-          any(entry[0] == "ReleaseFeature" for entry in RECORD))
+          saw_release
+          or any(entry[0] == "ReleaseFeature" for entry in RECORD))
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

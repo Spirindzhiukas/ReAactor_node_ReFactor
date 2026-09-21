@@ -1,27 +1,38 @@
 """DLSS Super Resolution (feature 1) — the regular upscaler, pure Python.
 
-Session routes (rig 2026-09-21, run 29 — the full story in
+Session routes (rig 2026-09-21, runs 29-31 — the full story in
 ``_open_first_working``):
 
-1. **the staged runtime as the app-facing module** (``nvngx_dlss.dll``): its
-   ``NVSDK_NGX_D3D12_*`` exports ARE the public API in the PUBLIC argument
-   order, and the runtime loads the driver core itself. This is the route
-   every DLSS application uses, and the only one that creates feature 1;
-2. **the driver core alone**, with the SR folder in the search-path list
-   (the previous primary);
-3. **snippet-direct** (opt-in, ``ANTS_SR_SNIPPET_DIRECT=1``) for NR-style
-   builds whose ``Init_Ext`` takes the SWAPPED argument order.
+1. **the driver core alone**, with the union search paths
+   (``ngx.feature_search_paths``) that include the SR stage folder. This is
+   the route the core's own registry supports: its log shows it validating
+   the staged ``nvngx_dlss.dll`` and registering ``app 876232C feature dlss
+   snippet`` during the FIRST init of the process (rig 03:49) — a provider is
+   then available to ``CreateFeature(1)``;
+2. **the staged runtime as the app-facing module** (``nvngx_dlss.dll``, the
+   public ``Init_Ext`` order, called directly): the route a standalone DLSS
+   application uses. On this host it is REFUSED with ``0xBAD00002``
+   (PlatformError) - an error, so the ladder moves on (runs 30 and 31);
+3. **the runtime through the caller shim** (opt-in,
+   ``ANTS_SR_OWNER_SHIM=1``): rig 31 showed this geometry FAULTING inside the
+   runtime (``access violation writing 0x1E73BF0``), so it is out of the
+   default ladder - it exists to reproduce that finding on request;
+4. **snippet-direct** (opt-in, ``ANTS_SR_SNIPPET_DIRECT=1``) for NR-style
+   builds whose ``Init_Ext`` takes the SWAPPED argument order (rig 29: it
+   faulted reading ``0x15``, the version constant landing in the feature-info
+   slot).
 
-Rig 02:48 (fresh build, no crash) failed BOTH working routes because of ONE
-process-wide fact: the NR stage had already inited the driver core in prompt
-1, and NGX keeps the FIRST init's app id and feature-library search paths.
-Route 1 inited with a different app id -> ``0xBAD00002 PlatformError``; route
-2 landed in the old context, whose paths contained no ``nvngx_dlss.dll`` ->
-``CreateFeature(1)`` answered ``0xBAD0000B`` = **UnableToInitializeFeature**
-(Fail|11 - not "FeatureNotSupported", which is Fail|1). Both stages now init
-with the same app id / project id / app data path and the same union search
-paths (``ngx.feature_search_paths``), so whichever stage runs first, the other
-one's library is already on the list.
+Rig 02:48 (fresh build, no crash) failed BOTH then-working routes because of
+ONE process-wide fact: the NR stage had already inited the driver core in
+prompt 1, and NGX keeps the FIRST init's app id and feature-library search
+paths. Route 2 inited with a different app id -> ``0xBAD00002 PlatformError``;
+the core-alone route landed in the old context, whose paths contained no
+``nvngx_dlss.dll`` -> ``CreateFeature(1)`` answered ``0xBAD0000B`` =
+**UnableToInitializeFeature** (Fail|11 - not "FeatureNotSupported", which is
+Fail|1). Both stages now init with the same app id / project id / app data
+path and the same union search paths, so whichever stage runs first, the other
+one's library is already on the list - and rig 03:49 confirms the core picks
+the SR snippet up from that list and registers it.
 
 Modes map to fixed ratios (per the public SDK: DLAA 1.0, Quality 1.5,
 Balanced ~1.724, Performance 2.0, Ultra Performance 3.0); the model presets
@@ -193,18 +204,27 @@ class DlssSrSession:
                             quality, hdr, preset):
         """Start the SR feature on the first route this build accepts.
 
-        Rig 29 (2026-09-21, owner) decided the order:
+        Rig 29 (2026-09-21, owner) decided the first order; rig 31 reordered it
+        on evidence:
 
-        * route 2 below was the old primary and returned ``0xBAD0000B`` =
-          ``Fail|11 UnableToInitializeFeature``: the feature is not available
-          in the NGX context the core already holds (rig 02:48: that context
-          was inited by the NR stage in an earlier prompt, and its
-          feature-library search paths held no ``nvngx_dlss.dll`` at all);
-        * the old fallback was route 3's SWAPPED ``Init_Ext`` layout against
-          the SDK runtime, and it faulted INSIDE the runtime: ctypes reported
-          ``access violation reading 0x15`` - 0x15 is ``NGX_VERSION_API``, so
-          the runtime dereferenced our version constant as the feature-info
-          pointer. The SDK runtime is called in the PUBLIC argument order.
+        * the **driver core alone** now leads. Its own log from rig 03:49 shows
+          what the fix was for: during the FIRST init the core validated the
+          staged ``nvngx_dlss.dll`` and registered ``app 876232C feature dlss
+          snippet: ... version: 310.9.0`` - a provider ``CreateFeature(1)`` can
+          use. The old ``0xBAD0000B`` on this route was the search paths, not
+          the route (``UnableToInitializeFeature`` = the feature is not
+          available in the context the core holds);
+        * the **SDK runtime as the app-facing module** (public ``Init_Ext``
+          order) is REFUSED on this host with ``0xBAD00002`` (PlatformError) -
+          runs 30 and 31. An error, so the ladder simply moves on;
+        * the same runtime **through the caller shim** was tried in rig 31 (the
+          one geometry of {direct, shim} x {public, swapped} neither run had
+          used) and it FAULTED inside the runtime writing ``0x1E73BF0``. That
+          is a dead end now measured, so it left the default ladder and lives
+          behind ``ANTS_SR_OWNER_SHIM=1``;
+        * the SWAPPED ``Init_Ext`` layout against the SDK runtime (rig 29)
+          faulted reading ``0x15`` - the runtime dereferenced our version
+          constant as the feature-info pointer. Opt-in as well.
 
         An NGX *error* moves on to the next route. A *fault* (OSError from
         ctypes) stops the ladder: a process whose NGX runtime faulted is not a
@@ -223,24 +243,26 @@ class DlssSrSession:
 
         # (label, path, own parameters?, preload the core?, owner via shim?)
         routes = []
+        if core_path:
+            routes.append((
+                f"the driver core '{os.path.basename(str(core_path))}' with "
+                "the SR search path (the registry the union search paths "
+                "feed)", core_path, False, False, None))
         if runtime:
             routes.append((
                 f"the SR runtime '{os.path.basename(runtime)}' as the "
                 "app-facing module (public Init_Ext order)",
                 runtime, False, True, False))
-            # The one geometry both rig runs left standing: a direct
-            # public-order call is rejected as coming from the wrong caller
-            # (0xBAD00002, run 30) and the shim with the snippet's SWAPPED
-            # order faults inside the runtime (rig 29) - so a feature
-            # provider's caller check needs the shim AND the public order.
-            routes.append((
-                f"the SR runtime '{os.path.basename(runtime)}' as the "
-                "app-facing module, called through the caller shim",
-                runtime, False, True, True))
-        if core_path:
-            routes.append((
-                f"the driver core '{os.path.basename(str(core_path))}' with "
-                "the SR search path", core_path, False, False, None))
+            if os.environ.get("ANTS_SR_OWNER_SHIM") == "1":
+                # Rig 31 tried the last untested combination - the SDK runtime
+                # through the caller shim in the public order - and the
+                # runtime FAULTED writing 0x1E73BF0. Measured dead end, so it
+                # is opt-in: a fault stops the ladder (it must), which makes a
+                # default route that faults a trap for the next prompt.
+                routes.append((
+                    f"the SR runtime '{os.path.basename(runtime)}' through "
+                    "the caller shim (ANTS_SR_OWNER_SHIM=1)",
+                    runtime, False, True, True))
         if runtime and os.environ.get("ANTS_SR_SNIPPET_DIRECT") == "1":
             routes.append(("snippet-direct (NR-style build, swapped Init_Ext "
                            "argument order)", runtime, True, False, None))
@@ -261,11 +283,10 @@ class DlssSrSession:
                 # like the NR stage - same app id, same project id, same app
                 # data path, same union search paths. ANTS_SR_APP_ID restores
                 # an A/B against a different identity without a code change.
-                # The project-id init call is the shape the NR stage uses for
-                # a CORE-owned session, so it stays on that lane: the SR
-                # runtime (routes 1/1b) keeps the public Init_Ext form the rig
-                # has already seen, now with the shared app id and the shim
-                # geometry.
+                # The project-id Init call is the shape the NR stage uses for
+                # a CORE-owned session (the leading route), so it stays on that
+                # lane; the runtime-as-owner routes keep the public Init_Ext
+                # form the rig has already seen, with the shared app id.
                 session = NgxSession(self.gpu, path, search_paths=search,
                                      app_id=sr_app_id(),
                                      project_id=(None if (own_params or preload_core)
@@ -283,9 +304,14 @@ class DlssSrSession:
                 raise DlssSrError(
                     "[ANTs] The DLSS SR runtime FAULTED (access violation) "
                     f"inside {path}: {exc}\n"
-                    "    The call layout does not match this build (see "
-                    "ANTS_SR_SNIPPET_DIRECT) or the file is not an SR "
-                    "runtime.\n"
+                    f"    route: {label}\n"
+                    "    Known fingerprints: 'reading 0x15' = this build's "
+                    "Init_Ext takes the SWAPPED (snippet) argument order, "
+                    "ANTS_SR_SNIPPET_DIRECT; a WRITE to a low address (rig 31: "
+                    "0x1E73BF0) = the runtime called through the caller shim, "
+                    "ANTS_SR_OWNER_SHIM. On the default routes it means the "
+                    "file is not an SR runtime or its call layout differs from "
+                    "the public SDK.\n"
                     "    RESTART ComfyUI before running again - the process "
                     "is no longer trustworthy.\n"
                     "    To skip the stage entirely: pre_denoise_mode OFF or "

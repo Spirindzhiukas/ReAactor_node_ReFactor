@@ -10,11 +10,12 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
 - **Head at last update:** the native NGX host **RIG-VERIFIED** — UAV flag byte fix (`4e483f1`),
   documented rule + D3D12 debug layer (`cb7c572`), first-frame output smoke test + `ANTS_NR_SOAK` +
   opt-in `ANTS_NR_SESSION_CACHE` (`a3f2c47`), the SR pre-denoise stage alive on BOTH engines
-  (`794d34e`), its SR session route fixed after rig run 29, and rig run 30's two remaining
-  causes fixed (the calling-module geometry + the ONE NGX context per process), with the
-  result-code names taken from the header (`HOST_BUILD` `2026-09-21.6`)
-- **Suite:** ALL GREEN — 473 checks + 2 scanners + smoke_import (22 nodes)
-  (`test_dlssnr_bridge` 112, `test_dlsssr` 109, `test_native_flow` 65,
+  (`794d34e`), its SR session route fixed after rig run 29, rig run 30's two remaining causes
+  fixed (the calling-module geometry + the ONE NGX context per process) with the result-code
+  names taken from the header, and rig run 31's reordered SR ladder (`HOST_BUILD`
+  `2026-09-21.7`): the driver core leads, both faulting geometries are opt-in
+- **Suite:** ALL GREEN — 475 checks + 2 scanners + smoke_import (22 nodes)
+  (`test_dlssnr_bridge` 112, `test_dlsssr` 109, `test_native_flow` 67,
   `test_runtime_surface` 58, `test_nr_schedule` 35, `test_upres` 27,
   `test_pure_helpers` 26, `test_facerestore_routing` 21, `test_swapper_state`
   13, `test_detection_state_dict` 7)
@@ -119,7 +120,7 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | smoke_import.py | — | import + 22-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 473 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.6`; 22 nodes; package `ants/`).**
+**Total: 475 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.7`; 22 nodes; package `ants/`).**
 Sandbox venv: numpy, opencv-python-headless, pillow, pyflakes, pefile (NO torch — stub harness only).
 huggingface.co is TLS-blocked from the sandbox (DLL zips can't be downloaded there — verify engine
 versions on the owner rig).
@@ -1237,8 +1238,48 @@ first init's identity + path list and WARNs loudly when a later init differs (ap
 app-facing module called THROUGH THE CALLER SHIM in the public order (`owner_via_shim=True`) -
 run 30 proved direct+public is refused with `0xBAD00002` and run 29 proved shim+swapped faults
 reading the version constant (0x15) out of the feature-info slot.
-- Suite: **473 checks** (native_flow 65, dlsssr 109, dlssnr_bridge 112, runtime_surface 58,
-  nr_schedule 35). `HOST_BUILD` `2026-09-21.6`. Rig confirmation of the new geometry is PENDING.
+- Suite: **473 checks** at that commit (native_flow 65, dlsssr 109, dlssnr_bridge 112,
+  runtime_surface 58, nr_schedule 35). `HOST_BUILD` `2026-09-21.6`.
+
+### 2026-09-21 (rig run 31) - the union paths WORK; the SR ladder is reordered onto them
+**Prompt 1 (native NR, no SR) of the 03:49 run proved the run-30 fix**: the very first NGX init
+logged its identity and its three search paths - the NR staged dir, the SR staged dir
+(`...\staged\ANTs\sr_staged\nvngx_dlss_310.9.1`) and `ProgramData\NVIDIA\NGX\models` - and the
+core's own log then showed what that buys: `NGXSecureLoadFeature` validated the staged
+`nvngx_dlss.dll`, loaded the DLSS snippet from its managed cache and recorded
+`app 876232C feature dlss snippet: ... version: 310.9.0` for OUR app id. The provider
+`CreateFeature(1)` needs was registered during the first init. (Note: the core served 310.9.0
+from `ProgramData\NVIDIA\NGX\models\dlss\versions\...` - its config pins `app_E658700=310.9.0`
+- so the model the DLAA pass runs is the core's managed one, not necessarily the staged build.)
+The NR prompt itself was healthy end to end (Init / Init_ProjectID / snippet Init_Ext /
+CreateFeature(18) / EvaluateFeature all `hr=0x1`, 3.98 s).
+**Prompt 2 (legacy engine + SR) then failed on BOTH routes, and the failures are informative**:
+  * route 1 (the SR runtime as the app-facing module, called DIRECTLY in the public order) ->
+    `NGX init <- failed (last hr=0xBAD00002)` - the refusal runs 30 and 31 both show;
+  * route 1b (rig 31's new geometry: the same runtime THROUGH the caller shim, public order) ->
+    FAULTED inside the runtime: `access violation writing 0x0000000001E73BF0`, black box naming
+    `[in-flight call: Init_Ext]`; the loud `DlssSrError` + RESTART text did its job and the
+    process survived (`Prompt executed in 0.56 seconds`).
+**What was fixed (this commit)**: the ladder is reordered onto the geometry the core log
+endorses and the measured dead ends are opt-in: (1) the DRIVER CORE leads, with the union search
+paths; (2) the runtime as the app-facing module, direct, public order (its refusal is an ERROR,
+so the ladder steps over it - it never faults there); (3) the runtime through the caller shim,
+now `ANTS_SR_OWNER_SHIM=1` only (rig 31 measured the fault; a fault stops the ladder by design,
+so it must not be a default route); (4) snippet-direct stays `ANTS_SR_SNIPPET_DIRECT=1`.
+The fault message now names the route and both fingerprints (read of 0x15 = swapped snippet
+ABI; write to a low address = shim-owner geometry).
+**Open question this run raised**: in the LEGACY path the bridge loads (and its NGX work shows
+in the log) BEFORE the SR stage creates its session - `DLSS-5 Bridge initialized` is logged
+ahead of `[ANTs] SR stage:`. In the 03:49 runs our own prompt-1 init pinned the context first,
+so the bridge inherited the union; a FRESH process whose first prompt is the legacy engine may
+instead be pinned by whatever the bridge inits with. The tell is our own first-init line and the
+core's `SnippetLocationInfo ... Module not found at` lists in `nvngx.log`. If the legacy SR run
+fails in a fresh process while the SR-first run passes, the fix is to prime the NGX context
+with the union (a core `Init` + capability map, no feature) before `load_bridge` in the legacy
+path - tracked in plan.md, not done yet.
+- Suite: **475 checks** (native_flow 67, dlsssr 109, dlssnr_bridge 112, runtime_surface 58,
+  nr_schedule 35). `HOST_BUILD` `2026-09-21.7`. Rig confirmation of the core-led ladder is
+  PENDING - the next SR prompt is the test.
 
 ### 2026-09-21 (rig run 29) - the SR pre-denoise stage FAULTED at init; the route is fixed
 - **Owner's A/B**: `pre_denoise_strength` 0 = "ran as usual" (the rule skips the stage); strength 1

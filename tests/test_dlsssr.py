@@ -1516,20 +1516,28 @@ def main():
           and "d3d.state_name(uav)" in nr_src
           and "create_input_texture2d" in (REPO / "ants" / "dlsssr" / "sr.py").read_text())
     sr_src = (REPO / "ants" / "dlsssr" / "sr.py").read_text()
-    check("sr: the pre-denoise stage's session ladder drives the STAGED "
-          "RUNTIME as the app-facing module (public Init_Ext order) first, "
-          "names the file and reads its export verdict before any call goes "
-          "in, keeps the driver core as the second route, keeps the NR-style "
-          "swapped-ABI route behind ANTS_SR_SNIPPET_DIRECT, and turns a "
-          "runtime fault into ONE loud RESTART error instead of continuing "
-          "(rig 29: the swap handed the SDK runtime 0x15 where it wanted the "
-          "feature-info pointer)",
+    check("sr: the session ladder leads with the DRIVER CORE fed by the union "
+          "search paths (rig 03:49: the core registers the staged "
+          "nvngx_dlss.dll for the app id during the first init - that is what "
+          "CreateFeature(1) needs), keeps the runtime as the app-facing module "
+          "second (public Init_Ext order, rig 30/31: refused with "
+          "0xBAD00002 as an ERROR), and keeps BOTH faulting geometries - the "
+          "runtime through the caller shim (rig 31: write to 0x1E73BF0) and "
+          "the NR-style swapped ABI (rig 29: read of 0x15) - behind explicit "
+          "opt-ins, with one loud RESTART error and no second guess when a "
+          "runtime does fault",
           "[ANTs] SR stage:" in sr_src
           and "[ANTs] SR session route:" in sr_src
           and "describe_runtime" in sr_src
           and "ANTS_SR_SNIPPET_DIRECT" in sr_src
+          and "ANTS_SR_OWNER_SHIM" in sr_src
+          and "owner_via_shim=owner_shim" in sr_src
           and "RESTART ComfyUI" in sr_src
-          and sr_src.index("ANTS_SR_SNIPPET_DIRECT")
+          and sr_src.index("driver core '{os.path.basename(str(core_path))}'")
+              < sr_src.index("app-facing module (public Init_Ext order)")
+          and sr_src.index("app-facing module (public Init_Ext order)")
+              < sr_src.index('os.environ.get("ANTS_SR_OWNER_SHIM")')
+          and sr_src.index('os.environ.get("ANTS_SR_OWNER_SHIM")')
               < sr_src.index("snippet-direct (NR-style build"))
     d3d_src = (REPO / "ants" / "dlsssr" / "d3d12.py").read_text()
     import os as _os
