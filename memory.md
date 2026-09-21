@@ -16,8 +16,8 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   itself now RUNS** (core init, feature 1, Evaluate all `hr=0x1`) while the legacy engine's own
   pass threw a swallowed C++ exception and returned a black frame with no error - both blind
   spots now have loud verdicts
-- **Suite:** ALL GREEN — 481 checks + 2 scanners + smoke_import (22 nodes)
-  (`test_dlssnr_bridge` 118, `test_dlsssr` 109, `test_native_flow` 67,
+- **Suite:** ALL GREEN — 482 checks + 2 scanners + smoke_import (22 nodes)
+  (`test_dlssnr_bridge` 118, `test_dlsssr` 110, `test_native_flow` 67,
   `test_runtime_surface` 58, `test_nr_schedule` 35, `test_upres` 27,
   `test_pure_helpers` 26, `test_facerestore_routing` 21, `test_swapper_state`
   13, `test_detection_state_dict` 7)
@@ -122,7 +122,7 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | smoke_import.py | — | import + 22-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 481 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.8`; 22 nodes; package `ants/`).**
+**Total: 482 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.9`; 22 nodes; package `ants/`).**
 Sandbox venv: numpy, opencv-python-headless, pillow, pyflakes, pefile (NO torch — stub harness only).
 huggingface.co is TLS-blocked from the sandbox (DLL zips can't be downloaded there — verify engine
 versions on the owner rig).
@@ -1309,9 +1309,36 @@ BEFORE `load_bridge`, i.e. make the engine the SECOND NGX client in the process:
 that has never run; (f) the CUDA-flag watch around the SR pass - if NGX leaves the primary
 context's flags changed, the code says so and re-asserts `torch.cuda.set_device` before the
 engine call (evidence-gated: identical flags = nothing happens).
-- Suite: **481 checks** (dlssnr_bridge 118, native_flow 67, dlsssr 109, runtime_surface 58,
-  nr_schedule 35). `HOST_BUILD` `2026-09-21.8`. Rig confirmation of the SR+legacy combination is
-  PENDING; the SR stage alone is rig-confirmed working.
+- Suite: **481 checks** at that commit (dlssnr_bridge 118, native_flow 67, dlsssr 109,
+  runtime_surface 58, nr_schedule 35). `HOST_BUILD` `2026-09-21.8`.
+
+### 2026-09-21 (rig run 33) - THE SR PASS NEVER EXECUTED its own recording
+**The two 04:37/04:38 runs (build .8) said it plainly once the new verdicts were in**: the SR
+feature was created (`NGXDLAA::CreateDlssInstance`, DLAA 2368x1760, transformer weights,
+`ModelPreset 11 applied`, `hr=0x1`), `NGX EvaluateFeature` answered `hr=0x1` - and the output we
+read back was **all black**, on BOTH engines. Prompt 04:37 (legacy engine) died on our own new
+loud error; prompt 04:38 (native engine) ran to a black frame because that path had no SR output
+check yet.
+**ROOT CAUSE**: `DlssSrSession.evaluate()` never closed, executed and fence-waited the command
+list the NGX runtime records into. NGX records its work into the list it is handed, so until that
+list is submitted, NOTHING the DLSS core recorded actually runs: the output texture keeps whatever
+it was created with - every byte zero, since `create_texture2d` does not initialize - and the
+readback is a black frame while every call answers `hr=0x1`. The NR path has done both halves
+since run 30 (`nr.py`: drain our list with `submit_and_wait()`, then
+`runtime_submit_and_wait()`); the SR path only copied the upload/params part. The black frame in
+run 32 was this defect - NOT the legacy engine's two-NGX-clients conflict (that engine's own
+mono-stage error from run 32 remains a separate, unconfirmed suspect for the C++ throw).
+**Fixed (this commit)**: (a) `sr.py::evaluate()` drains our list before the feature call and calls
+`self.gpu.runtime_submit_and_wait()` after it, before the readback - exactly the NR sequence, and
+the source-order pin now asserts `<drain> < evaluate < <runtime submit> < readback`; (b) the native
+engine path also reports the SR output verdict now (it was judged only on the legacy paths - that
+is why prompt 04:38 reached a black frame); (c) the verdict compares the frame to its INPUT by
+content digest (`_frame_digest`, 4096 sampled values) and reports an identity pass as a warning
+("all-black stays all-black") without ever allocating a second full frame, so a legitimate
+all-black input cannot raise a false error while an all-black output from real input still does.
+- Suite: **482 checks** (dlsssr 110, dlssnr_bridge 118, native_flow 67, runtime_surface 58,
+  nr_schedule 35). `HOST_BUILD` `2026-09-21.9`. Rig confirmation of the SR image is PENDING - the
+  next prompt either shows a denoised frame or names what the pass left behind.
 
 ### 2026-09-21 (rig run 29) - the SR pre-denoise stage FAULTED at init; the route is fixed
 - **Owner's A/B**: `pre_denoise_strength` 0 = "ran as usual" (the rule skips the stage); strength 1

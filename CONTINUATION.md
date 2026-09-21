@@ -1131,7 +1131,7 @@ the shim, the callbacks or the process state was ever wrong.
 RGBA16F readback before the clamp, plus byte-identity against the input; one log line, never raises),
 `ANTS_NR_SOAK=1` (handles + torch VRAM per prompt) and the opt-in `ANTS_NR_SESSION_CACHE=1`
 (cross-prompt session reuse; default OFF — per-prompt init is what the working run used, and the knob
-exists to measure its ~1 s). `HOST_BUILD` is `2026-09-21.8`.
+exists to measure its ~1 s). `HOST_BUILD` is `2026-09-21.9`.
 
 **UPDATE 2026-09-21 (run 29) - the SR pre-denoise stage faulted at init; fixed.** With
 `pre_denoise_strength` > 0 the ladder did two wrong things: the driver core alone answered

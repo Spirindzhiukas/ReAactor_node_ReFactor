@@ -376,6 +376,11 @@ class DlssSrSession:
         uav = d3d.D3D12_RESOURCE_STATE_UNORDERED_ACCESS
         self.gpu.upload_texture(self.color, color_rgba, d3d.input_state())
         self.gpu.transition(self.output, uav)
+        # Drain before the feature call: NGX records into the runtime's OWN
+        # list, and a list that still holds our unexecuted copies and barriers
+        # is not the freshly reset, EMPTY list the runtime expects (the NR
+        # path learned this first - see DlssNrSession.evaluate).
+        self.gpu.submit_and_wait()
         p = self.ngx.params
         p.set_resource("Color", self.color.ptr)
         p.set_resource("Output", self.output.ptr)
@@ -389,6 +394,14 @@ class DlssSrSession:
         p.set_u32("DLSS.Render.Subrect.Dimensions.Width", self.rw)
         p.set_u32("DLSS.Render.Subrect.Dimensions.Height", self.rh)
         self.ngx.evaluate()
+        # THE MISSING STEP (rig 32): the runtime records its work into the
+        # command list it was handed, so THAT list has to be closed, executed
+        # and fence-waited before the output means anything - the proven hosts
+        # do exactly this, and the NR path has done it since run 30. Without
+        # it nothing the DLSS core recorded ever ran: the output texture stayed
+        # as created (every byte zero), and the stage handed a BLACK frame to
+        # the engine while every call answered hr=0x1.
+        self.gpu.runtime_submit_and_wait()
         return self.gpu.readback_texture(self.output, uav)
 
     def close(self):

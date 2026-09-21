@@ -188,10 +188,6 @@ def sr_output_verdict(payload_in, payload_out):
     no-op (byte-identical output - the pass ran and changed nothing), "info"
     when it did something. The caller logs; it never raises.
     """
-    if not payload_in:
-        return "warning", ("[ANTs] SR stage: the input frame is all-black - "
-                           "nothing to check (the SR output is black for the "
-                           "same reason).")
     if payload_in == payload_out:
         return "warning", ("[ANTs] SR stage: the DLAA pass returned the input "
                            "BYTE-IDENTICAL - the pass ran (hr=1) and changed "
@@ -701,6 +697,21 @@ class ReFactorDLSS5Enhancer:
             self._sr_sessions[key] = sess
         return sess
 
+    @staticmethod
+    def _frame_digest(frame_t):
+        """A cheap content digest of a torch frame (SR verdict identity test).
+
+        Byte-identity is the honest no-op test, but holding two full frames to
+        compare them doubles the peak; a digest compares a few thousand values
+        instead (identical digest == identical frame for this purpose).
+        """
+        if frame_t.numel() == 0:
+            return ()
+        flat = frame_t.reshape(-1)
+        idx = np.unique(np.linspace(0, flat.numel() - 1, 4096,
+                                    dtype=np.int64))
+        return tuple(float(v) for v in flat[idx].float().cpu().tolist())
+
     def _sr_denoise_frame(self, frame_t, reset, device=None, report=False):
         """One 1:1 DLAA pass over a torch frame; returns the denoised frame.
 
@@ -710,13 +721,30 @@ class ReFactorDLSS5Enhancer:
         device it does not use. ``report=True`` also returns the output
         verdict (see :func:`sr_output_verdict`) instead of only the frame.
         """
+        if not report:
+            payload, w, h = self._frame_to_rgba8(frame_t)
+            out = self._sr_session_for(w, h).evaluate(payload, reset=reset)
+            return self._rgba8_to_frame(out, w, h,
+                                        self.device if device is None else device)
+        # report=True: collect the verdict (rig 32). The frame is compared in
+        # its OWN dtype/range so the digest is not perturbed by the transfer
+        # (a [0,1] byte round trip would make the SR pass look like a change
+        # even when it is the identity); only values the byte transfer would
+        # clip anyway are clipped here, which is what the blackness test means.
+        digest_before = self._frame_digest(frame_t)
         payload, w, h = self._frame_to_rgba8(frame_t)
         out = self._sr_session_for(w, h).evaluate(payload, reset=reset)
         frame = self._rgba8_to_frame(out, w, h,
                                      self.device if device is None else device)
-        if report:
-            return frame, sr_output_verdict(payload, out)
-        return frame
+        if self._frame_digest(frame) == digest_before:
+            return frame, ("warning",
+                           "[ANTs] SR stage: the DLAA pass left the frame "
+                           "IDENTICAL (all-black stays all-black) - it ran "
+                           "(hr=1) and changed nothing. With MV.Scale 0 + "
+                           "zeroed depth/motion that is the shape of a no-op; "
+                           "if the frame should be denoised, the parameters "
+                           "are the place to look.")
+        return frame, sr_output_verdict(payload, out)
 
     def _log_sr_output(self, note):
         """Log the SR pass's own output verdict once per prompt (rig 32).
@@ -777,11 +805,6 @@ class ReFactorDLSS5Enhancer:
             frame, note = out
             return frame.numpy(), note
         return out.numpy()
-
-    def _sr_denoise_np(self, frame_np, reset):
-        """The SR stage for the numpy (legacy host-staging) path: numpy in, out."""
-        t = torch.from_numpy(np.ascontiguousarray(frame_np))
-        return self._sr_denoise_frame(t, reset, device="cpu").numpy()
 
     @staticmethod
     def _frame_to_rgba8(frame_t):
@@ -1056,7 +1079,9 @@ class ReFactorDLSS5Enhancer:
 
                 if native:
                     if action == "sr":
-                        frame_t = self._sr_denoise_frame(frame_t, do_reset)
+                        frame_t, sr_note = self._sr_denoise_frame(
+                            frame_t, do_reset, report=True)
+                        self._log_sr_output(sr_note)
                     elif action == "model":
                         frame_t = self._pre_denoise_frame(frame_t, d_model, d_strength)
                     look = {"style": pass_spec["style"], **pass_spec["settings"]}

@@ -317,15 +317,18 @@ python and never registers callbacks.
       on the first frame of every prompt (`[ANTs] the native NR output ...` - non-finite, saturated, or
       byte-identical to the input). Run one small native prompt and confirm no line appears; the
       NaN/range/identity logic is already unit-tested pure.
-- [ ] **SR + LEGACY ENGINE (rig run 32, open)**: the SR pass itself now works end to end
-      (`Init_ProjectID`/feature 1/`EvaluateFeature` all `hr=1`, a real 168 MB DLAA feature), and the
-      `dlss5nr_process_cuda_v6` call then throws a C++ exception that the engine's own handler
-      swallows - black frame, no error. Both blind spots are now loud (`sr_output_verdict`,
-      `engine_output_verdict`, the engine's kept `last_error`). Next rig steps, in order: (1) SR mode
-      with `engine: ANTs native NGX` - the native host has no 3rd-party engine, so it decides whether
-      the conflict is "SR + legacy engine" or "SR + any engine"; (2) if it reproduces natively, run
-      with `ANTS_LEGACY_SR_FIRST=1` (legacy only) to test the engine as the SECOND NGX client; (3) send
-      the console - the new error names the route, the C++ report and the engine's own buffer.
+- [x] SR pass executes its own recording (rig run 33, `2026-09-21.9`): the SR `evaluate()` drains our
+      list and then closes/executes/waits on the RUNTIME's list - without that, nothing the DLSS core
+      recorded ran and the stage returned a black frame (run 32's black output). The native path now
+      reports the SR verdict too, and the identity test is a content digest.
+- [ ] **SR + LEGACY ENGINE (rig run 32/33, open)**: with the SR image fix in, the remaining question
+      is the `dlss5nr_process_cuda_v6` C++ throw from run 32 (`0xE06D7363`) - the engine's own
+      handler swallows it, the destination is never written and the prompt used to end with a black
+      frame and no message; now it is a loud error naming the throw. Next rig steps, in order:
+      (1) SR mode with `engine: ANTs native NGX` - the native host has no 3rd-party engine, so it
+      decides whether the conflict is "SR + legacy engine" or "SR + any engine"; (2) if the throw
+      persists, legacy with `ANTS_LEGACY_SR_FIRST=1` (the engine becomes the SECOND NGX client);
+      (3) send the console - the error carries the C++ report and the engine's own error buffer.
 - [ ] **Legacy-path NGX context ordering** (raised by rig run 31): `DLSS-5 Bridge initialized`
       is logged BEFORE `[ANTs] SR stage:`, so a FRESH process whose first prompt is the legacy
       engine may have the process NGX context pinned by the bridge's own init instead of our

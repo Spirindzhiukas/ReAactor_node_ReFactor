@@ -1516,6 +1516,21 @@ def main():
           and "d3d.state_name(uav)" in nr_src
           and "create_input_texture2d" in (REPO / "ants" / "dlsssr" / "sr.py").read_text())
     sr_src = (REPO / "ants" / "dlsssr" / "sr.py").read_text()
+    check("sr: the DLAA pass DRAINS our list before the feature call and "
+          "closes/executes/waits on the RUNTIME's list afterwards (rig 32: "
+          "without the drain the runtime gets a list that is not empty, and "
+          "without the runtime submit nothing the DLSS core recorded ever "
+          "runs - the output texture stayed as created, all zero bytes, and "
+          "the stage handed a BLACK frame to the engine while every call "
+          "answered hr=0x1 - the NR path has done both since run 30)",
+          "self.gpu.submit_and_wait()" in sr_src
+          and "self.gpu.runtime_submit_and_wait()" in sr_src
+          and sr_src.index("self.gpu.submit_and_wait()")
+              < sr_src.index("self.ngx.evaluate()")
+              and sr_src.index("self.ngx.evaluate()")
+              < sr_src.index("self.gpu.runtime_submit_and_wait()")
+              and sr_src.index("self.gpu.runtime_submit_and_wait()")
+              < sr_src.index("readback_texture"))
     check("sr: the session ladder leads with the DRIVER CORE fed by the union "
           "search paths (rig 03:49: the core registers the staged "
           "nvngx_dlss.dll for the app id during the first init - that is what "
