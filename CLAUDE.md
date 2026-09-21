@@ -119,7 +119,7 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
 - **Gates before every commit:** `pyflakes` over `ants/`, `nodes.py`, `tests/`
   (benign exceptions: star-import notes in `codeformer_arch.py`); `tests/test_pyflakes.py`,
   `tests/test_scope_check.py`, `tests/smoke_import.py` (asserts exactly 22 nodes), plus
-  the full suite. Current tally: **475 checks** (see `memory.md`).
+  the full suite. Current tally: **481 checks** (see `memory.md`).
 - **NGX has ONE context per process** (rig runs 29/30 + Claude Sonnet 5): the FIRST `Init` pins the
   app id, the project id and the **feature-library search paths** - a later session can only re-use
   that context, never add a folder. Every ANTs session therefore goes through the same geometry:

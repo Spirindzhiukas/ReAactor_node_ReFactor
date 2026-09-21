@@ -12,10 +12,12 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   opt-in `ANTS_NR_SESSION_CACHE` (`a3f2c47`), the SR pre-denoise stage alive on BOTH engines
   (`794d34e`), its SR session route fixed after rig run 29, rig run 30's two remaining causes
   fixed (the calling-module geometry + the ONE NGX context per process) with the result-code
-  names taken from the header, and rig run 31's reordered SR ladder (`HOST_BUILD`
-  `2026-09-21.7`): the driver core leads, both faulting geometries are opt-in
-- **Suite:** ALL GREEN — 475 checks + 2 scanners + smoke_import (22 nodes)
-  (`test_dlssnr_bridge` 112, `test_dlsssr` 109, `test_native_flow` 67,
+  names taken from the header, rig run 31's reordered SR ladder, and rig run 32 (`HOST_BUILD` `2026-09-21.8`): **the SR pass
+  itself now RUNS** (core init, feature 1, Evaluate all `hr=0x1`) while the legacy engine's own
+  pass threw a swallowed C++ exception and returned a black frame with no error - both blind
+  spots now have loud verdicts
+- **Suite:** ALL GREEN — 481 checks + 2 scanners + smoke_import (22 nodes)
+  (`test_dlssnr_bridge` 118, `test_dlsssr` 109, `test_native_flow` 67,
   `test_runtime_surface` 58, `test_nr_schedule` 35, `test_upres` 27,
   `test_pure_helpers` 26, `test_facerestore_routing` 21, `test_swapper_state`
   13, `test_detection_state_dict` 7)
@@ -120,7 +122,7 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | smoke_import.py | — | import + 22-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 475 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.7`; 22 nodes; package `ants/`).**
+**Total: 481 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.8`; 22 nodes; package `ants/`).**
 Sandbox venv: numpy, opencv-python-headless, pillow, pyflakes, pefile (NO torch — stub harness only).
 huggingface.co is TLS-blocked from the sandbox (DLL zips can't be downloaded there — verify engine
 versions on the owner rig).
@@ -1277,9 +1279,39 @@ core's `SnippetLocationInfo ... Module not found at` lists in `nvngx.log`. If th
 fails in a fresh process while the SR-first run passes, the fix is to prime the NGX context
 with the union (a core `Init` + capability map, no feature) before `load_bridge` in the legacy
 path - tracked in plan.md, not done yet.
-- Suite: **475 checks** (native_flow 67, dlsssr 109, dlssnr_bridge 112, runtime_surface 58,
-  nr_schedule 35). `HOST_BUILD` `2026-09-21.7`. Rig confirmation of the core-led ladder is
-  PENDING - the next SR prompt is the test.
+- Suite: **475 checks** at that commit (native_flow 67, dlsssr 109, dlssnr_bridge 112,
+  runtime_surface 58, nr_schedule 35). `HOST_BUILD` `2026-09-21.7`.
+
+### 2026-09-21 (rig run 32) - the SR stage RUNS; the legacy engine then throws a black frame
+**The core-led ladder WORKED (04:19, `2026-09-21.7`)**: `NGX init -> _nvngx.dll (bound directly)`,
+`Init_ProjectID <- hr=0x1`, `GetCapabilityParameters <- hr=0x1`, `NGX CreateFeature(feature 1)` ->
+the core built a real 168 MB DLSS feature (`NGXDLAA::CreateDlssInstance`, DLAA, 2368x1760,
+`gpt`/transformer weights, `NGXOverrideStatusCallback: ModelPreset 11 applied`) and answered
+`hr=0x1`; `[ANTs] SR session route: the driver core '_nvngx.dll' ...`; then `NGX EvaluateFeature`
+-> `NgxDltss::EvaluateDltss` (MV.Scale 0/0, RunPrePass/RunPass/RunPostPass, NeedHistoryReset 1) ->
+`hr=0x1`. The geometry line read `same geometry as the first init` (no mismatch warning).
+**Then the LEGACY engine broke**: `[ANTs] C++ exception 0xE06D7363 (magic 0x19930520)`
+`[in-flight call: dlss5nr_process_cuda_v6]` - the engine caught its own throw, the call returned
+as if fine, and the destination (`torch.empty`) was never written: the prompt reported success in
+1.28 s and the user got a BLACK frame with no error. Two NGX clients now live in one process (our
+SR feature + the engine's own NR session) and NGX keeps ONE context per process.
+**Fixed (this commit)**: (a) `ants/dlssnr/node.py::sr_output_verdict` - the SR pass's own output
+is now judged once per prompt (all-black from a non-black input = loud ERROR naming the stage and
+the ways out; byte-identical = warning; a real image = a status line with byte statistics), which
+closes a blind spot: `hr=1` from the SR pass no longer means "the frame is fine"; (b)
+`engine_output_verdict` - an all-black destination from a non-black source is a loud ERROR that
+carries the swallowed C++ report, and a recovered throw is a once-per-prompt warning; (c)
+`crashlog.cxx_serial()` - a monotonic C++-throw counter so a caller can tell whether the engine
+threw DURING its own call; (d) `core.DLSSStandaloneManager.last_error` - the engine's own error
+buffer is kept even when it reports SUCCESS and is appended to the verdict (it is the only place
+its complaint survives); (e) `ANTS_LEGACY_SR_FIRST=1` (opt-in experiment) - create the SR session
+BEFORE `load_bridge`, i.e. make the engine the SECOND NGX client in the process: the one ordering
+that has never run; (f) the CUDA-flag watch around the SR pass - if NGX leaves the primary
+context's flags changed, the code says so and re-asserts `torch.cuda.set_device` before the
+engine call (evidence-gated: identical flags = nothing happens).
+- Suite: **481 checks** (dlssnr_bridge 118, native_flow 67, dlsssr 109, runtime_surface 58,
+  nr_schedule 35). `HOST_BUILD` `2026-09-21.8`. Rig confirmation of the SR+legacy combination is
+  PENDING; the SR stage alone is rig-confirmed working.
 
 ### 2026-09-21 (rig run 29) - the SR pre-denoise stage FAULTED at init; the route is fixed
 - **Owner's A/B**: `pre_denoise_strength` 0 = "ran as usual" (the rule skips the stage); strength 1

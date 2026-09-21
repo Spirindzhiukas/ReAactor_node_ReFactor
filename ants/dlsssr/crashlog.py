@@ -460,6 +460,19 @@ def last_cxx_report():
     return _state["cxx"][-1] if _state["cxx"] else None
 
 
+def cxx_serial():
+    """How many C++ throws we have reported so far (a monotonic counter).
+
+    A caller that is about to drive a native engine records this before the
+    call and compares after: ``cxx_serial() != before`` means the engine threw
+    a C++ exception DURING that call. Rig 04:19 (run 32) is why this matters:
+    the engine's own handler swallowed its throw, ``dlss5nr_process_cuda_v6``
+    returned as if fine, and the destination buffer was never written - the
+    user got a black frame with no error at all. Never a silent degrade.
+    """
+    return _state["cxx_count"]
+
+
 def crash_file_path():
     """Where the black box writes (once armed), for the error message."""
     return _state["path"]

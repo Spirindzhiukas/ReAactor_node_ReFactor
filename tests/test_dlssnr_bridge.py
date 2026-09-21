@@ -166,9 +166,9 @@ def main():
     # hr=1 from CreateFeature and EvaluateFeature). A smoke test on a synthetic
     # image is what keeps it honest without a GPU: the payload round-trips, a
     # real change passes, a no-op and a NaN do not.
-    from ants.dlssnr.node import (native_output_verdict, rgba_bytes_from_rgb8,
-                                  session_cache_enabled, soak_enabled,
-                                  soak_line)
+    from ants.dlssnr.node import (engine_output_verdict, native_output_verdict,
+                                  rgba_bytes_from_rgb8, session_cache_enabled,
+                                  soak_enabled, soak_line, sr_output_verdict)
     import os as _os
     import pathlib as _pl
     rng = np.random.default_rng(7)
@@ -194,6 +194,73 @@ def main():
           and native_output_verdict(False, 3)[0] == "error"
           and "byte-identical" in native_output_verdict(True, 0)[1]
           and "non-finite" in native_output_verdict(False, 3)[1])
+    # ---- rig run 32: the SR pass's own output + the engine's black frame ----
+    # The SR pass answered hr=0x1 while the frame the user saw was black, and
+    # the engine (dlss5nr_process_cuda_v6) threw a C++ exception that its own
+    # handler swallowed - the destination (torch.empty) was never written and
+    # nothing was reported. Both blind spots now have a verdict, and an
+    # all-black output from a non-black input is an ERROR, never a black frame
+    # with no message.
+    black = b"\x00" * (h * w * 4)
+    check("smoke: the SR output verdict fails LOUDLY on an all-black output "
+          "from a non-black input (the frame handed to the engine is black "
+          "whatever the engine does), warns on a byte-identical no-op and "
+          "passes a real image with its byte statistics",
+          sr_output_verdict(payload, black)[0] == "error"
+          and "ALL-BLACK" in sr_output_verdict(payload, black)[1]
+          and "sr_strength 0" in sr_output_verdict(payload, black)[1]
+          and sr_output_verdict(payload, payload)[0] == "warning"
+          and "BYTE-IDENTICAL" in sr_output_verdict(payload, payload)[1]
+          and sr_output_verdict(payload, changed)[0] == "info"
+          and "differs from the input" in sr_output_verdict(payload, changed)[1][0]
+          and sr_output_verdict(black, black)[0] == "warning")
+    cxx = ("[ANTs] C++ exception 0xE06D7363 (magic 0x19930520) [in-flight "
+           "call: dlss5nr_process_cuda_v6]")
+    check("smoke: the legacy engine verdict fails LOUDLY when the destination "
+          "came back all-black for a non-black source - naming the swallowed "
+          "C++ throw and the one-process/two-NGX-clients combination, with the "
+          "engine switch, pre_denoise_mode OFF and sr_strength 0 as the ways "
+          "out",
+          engine_output_verdict(True, True, cxx)[0] == "error"
+          and "never written" in engine_output_verdict(True, True, cxx)[1]
+          and "C++ exception" in engine_output_verdict(True, True, cxx)[1]
+          and "ANTs native NGX" in engine_output_verdict(True, True, cxx)[1]
+          and "ONE context per process" in engine_output_verdict(True, True,
+                                                                 cxx)[1])
+    check("smoke: a black output from a black input is NOT an error (nothing "
+          "to report), and a recovered C++ throw with a written frame is a "
+          "warning that carries the exception line",
+          engine_output_verdict(False, True, None)[0] is None
+          and engine_output_verdict(True, False, cxx)[0] == "warning"
+          and engine_output_verdict(False, True, cxx)[0] == "warning"
+          and "came back written" in engine_output_verdict(False, True,
+                                                           cxx)[1])
+    src_node = (REPO / "ants" / "dlssnr" / "node.py").read_text()
+    src_core = (REPO / "ants" / "dlssnr" / "core.py").read_text()
+    check("rig 32: the engine's own error buffer is kept even when the engine "
+          "reports SUCCESS (it swallowed a C++ throw and returned fine - the "
+          "buffer is the only place its complaint survives), and it is carried "
+          "into the loud verdict",
+          src_core.count("self.last_error = err_msg") == 2
+          and 'self.last_error = ""' in src_core
+          and 'getattr(self.manager, "last_error", "")' in src_node
+          and "the engine's own error buffer" in src_node)
+    check("rig 32: the SR session can be created BEFORE the legacy engine's "
+          "own NGX init (ANTS_LEGACY_SR_FIRST=1) - the one ordering of the two "
+          "NGX clients in one process that has never run - and the switch is "
+          "off by default, legacy-only, and cannot fire with the stage off",
+          "ANTS_LEGACY_SR_FIRST" in src_node
+          and 'os.environ.get("ANTS_LEGACY_SR_FIRST") != "1"' in src_node
+          and "engine != ENGINE_LEGACY or mode == PRE_DENOISE_OFF" in src_node
+          and src_node.index("self._prime_sr_before_engine(")
+              < src_node.index("self.load_bridge(nr_dll_version, engine)"))
+    from ants.dlsssr import crashlog as _crashlog
+    before = _crashlog.cxx_serial()
+    check("smoke: the crash box exposes a monotonic C++-throw counter, so a "
+          "caller can tell whether the engine threw DURING its own call",
+          isinstance(before, int)
+          and _crashlog.cxx_serial() == before
+          and callable(_crashlog.last_cxx_report))
     check("smoke: a saturated readback warns, a normal one does not (the host "
           "clamps silently, so range is only visible before the clamp)",
           native_output_verdict(False, 0, 50, 100)[0] == "warning"
@@ -255,8 +322,10 @@ def main():
           "(native, legacy CUDA, legacy host) and no longer claims to need the "
           "native engine",
           "SR pre-denoise needs the native NGX engine" not in node_src
-          and "_sr_denoise_frame(frame, do_reset" in node_src
-          and "_sr_denoise_np(frame_np, do_reset)" in node_src
+          and "_sr_denoise_frame(\n" in node_src
+          and "frame, do_reset, device=cuda_dev, report=True" in node_src
+          and "_sr_denoise_np(\n" in node_src
+          and "frame_np, do_reset, report=True" in node_src
           and "def _sr_denoise_np" in node_src
           and "sr_stage=pre_denoise_mode == PRE_DENOISE_SR" in node_src)
 

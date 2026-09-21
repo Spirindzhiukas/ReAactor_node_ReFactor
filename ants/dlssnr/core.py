@@ -106,6 +106,11 @@ class DLSSStandaloneManager:
         self._cuda_supported_fn = None
         self._cuda_status_fn = None
         self._gpu_name_fn = None
+        # The engine's own last error text (it also writes this when it
+        # reports success - see process_cuda). Rig 32: the engine swallowed its
+        # own C++ throw, returned "fine" and left the destination unwritten;
+        # this buffer is where its complaint survives.
+        self.last_error = ""
 
     @staticmethod
     def find_engine_dll(dll_dir: str):
@@ -335,8 +340,13 @@ class DLSSStandaloneManager:
                 ctypes.byref(params),
                 error, len(error),
             )
+            err_msg = error.value.decode('utf-8', errors='ignore')
+            # Keep the engine's own last words even when it reported success:
+            # rig 32 showed it throwing a C++ exception that its own handler
+            # swallowed while returning "fine", and this buffer is the only
+            # place its complaint could still be.
+            self.last_error = err_msg
             if not ok:
-                err_msg = error.value.decode('utf-8', errors='ignore')
                 raise NeuralBridgeError(
                     f"DLSS-5 CUDA process failed: {err_msg} "
                     "- you can switch GPU acceleration to 'CPU (host staging)'.")
@@ -373,6 +383,7 @@ class DLSSStandaloneManager:
                 len(error)
             )
             
+            err_msg = error.value.decode('utf-8', errors='ignore')
+            self.last_error = err_msg
             if not ok:
-                err_msg = error.value.decode('utf-8', errors='ignore')
                 raise NeuralBridgeError(f"DLSS-5 process failed: {err_msg}")

@@ -14,6 +14,8 @@ import torch
 
 import comfy.model_management as model_management
 
+from ..dlsssr import crashlog     # C++-throw serial + report (rig run 32)
+from ..dlsssr import cuda_flags   # context flags around the SR pass
 from ..log import dlss_logger as logger
 from ..scripting import state
 from ..utils import (
@@ -172,6 +174,84 @@ def session_cache_enabled():
         "1", "true", "yes", "on")
 
 
+def sr_output_verdict(payload_in, payload_out):
+    """(level, text) for one SR pre-denoise pass - the SR output smoke test.
+
+    Nothing watched the SR stage's own output until rig run 32: the pass
+    answered ``hr=0x1`` while the frame the user finally saw was BLACK, so we
+    could not tell an SR pass that produced a real image from one that produced
+    an empty buffer (or a no-op). ``payload_in``/``payload_out`` are the RGBA8
+    byte payloads handed to and returned by ``EvaluateFeature``.
+
+    Levels mirror ``native_output_verdict``: "error" for an output that cannot
+    be a real DLAA result (all-black from a non-black input), "warning" for a
+    no-op (byte-identical output - the pass ran and changed nothing), "info"
+    when it did something. The caller logs; it never raises.
+    """
+    if not payload_in:
+        return "warning", ("[ANTs] SR stage: the input frame is all-black - "
+                           "nothing to check (the SR output is black for the "
+                           "same reason).")
+    if payload_in == payload_out:
+        return "warning", ("[ANTs] SR stage: the DLAA pass returned the input "
+                           "BYTE-IDENTICAL - the pass ran (hr=1) and changed "
+                           "nothing. With MV.Scale 0 + zeroed depth/motion "
+                           "that is the shape of a no-op; if the frame should "
+                           "be denoised, the parameters are the place to look.")
+    if not payload_out.strip(b"\x00"):
+        return "error", ("[ANTs] SR stage: the DLAA pass returned an ALL-BLACK "
+                         "frame for a non-black input - the output texture was "
+                         "never written, or the feature evaluated into a "
+                         "buffer that is not the output we read back. The "
+                         "frame handed to the engine is black regardless of "
+                         "the engine's own state; report this line.\n"
+                         "    To skip the stage: pre_denoise_mode OFF or "
+                         "sr_strength 0.")
+    zero = payload_out.count(0)
+    return "info", ("[ANTs] SR stage: DLAA output differs from the input "
+                    "(%d of %d bytes zero) - the pass produced a real image.",
+                    zero, len(payload_out))
+
+
+def engine_output_verdict(dest_all_zero, source_has_content, cxx_report):
+    """(level, text) for one legacy-engine pass over a CUDA destination.
+
+    Rig 04:19 (run 32): the SR stage and the legacy engine are two NGX clients
+    in one process now; ``dlss5nr_process_cuda_v6`` threw a C++ exception
+    (0xE06D7363), the engine's own handler swallowed it and the call returned
+    "fine" - while the destination (``torch.empty``) was never written. The
+    user saw a black frame and no error at all. Two signals, both cheap:
+
+    * an all-black destination produced from a non-black source - the
+      never-written buffer signature;
+    * a C++ throw recorded during the call (``crashlog.cxx_serial()`` moved).
+    """
+    if dest_all_zero and source_has_content:
+        text = ("[ANTs] the legacy engine returned an EMPTY (all-black) frame "
+                "for a non-black input - the destination buffer was never "
+                "written, so this frame is not the engine's output.")
+        if cxx_report:
+            text += (" A C++ exception was recorded during the call:\n    "
+                     + cxx_report + "\n    The engine caught its own throw and "
+                     "returned as if fine, which is why nothing was reported "
+                     "until now.")
+        text += ("\n    The SR pre-denoise stage and the legacy engine are two "
+                 "NGX clients in one process (NGX keeps ONE context per "
+                 "process - see ants/dlsssr/ngx.py); if this began exactly "
+                 "when the SR stage started to run, that combination is the "
+                 "one to bisect.\n"
+                 "    Ways out: engine 'ANTs native NGX' (no 3rd-party "
+                 "engine), pre_denoise_mode OFF, or sr_strength 0.")
+        return "error", text
+    if cxx_report:
+        return "warning", ("[ANTs] the legacy engine threw a C++ exception "
+                           "during this pass but the frame came back "
+                           "written:\n    " + cxx_report + "\n"
+                           "    Report this line if the image looks wrong - "
+                           "the engine is recovering from its own error.")
+    return None, ""
+
+
 def soak_enabled():
     """``ANTS_NR_SOAK=1`` - one line per run with handles + torch VRAM.
 
@@ -242,6 +322,8 @@ class ReFactorDLSS5Enhancer:
         self.native_dll_path = None
         self._native_checked = False     # first native frame of this run
         self._soak_logged = False
+        self._sr_checked = False         # the SR pass's output verdict (rig 32)
+        self._engine_warned = False      # "did your C++ throw recover?" (rig 32)
         self._nr_preset = 0
         self._sr_choice = "auto"
         self._sr_preset = "Default"
@@ -569,6 +651,38 @@ class ReFactorDLSS5Enhancer:
         elif level == "warning":
             logger.warning("%s", text)
 
+    def _prime_sr_before_engine(self, image, engine, mode, strength):
+        """Opt-in: create the SR session BEFORE the legacy engine inits NGX.
+
+        Rig 32 (04:19): the SR pass itself now works (Init_ProjectID, feature
+        1, EvaluateFeature all hr=1, a 168 MB DLSS feature built by the core),
+        and the LEGACY ENGINE then threw a C++ exception inside
+        ``dlss5nr_process_cuda_v6`` - the SR stage and the engine are two NGX
+        clients in ONE process (NGX keeps one context per process), and the
+        order has always been "engine inits first" because ``load_bridge``
+        runs before the first SR pass. This switch creates our SR session
+        (D3D12 device + NGX feature) first, so the engine becomes the second
+        client - the ordering that has never run. Opt-in, best-effort: a
+        failure here is logged and the normal lazy path takes over.
+        """
+        if os.environ.get("ANTS_LEGACY_SR_FIRST") != "1":
+            return
+        if engine != ENGINE_LEGACY or mode == PRE_DENOISE_OFF:
+            return
+        if pre_denoise_action(mode, strength, None) != "sr":
+            return
+        try:
+            height, width = int(image.shape[-3]), int(image.shape[-2])
+            logger.status(
+                "[ANTs] ANTS_LEGACY_SR_FIRST=1 EXPERIMENT: creating the SR "
+                "session (%dx%d) BEFORE the legacy engine inits NGX - the "
+                "engine then becomes the second NGX client in this process.",
+                width, height)
+            self._sr_session_for(width, height)
+        except Exception as exc:
+            logger.warning("[ANTs] early SR session failed (%s) - the normal "
+                           "order takes over.", exc)
+
     def _sr_session_for(self, width, height):
         """Lazily created 1:1 DLAA SR session (pre-denoise pass), keyed by
         dll stage / size / preset so model swaps never churn the GPU side."""
@@ -587,18 +701,82 @@ class ReFactorDLSS5Enhancer:
             self._sr_sessions[key] = sess
         return sess
 
-    def _sr_denoise_frame(self, frame_t, reset, device=None):
+    def _sr_denoise_frame(self, frame_t, reset, device=None, report=False):
         """One 1:1 DLAA pass over a torch frame; returns the denoised frame.
 
         ``device`` is where the result lands (default: the node's torch
         device). The legacy CUDA path passes its own ``cuda:<ordinal>`` and the
         host-staging path passes CPU, so neither bounces the frame through a
-        device it does not use.
+        device it does not use. ``report=True`` also returns the output
+        verdict (see :func:`sr_output_verdict`) instead of only the frame.
         """
         payload, w, h = self._frame_to_rgba8(frame_t)
         out = self._sr_session_for(w, h).evaluate(payload, reset=reset)
-        return self._rgba8_to_frame(out, w, h,
-                                    self.device if device is None else device)
+        frame = self._rgba8_to_frame(out, w, h,
+                                     self.device if device is None else device)
+        if report:
+            return frame, sr_output_verdict(payload, out)
+        return frame
+
+    def _log_sr_output(self, note):
+        """Log the SR pass's own output verdict once per prompt (rig 32).
+
+        The pass answered hr=0x1 while the frame the user saw was black, and
+        nothing in the pack watched the SR stage's output - this closes that
+        blind spot. An all-black SR output is an ERROR (loud, named), a
+        byte-identical one is a warning, a real image is a status line.
+        """
+        if self._sr_checked:
+            return
+        self._sr_checked = True
+        level, text = note
+        if isinstance(text, tuple):
+            fmt, args = text[0], text[1:]
+        else:
+            fmt, args = "%s", (text,)
+        if level == "error":
+            raise RuntimeError(fmt % args if args else fmt)
+        if level == "warning":
+            logger.warning(fmt, *args)
+        else:
+            logger.status(fmt, *args)
+
+    def _engine_verdict(self, dest, source, cxx_before, entry):
+        """Loud-failure guard for one legacy-engine pass (rig run 32).
+
+        ``dest``/``source`` are the CUDA tensors (None on the host-staging
+        path, where the destination is a reused ping-pong buffer). A pass that
+        produced an all-black destination from a non-black source, or that
+        threw a C++ exception, is reported - never a silent black frame.
+        """
+        report = (crashlog.last_cxx_report()
+                  if crashlog.cxx_serial() != cxx_before else None)
+        dest_all_zero = source_has = None
+        if dest is not None:
+            dest_all_zero = not bool(dest.any())
+            source_has = bool(source.any()) if dest_all_zero else True
+        if report:
+            # The engine's own error buffer survives its swallowed throw (rig
+            # 32) - always carry it, it is the only place its complaint could
+            # be spelled out.
+            engine_says = getattr(self.manager, "last_error", "") or ""
+            if engine_says.strip():
+                report += f"\n    the engine's own error buffer: {engine_says!r}"
+        level, text = engine_output_verdict(dest_all_zero, source_has, report)
+        if level == "error":
+            raise RuntimeError(text)
+        if level == "warning" and not self._engine_warned:
+            self._engine_warned = True
+            logger.warning("%s", text)
+
+    def _sr_denoise_np(self, frame_np, reset, report=False):
+        """The SR stage for the numpy (legacy host-staging) path: numpy in, out."""
+        t = torch.from_numpy(np.ascontiguousarray(frame_np))
+        out = self._sr_denoise_frame(t, reset, device="cpu", report=report)
+        if report:
+            frame, note = out
+            return frame.numpy(), note
+        return out.numpy()
 
     def _sr_denoise_np(self, frame_np, reset):
         """The SR stage for the numpy (legacy host-staging) path: numpy in, out."""
@@ -658,6 +836,10 @@ class ReFactorDLSS5Enhancer:
 
         if self.ENGINE_MODE is not None:
             engine = self.ENGINE_MODE
+        # ANTS_LEGACY_SR_FIRST=1 creates the SR session BEFORE the legacy
+        # engine's own NGX init - the one ordering rig 32 has not tested.
+        self._prime_sr_before_engine(image, engine, pre_denoise_mode,
+                                     pre_denoise_strength)
         self.load_bridge(nr_dll_version, engine)
         native = engine == ENGINE_NATIVE
         self._nr_preset = int(_NR_PRESET_TO_INT.get(nr_model_preset, 0))
@@ -740,7 +922,6 @@ class ReFactorDLSS5Enhancer:
             # check; name what the process's CUDA context carries and, if the
             # operator asks for it, try the CUDA entry point anyway (A/B - the
             # crash box is armed on this path, so a refusal is captured).
-            from ..dlsssr import cuda_flags
             cuda_flags.log_early()
             if os.environ.get("ANTS_NR_CUDA_FORCE", "") == "1" and not engine_ok:
                 engine_ok = True
@@ -917,8 +1098,26 @@ class ReFactorDLSS5Enhancer:
                             getattr(sess, "evaluates", None)))
                 elif use_cuda:
                     if action == "sr":
-                        frame = self._sr_denoise_frame(frame, do_reset,
-                                                       device=cuda_dev)
+                        # NGX's DLSS kernels run through the CUDA DRIVER (the
+                        # core's log: NGXCubinD3D12 "Enabling CuModule kernel
+                        # path"), and the engine's zero-copy path assumes the
+                        # torch primary context that owns its device pointers.
+                        # Observe before/after; re-assert only on evidence.
+                        ctx_before = cuda_flags.ctx_flags()[0]
+                        frame, sr_note = self._sr_denoise_frame(
+                            frame, do_reset, device=cuda_dev, report=True)
+                        self._log_sr_output(sr_note)
+                        ctx_after = cuda_flags.ctx_flags()[0]
+                        if ctx_before is not None and ctx_after is not None \
+                                and ctx_after != ctx_before:
+                            logger.warning(
+                                "[ANTs] the SR pass left the CUDA context "
+                                "flags at 0x%02X (they were 0x%02X) - NGX ran "
+                                "CUDA kernels of its own. Re-asserting the "
+                                "torch primary context (device %s) before the "
+                                "legacy engine call, which assumes it.",
+                                ctx_after, ctx_before, cuda_dev)
+                            torch.cuda.set_device(cuda_dev)
                     elif action == "model":
                         frame = self._pre_denoise_frame(frame, d_model, d_strength)
                     if not frame.is_contiguous():
@@ -927,6 +1126,7 @@ class ReFactorDLSS5Enhancer:
                     # movedim view, and the engine writes interleaved rows
                     dest = torch.empty(tuple(frame.shape), device=frame.device,
                                        dtype=torch.float32)
+                    cxx_before = crashlog.cxx_serial()
                     self.manager.process_cuda(
                         frame.data_ptr(), dest.data_ptr(),
                         frame.shape[1], frame.shape[0],
@@ -934,14 +1134,19 @@ class ReFactorDLSS5Enhancer:
                     # the engine's D3D12/NGX work runs on the shared primary
                     # context - this makes the result visible to torch
                     torch.cuda.synchronize(cuda_dev)
+                    self._engine_verdict(dest, frame, cxx_before,
+                                         "dlss5nr_process_cuda_v6")
                     frame = dest
                 else:
                     if action == "sr":
-                        frame_np = self._sr_denoise_np(frame_np, do_reset)
+                        frame_np, sr_note = self._sr_denoise_np(
+                            frame_np, do_reset, report=True)
+                        self._log_sr_output(sr_note)
                     elif action == "model":
                         frame_np = self._pre_denoise_frame(
                             torch.from_numpy(frame_np), d_model, d_strength).numpy()
                     dest_np = cpu_bufs[pass_idx % len(cpu_bufs)]
+                    cxx_before = crashlog.cxx_serial()
                     self.manager.process_host(
                         source=frame_np,
                         destination=dest_np,
@@ -949,6 +1154,8 @@ class ReFactorDLSS5Enhancer:
                         reset=do_reset,
                         mask=mask_np
                     )
+                    self._engine_verdict(None, None, cxx_before,
+                                         "dlss5nr_process_v6")
                     frame_np = dest_np
 
             # HDR Colour Bridge: global, applied once after the final pass

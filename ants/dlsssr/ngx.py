@@ -98,7 +98,7 @@ NGX_ENGINE_TYPE_CUSTOM = 0
 # Console deployment marker: bumped with every host-layout change so the
 # owner's console unambiguously says WHICH build ran (run-28 attempt #1 was
 # diagnosed from a stack trace because the old file was still deployed).
-HOST_BUILD = "2026-09-21.7"
+HOST_BUILD = "2026-09-21.8"
 
 FEATURE_SR = 1    # NVSDK_NGX_Feature_SuperSampling
 FEATURE_NR = 18   # NVSDK_NGX_Feature_NeuralRendering ("CG2R")
