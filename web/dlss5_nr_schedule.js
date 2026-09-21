@@ -222,20 +222,40 @@ function fitNode(node) {
 /* Widgets that only matter for one choice of another widget (owner request:
  * pre_denoise_strength is meaningless when the pre-denoise stage is OFF).
  * Values are kept, only the UI is greyed, so switching back restores what the
- * user had. */
+ * user had.
+ *
+ * `needs_input` is the owner's fallback for the DEFAULT mode (rig run 33):
+ * "Denoise Model" with nothing wired to denoise_model runs as OFF, so the
+ * strength widget greys out there too and says why. */
 const MODE_GREY = {
     pre_denoise_mode: {
         off_values: ["OFF (no pre-denoise)"],
         greyed: ["pre_denoise_strength"],
+        needs_input: {"Denoise Model": "denoise_model"},
     },
 };
+
+/* True when an input SOCKET has a link (the fallback depends on it). */
+function inputLinked(node, name) {
+    return (node.inputs || []).some((i) => i.name === name && i.link != null);
+}
+
+/* (off, why) for one MODE rule: the mode's own OFF value, or a mode that has
+ * fallen back because the socket it needs is empty. */
+function modeIsOff(node, modeName, rule) {
+    const modeWidget = widgetByName(node, modeName);
+    if (!modeWidget) return [false, ""];
+    if (rule.off_values.includes(modeWidget.value)) return [true, " (stage OFF)"];
+    const need = rule.needs_input && rule.needs_input[modeWidget.value];
+    if (need && !inputLinked(node, need)) return [true, " (no model - stage OFF)"];
+    return [false, ""];
+}
 
 /* True when `name` is greyed by a MODE widget's choice (not by the schedule). */
 function modeDisabled(node, name) {
     for (const [modeName, rule] of Object.entries(MODE_GREY)) {
         if (!rule.greyed.includes(name)) continue;
-        const modeWidget = widgetByName(node, modeName);
-        if (modeWidget && rule.off_values.includes(modeWidget.value)) return true;
+        if (modeIsOff(node, modeName, rule)[0]) return true;
     }
     return false;
 }
@@ -244,13 +264,13 @@ function applyModeGreying(node) {
     for (const [modeName, rule] of Object.entries(MODE_GREY)) {
         const modeWidget = widgetByName(node, modeName);
         if (!modeWidget) continue;
-        const off = rule.off_values.includes(modeWidget.value);
+        const [off, why] = modeIsOff(node, modeName, rule);
         for (const name of rule.greyed) {
             const w = widgetByName(node, name);
             if (!w) continue;
             if (w.__antsLabel === undefined) w.__antsLabel = w.label ?? name;
             w.disabled = off;
-            w.label = off ? `${w.__antsLabel} (stage OFF)` : w.__antsLabel;
+            w.label = off ? `${w.__antsLabel}${why}` : w.__antsLabel;
         }
     }
 }
@@ -413,7 +433,8 @@ app.registerExtension({
             const originalConnections = node.onConnectionsChange;
             node.onConnectionsChange = function (...args) {
                 if (originalConnections) originalConnections.apply(this, args);
-                setTimeout(() => refreshEnhancerControls(node), 0);
+                setTimeout(() => { applyModeGreying(node);
+                                   refreshEnhancerControls(node); }, 0);
             };
             const originalConfigure = node.onConfigure;
             node.onConfigure = function (...args) {

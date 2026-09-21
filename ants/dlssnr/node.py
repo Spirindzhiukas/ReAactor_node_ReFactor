@@ -42,12 +42,15 @@ _NR_PRESET_TO_INT = dict(_PRESET_TO_LETTER, **{})
 _NR_PRESET_TO_INT = {"Default": 0, "J - Transformer I Crisp": 10,
                      "K - Transformer I Stable": 11,
                      "L - Transformer II Quality": 12, "M - Transformer II Fast": 13}
+PRE_DENOISE_MODEL = "Denoise Model"          # the DEFAULT (owner, rig run 33)
 PRE_DENOISE_SR = "SR (DLSS denoise)"
-PRE_DENOISE_MODEL = "Denoise Model"
 # OFF is a real mode (owner request): until it existed, "Denoise Model" without
 # a connected model was the only way to say "no pre-denoise", and a connected
 # model + strength > 0 always ran. OFF disables the stage completely, whatever
-# is connected, and the JS greys `pre_denoise_strength` out with it.
+# is connected, and the JS greys `pre_denoise_strength` out with it. "Denoise
+# Model" with nothing wired to `denoise_model` FALLS BACK to OFF (owner, rig
+# run 33: the model made default because it is the stage that actually
+# denoises; the 1:1 DLAA pass is a light AA resolve - see memory.md).
 PRE_DENOISE_OFF = "OFF (no pre-denoise)"
 ENGINE_LEGACY = "Legacy neuroframe DLLs"
 from .hdr_bridge import (
@@ -174,6 +177,39 @@ def session_cache_enabled():
         "1", "true", "yes", "on")
 
 
+def _byte_stats(payload_in, payload_out):
+    """(mean |delta| in 0..255 units, % of channels changed, channel label).
+
+    Alpha is excluded when both payloads are RGBA8 (it is constant 255 in
+    every payload this pack builds, so counting it would dilute the mean by a
+    quarter). Returns None when the buffers do not line up - the callers then
+    report the verdict without numbers, exactly as before.
+    """
+    try:
+        a = np.frombuffer(payload_in, dtype=np.uint8)
+        b = np.frombuffer(payload_out, dtype=np.uint8)
+    except (TypeError, ValueError):
+        return None
+    if a.size != b.size or a.size == 0:
+        return None
+    label = "all bytes"
+    if a.size % 4 == 0:
+        a = a.reshape(-1, 4)[:, :3].reshape(-1)
+        b = b.reshape(-1, 4)[:, :3].reshape(-1)
+        label = "RGB (alpha excluded)"
+    diff = np.abs(a.astype(np.int16) - b.astype(np.int16))
+    return float(diff.mean()), 100.0 * float((diff != 0).mean()), label
+
+
+def _delta_text(stats):
+    """The numeric tail of an SR verdict: how much the pass changed."""
+    if stats is None:
+        return ""
+    mean, changed, label = stats
+    return (" [mean |delta| %.2f/255 over %s, %.1f%% of channels changed]"
+            % (mean, label, changed))
+
+
 def sr_output_verdict(payload_in, payload_out):
     """(level, text) for one SR pre-denoise pass - the SR output smoke test.
 
@@ -188,12 +224,15 @@ def sr_output_verdict(payload_in, payload_out):
     no-op (byte-identical output - the pass ran and changed nothing), "info"
     when it did something. The caller logs; it never raises.
     """
+    stats = _byte_stats(payload_in, payload_out)
     if payload_in == payload_out:
         return "warning", ("[ANTs] SR stage: the DLAA pass returned the input "
                            "BYTE-IDENTICAL - the pass ran (hr=1) and changed "
-                           "nothing. With MV.Scale 0 + zeroed depth/motion "
-                           "that is the shape of a no-op; if the frame should "
-                           "be denoised, the parameters are the place to look.")
+                           "nothing at all (any change is below the 8-bit "
+                           "step). With MV.Scale 0 + zeroed depth/motion that "
+                           "is the shape of a no-op; if the frame should be "
+                           "denoised, the parameters are the place to look."
+                           + _delta_text(stats))
     if not payload_out.strip(b"\x00"):
         return "error", ("[ANTs] SR stage: the DLAA pass returned an ALL-BLACK "
                          "frame for a non-black input - the output texture was "
@@ -202,11 +241,16 @@ def sr_output_verdict(payload_in, payload_out):
                          "frame handed to the engine is black regardless of "
                          "the engine's own state; report this line.\n"
                          "    To skip the stage: pre_denoise_mode OFF or "
-                         "sr_strength 0.")
-    zero = payload_out.count(0)
+                         "sr_strength 0."
+                         + _delta_text(stats))
+    # HOW MUCH it changed, in one line: the owner's "very weak" reading (rig
+    # run 33) needed a number, not an impression. A 1:1 DLAA pass with a reset
+    # every frame and no jitter/motion is a light AA resolve, so a small mean
+    # is expected - a LARGE one would mean the stage is doing something else.
     return "info", ("[ANTs] SR stage: DLAA output differs from the input "
-                    "(%d of %d bytes zero) - the pass produced a real image.",
-                    zero, len(payload_out))
+                    "(%d of %d bytes zero) - the pass produced a real image."
+                    + _delta_text(stats),
+                    payload_out.count(0), len(payload_out))
 
 
 def engine_output_verdict(dest_all_zero, source_has_content, cxx_report):
@@ -248,6 +292,22 @@ def engine_output_verdict(dest_all_zero, source_has_content, cxx_report):
     return None, ""
 
 
+def sr_accum_enabled():
+    """``ANTS_SR_ACCUM=1`` - let the SR stage keep its temporal history across
+    the passes of one prompt (diagnostic, rig run 33).
+
+    The 1:1 DLAA pass resets every pass by default, so its temporal half has
+    nothing to accumulate with - which is exactly why its effect is a light AA
+    resolve instead of a denoise. With this armed, only each image's FIRST
+    pass keeps the reset decision (`temporal_history`); every later pass of
+    that image evaluates WITHOUT reset, i.e. as an additional observation of
+    the same content, the shape DLAA is built for. Opt-in: it changes the
+    image on purpose, so it is a measurement, not a default.
+    """
+    return os.environ.get("ANTS_SR_ACCUM", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def soak_enabled():
     """``ANTS_NR_SOAK=1`` - one line per run with handles + torch VRAM.
 
@@ -285,7 +345,9 @@ def pre_denoise_action(mode, strength, has_model):
 
     SR mode needs no model - the 1:1 DLAA pass through our own SR host IS the
     stage, and the strength is only its on/off gate. Model mode needs the wired
-    model. OFF, or a strength of ~0, disables the stage for that pass.
+    model: **without one it is OFF for that pass** (the owner's fallback for
+    the default mode - the node says so once per run). OFF, or a strength of
+    ~0, disables the stage for that pass.
 
     Engine-independent by construction: the SR stage runs BEFORE whichever NR
     engine is selected (native NGX or the legacy neuroframe engine), because it
@@ -319,6 +381,7 @@ class ReFactorDLSS5Enhancer:
         self._native_checked = False     # first native frame of this run
         self._soak_logged = False
         self._sr_checked = False         # the SR pass's output verdict (rig 32)
+        self._sr_accum = 0               # SR stage passes seen for this image
         self._engine_warned = False      # "did your C++ throw recover?" (rig 32)
         self._nr_preset = 0
         self._sr_choice = "auto"
@@ -360,16 +423,18 @@ class ReFactorDLSS5Enhancer:
                                      "tooltip": "NR model preset hint (J/K/L/M). Best-effort: the stock NR "
                                                 "runtime ignores unknown preset hints; builds that read the "
                                                 "hint switch transformer models."}),
-                "pre_denoise_mode": ([PRE_DENOISE_OFF, PRE_DENOISE_SR, PRE_DENOISE_MODEL],
-                                     {"default": PRE_DENOISE_SR,
-                                      "tooltip": "What runs as the pre-SR denoise pass: the ANTs DLSS SR host "
+                "pre_denoise_mode": ([PRE_DENOISE_MODEL, PRE_DENOISE_SR, PRE_DENOISE_OFF],
+                                     {"default": PRE_DENOISE_MODEL,
+                                      "tooltip": "What runs as the pre-SR denoise pass: the "
+                                                 "wired upscale/denoise model (SCUNet-style, blended by "
+                                                 "pre_denoise_strength), the ANTs DLSS SR host "
                                                  "(1:1 DLAA with the chosen sr_dll_version + sr_model; runs on BOTH "
                                                  "engines - it is our host, not the engine's; needs "
-                                                 "nvngx_dlss*.dll in models/DLSS/SR/), the "
-                                                 "wired upscale/denoise model (SCUNet-style), or OFF - no "
+                                                 "nvngx_dlss*.dll in models/DLSS/SR/), or OFF - no "
                                                  "pre-denoise stage at all, even with a model connected and "
                                                  "pre_denoise_strength above 0 (the widget greys out). "
-                                                 "Default: SR."}),
+                                                 "Default: Denoise Model - with nothing connected to the "
+                                                 "denoise_model socket it falls back to OFF for that run."}),
                 "gpu_acceleration": ([GPU_AUTO, GPU_FORCE, GPU_OFF],
                                      {"default": GPU_AUTO,
                                       "tooltip": "Auto/Force: frames are processed GPU-resident via the engine's "
@@ -697,6 +762,20 @@ class ReFactorDLSS5Enhancer:
             self._sr_sessions[key] = sess
         return sess
 
+    def _sr_reset_for(self, do_reset):
+        """The reset flag this pass hands the SR stage (ANTS_SR_ACCUM=1).
+
+        Without the knob it is exactly the plan's `do_reset`. With it, the
+        first pass of each image keeps `do_reset` and the later ones do not
+        reset, so the network accumulates: the answer to "could this pass be
+        stronger at all, or is a light resolve all it does?".
+        """
+        if not sr_accum_enabled():
+            return do_reset
+        first = self._sr_accum == 0
+        self._sr_accum += 1
+        return do_reset if first else False
+
     @staticmethod
     def _frame_digest(frame_t):
         """A cheap content digest of a torch frame (SR verdict identity test).
@@ -854,7 +933,7 @@ class ReFactorDLSS5Enhancer:
                 hdr_transfer_strength, bridge_color_strength, black_lever,
                 pre_denoise_strength, denoise_model=None, nr_schedule=None, mask=None,
                 engine=ENGINE_NATIVE, sr_dll_version="auto", fg_dll_version="auto",
-                sr_model=SR_MODEL_DEFAULT, pre_denoise_mode=PRE_DENOISE_SR,
+                sr_model=SR_MODEL_DEFAULT, pre_denoise_mode=PRE_DENOISE_MODEL,
                 gpu_acceleration=GPU_AUTO, nr_model_preset="Default"):
 
         if self.ENGINE_MODE is not None:
@@ -890,6 +969,21 @@ class ReFactorDLSS5Enhancer:
             logger.status("[ANTs] pre-denoise: SR mode - the 1:1 DLAA pass runs "
                           "before the engine on ANY engine (needs nvngx_dlss*.dll "
                           "in models/DLSS/SR/).")
+        if pre_denoise_mode == PRE_DENOISE_SR and sr_accum_enabled():
+            logger.status(
+                "[ANTs] SR stage: ANTS_SR_ACCUM=1 - the DLAA pass keeps its "
+                "history across the passes of ONE image (only that image's "
+                "first pass resets). This is the measurement of how much of "
+                "the SR stage's effect is temporal; it is not the default.")
+        if pre_denoise_mode == PRE_DENOISE_MODEL and denoise_model is None:
+            # The default mode (owner, rig run 33) FALLS BACK to OFF when
+            # nothing is wired - said once and plainly, because a default that
+            # silently does nothing is indistinguishable from a broken default.
+            logger.status(
+                "[ANTs] pre-denoise: mode 'Denoise Model' but nothing is "
+                "connected to the denoise_model socket - falling back to OFF "
+                "for this run. Wire an upscale/denoise model (SCUNet-style), or "
+                "pick 'SR (DLSS denoise)' (no model needed).")
 
         settings = {
             "style": nr_schedule_lib.STYLES[style], "intensity": intensity,
@@ -985,6 +1079,13 @@ class ReFactorDLSS5Enhancer:
             i + 1 for i, spec in enumerate(plan)
             if pre_denoise_action(pre_denoise_mode, spec["denoise_strength"],
                                  spec["denoise_model"] is not None) is not None]
+        if not denoise_passes and pre_denoise_mode == PRE_DENOISE_MODEL:
+            # Schedule case: the mode is the default one, the main socket is
+            # empty and no scheduled pass carries a model either - OFF it is.
+            logger.status(
+                "[ANTs] pre-denoise: mode 'Denoise Model' but no pass of this "
+                "run has a model (denoise_model is empty and the schedule "
+                "carries none) - falling back to OFF for this run.")
         if denoise_passes:
             if pre_denoise_mode == PRE_DENOISE_SR:
                 engine_name = "native NGX" if native else "legacy"
@@ -1027,6 +1128,7 @@ class ReFactorDLSS5Enhancer:
                 cpu_bufs.append(np.empty_like(src_np[0]))
 
         for i in range(len(image)):
+            self._sr_accum = 0     # a new image starts a new SR history
 
             if state.interrupted or model_management.processing_interrupted():
                 logger.status("Interrupted by User")
@@ -1080,7 +1182,8 @@ class ReFactorDLSS5Enhancer:
                 if native:
                     if action == "sr":
                         frame_t, sr_note = self._sr_denoise_frame(
-                            frame_t, do_reset, report=True)
+                            frame_t, self._sr_reset_for(do_reset),
+                            report=True)
                         self._log_sr_output(sr_note)
                     elif action == "model":
                         frame_t = self._pre_denoise_frame(frame_t, d_model, d_strength)
@@ -1130,7 +1233,8 @@ class ReFactorDLSS5Enhancer:
                         # Observe before/after; re-assert only on evidence.
                         ctx_before = cuda_flags.ctx_flags()[0]
                         frame, sr_note = self._sr_denoise_frame(
-                            frame, do_reset, device=cuda_dev, report=True)
+                            frame, self._sr_reset_for(do_reset),
+                            device=cuda_dev, report=True)
                         self._log_sr_output(sr_note)
                         ctx_after = cuda_flags.ctx_flags()[0]
                         if ctx_before is not None and ctx_after is not None \
@@ -1165,7 +1269,8 @@ class ReFactorDLSS5Enhancer:
                 else:
                     if action == "sr":
                         frame_np, sr_note = self._sr_denoise_np(
-                            frame_np, do_reset, report=True)
+                            frame_np, self._sr_reset_for(do_reset),
+                            report=True)
                         self._log_sr_output(sr_note)
                     elif action == "model":
                         frame_np = self._pre_denoise_frame(

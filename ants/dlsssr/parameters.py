@@ -292,6 +292,15 @@ class CoreParameterObject(ComObject):
         self.flat_api = flat_api or {}
         self._slots = flat_api_slots(None, abi)
         self.written = []   # parameter names we set, for diagnostics/logging
+        # Parameters the runtime REFUSED. NGX answers every Set with a result
+        # code, and the flat C API is the one route where we may read it
+        # (ABI-exact - see the module docstring); the vtable route cannot
+        # (the Set overloads' return type is not pinned by the shipped ABI we
+        # map). Rig 33 needed exactly this: the host asked for the L model
+        # preset while the core's own log reported `ModelPreset 11 applied`,
+        # so "did the runtime even take our parameter?" had to stop being a
+        # guess.
+        self.rejected = []
 
     @property
     def backend(self):
@@ -308,8 +317,31 @@ class CoreParameterObject(ComObject):
         fn = self.flat_api.get(fn_name)
         if fn is None:
             return False
-        fn(self.ptr, self._name_buf(name), argtype(value))
+        hr = fn(self.ptr, self._name_buf(name), argtype(value))
+        try:
+            code = int(hr) & 0xFFFFFFFF
+        except (TypeError, ValueError):
+            code = None
+        if code is not None and code != NGX_SUCCESS:
+            self.rejected.append((name, code))
         return True
+
+    def set_report(self, names):
+        """One line: did the runtime take these parameters?
+
+        Only the flat C API can answer - on the vtable backend the Set
+        overloads' results are not readable, and a guess printed as fact is
+        worse than saying so.
+        """
+        if self.backend != "c-api":
+            return (f"set results not readable on this backend "
+                    f"({self.backend})")
+        wanted = [n for n in names]
+        bad = [(n, hr) for n, hr in self.rejected if n in wanted]
+        if bad:
+            return "REJECTED by the runtime: " + ", ".join(
+                f"{n} (0x{hr:08X})" for n, hr in bad)
+        return "taken by the runtime"
 
     def set_u32(self, name, value):
         if self._flat("NVSDK_NGX_Parameter_SetUI", name, value, _CU32):

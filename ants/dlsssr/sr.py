@@ -322,6 +322,7 @@ class DlssSrSession:
                 continue
             _log().status("[ANTs] SR session route: %s - %s", label,
                           os.path.basename(str(path)))
+            self._report_preset_hint(session, quality, preset)
             return session
 
         detail = "\n".join(f"    - {label}: {exc}" for label, exc in failures)
@@ -341,6 +342,38 @@ class DlssSrSession:
             "and running this stage first is the quick way to tell the two "
             "apart.\n"
             "    To skip the stage: pre_denoise_mode OFF or sr_strength 0.")
+
+    @staticmethod
+    def _report_preset_hint(session, quality, preset):
+        """Say which model hint we asked for - and whether it was taken.
+
+        Rig 33 investigation: the host asks for `DLSS.Hint.Render.Preset.DLAA`
+        = 12 (sr_model 'L'), while the driver core's own log for the SAME
+        create reports `NGXOverrideStatusCallback: ModelPreset 11 applied`
+        (K). Those two lines together say which of the two causes it is:
+
+        * REJECTED here -> the runtime never accepted our parameter, so the
+          preset (and any other name it drops) arrives at its own default;
+        * taken here, another preset in the core's log -> the value landed in
+          the map and something driver-side overrode it (a per-app DLSS
+          override / the NVIDIA App), which is not our call path.
+
+        No behaviour change: this is the measurement that was missing.
+        """
+        name = _PRESET_PARAM.get(quality, _PRESET_PARAM[0])
+        params = getattr(session, "params", None)
+        try:
+            value = DLSS_RENDER_PRESETS[preset]
+        except KeyError:
+            value = -1
+        if not hasattr(params, "set_report"):
+            _log().status("[ANTs] SR model preset: asked for %s = %s "
+                          "(sr_model '%s') - no parameter object to check.",
+                          name, value, preset)
+            return
+        _log().status("[ANTs] SR model preset: asked for %s = %s (sr_model "
+                      "'%s') - %s.", name, value, preset,
+                      params.set_report([name, "DLSS.Hint.Render.Preset.Default"]))
 
     @staticmethod
     def _quiet_close(session):

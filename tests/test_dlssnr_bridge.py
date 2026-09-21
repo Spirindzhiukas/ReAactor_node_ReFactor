@@ -166,9 +166,11 @@ def main():
     # hr=1 from CreateFeature and EvaluateFeature). A smoke test on a synthetic
     # image is what keeps it honest without a GPU: the payload round-trips, a
     # real change passes, a no-op and a NaN do not.
-    from ants.dlssnr.node import (engine_output_verdict, native_output_verdict,
+    from ants.dlssnr.node import (ReFactorDLSS5Enhancer, _byte_stats, _delta_text,
+                                  engine_output_verdict, native_output_verdict,
                                   rgba_bytes_from_rgb8, session_cache_enabled,
-                                  soak_enabled, soak_line, sr_output_verdict)
+                                  soak_enabled, soak_line, sr_accum_enabled,
+                                  sr_output_verdict)
     import os as _os
     import pathlib as _pl
     rng = np.random.default_rng(7)
@@ -214,6 +216,51 @@ def main():
           and sr_output_verdict(payload, changed)[0] == "info"
           and "differs from the input" in sr_output_verdict(payload, changed)[1][0]
           and sr_output_verdict(black, black)[0] == "warning")
+    # ---- rig run 33: "the SR output is very weak" - in numbers, not words ----
+    # The owner's reading of the 1:1 DLAA pass was "very weak / barely
+    # noticeable". The verdict now carries the measurement (mean |delta| in
+    # 0..255 units, share of changed channels, alpha excluded because it is
+    # constant), so the next run says HOW weak instead of reproducing an
+    # impression.
+    check("smoke: the SR verdict carries NUMBERS - mean |delta| over RGB with "
+          "the alpha excluded, and the share of channels the pass moved",
+          _byte_stats(payload, payload) == (0.0, 0.0, "RGB (alpha excluded)")
+          and _byte_stats(payload, changed)[0] > 0.0
+          and _byte_stats(payload, changed)[1] > 0.0
+          and _byte_stats(payload, changed)[2] == "RGB (alpha excluded)"
+          and "mean |delta|" in _delta_text(_byte_stats(payload, changed))
+          and "mean |delta|" in sr_output_verdict(payload, changed)[1][0]
+          and "mean |delta|" in sr_output_verdict(payload, payload)[1]
+          and _byte_stats(payload, payload[:-4]) is None
+          and _delta_text(None) == "")
+    # ---- the accumulation experiment: is the weakness structural? ----------
+    # DLAA's denoise is temporal and the SR stage resets every pass, so the
+    # pass can only resolve lightly. ANTS_SR_ACCUM=1 keeps the history across
+    # the passes of ONE image (only its first pass resets) - the measurement
+    # the next rig run can act on. Opt-in, and the counter is per image.
+    _os.environ["ANTS_SR_ACCUM"] = "1"
+    _armed = sr_accum_enabled()
+    _bare = ReFactorDLSS5Enhancer.__new__(ReFactorDLSS5Enhancer)
+    _bare._sr_accum = 0
+    _seq = [_bare._sr_reset_for(True), _bare._sr_reset_for(True),
+            _bare._sr_reset_for(True)]
+    _bare._sr_accum = 0                      # a new image starts over
+    _seq_continuous = [_bare._sr_reset_for(True), _bare._sr_reset_for(True)]
+    del _os.environ["ANTS_SR_ACCUM"]
+    _bare._sr_accum = 0
+    _off_seq = [_bare._sr_reset_for(True), _bare._sr_reset_for(False),
+                _bare._sr_reset_for(True)]
+    check("smoke: ANTS_SR_ACCUM=1 is opt-in, keeps history only for the LATER "
+          "passes of one image (the first keeps temporal_history), and does "
+          "nothing at all when unset",
+          not sr_accum_enabled()
+          and _armed
+          and _seq == [True, False, False]
+          and _seq_continuous == [True, False]
+          and _off_seq == [True, False, True]
+          and _bare._sr_accum == 0     # unset: the counter is never touched
+          and "ANTS_SR_ACCUM" in _pl.Path(REPO / "ants" / "dlssnr" / "node.py"
+                                          ).read_text())
     cxx = ("[ANTs] C++ exception 0xE06D7363 (magic 0x19930520) [in-flight "
            "call: dlss5nr_process_cuda_v6]")
     check("smoke: the legacy engine verdict fails LOUDLY when the destination "
@@ -323,10 +370,12 @@ def main():
           "native engine",
           "SR pre-denoise needs the native NGX engine" not in node_src
           and "_sr_denoise_frame(\n" in node_src
-          and "frame, do_reset, device=cuda_dev, report=True" in node_src
+          and "frame, self._sr_reset_for(do_reset)," in node_src
+          and "device=cuda_dev, report=True" in node_src
           and "_sr_denoise_np(\n" in node_src
-          and "frame_np, do_reset, report=True" in node_src
+          and "frame_np, self._sr_reset_for(do_reset)," in node_src
           and "def _sr_denoise_np" in node_src
+          and node_src.count("self._sr_reset_for(do_reset)") == 3
           and "sr_stage=pre_denoise_mode == PRE_DENOISE_SR" in node_src)
 
     # ---- dispatch ----
@@ -549,11 +598,20 @@ def main():
     check("dlss5: NR preset widget present, defaults to driver Default",
           req["nr_model_preset"][0][0] == "Default"
           and req["nr_model_preset"][1]["default"] == "Default")
-    check("dlss5: pre_denoise_mode present, defaults to SR, model choice named like the input",
-          req["pre_denoise_mode"][1]["default"] == "SR (DLSS denoise)"
+    check("dlss5: pre_denoise_mode present, DEFAULTS to Denoise Model (rig run 33: "
+          "the model is the stage that denoises), model choice named like the input",
+          req["pre_denoise_mode"][1]["default"] == "Denoise Model"
+          and req["pre_denoise_mode"][0][0] == "Denoise Model"
           and "SR (DLSS denoise)" in req["pre_denoise_mode"][0]
           and "Denoise Model" in req["pre_denoise_mode"][0])
     node_src = _pl.Path(REPO / "ants" / "dlssnr" / "node.py").read_text()
+    check("dlss5: the DEFAULT pre-denoise mode falls back to OFF without a model "
+          "(owner, rig run 33) - once per run, in words, and in the enhance default",
+          "pre_denoise_mode=PRE_DENOISE_MODEL" in node_src
+          and node_src.count("falling back to OFF") == 2
+          and "but nothing is " in node_src
+          and "has a model (denoise_model is empty and the schedule " in node_src
+          and "def sr_accum_enabled" in node_src)
     check("dlss5: NR + SR session factories share _ensure_native_gpu (run-8 ordering fix)",
           node_src.count("self._ensure_native_gpu()") >= 2
           and "def _ensure_native_gpu" in node_src

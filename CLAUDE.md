@@ -108,6 +108,14 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
    SDK runtime with the swap faults inside `Init_Ext` (0x15 = the version constant landing in the
    feature-info pointer slot, rig 29). A runtime FAULT stops the ladder - one loud `[ANTs]` error,
    RESTART, never a second guess.
+7. **The default pre-denoise mode is `Denoise Model`, and it FALLS BACK to OFF** (owner, rig run 33):
+   the 1:1 DLAA stage is a light AA resolve by contract (no jitter sequence, zeroed MVs, `Reset`
+   every pass - it exists to resolve a jittered multi-frame history it does not get from a finished
+   still), while a wired restoration model (SCUNet-style) is what actually denoises. With nothing on
+   the `denoise_model` socket the stage does nothing for that run, in plain words once per run, and
+   the UI greys `pre_denoise_strength` as `(no model - stage OFF)`. Never "fix" the default by
+   collapsing SR's strength or re-gating the stage - `SR` stays exactly as selectable as before,
+   and `ANTS_SR_ACCUM=1` is a MEASUREMENT (history across one image's passes), not a new default.
 
 ## Engineering conventions
 
@@ -119,7 +127,7 @@ work they describe**, so a fresh clone of `main` is fully self-documenting.
 - **Gates before every commit:** `pyflakes` over `ants/`, `nodes.py`, `tests/`
   (benign exceptions: star-import notes in `codeformer_arch.py`); `tests/test_pyflakes.py`,
   `tests/test_scope_check.py`, `tests/smoke_import.py` (asserts exactly 22 nodes), plus
-  the full suite. Current tally: **482 checks** (see `memory.md`).
+  the full suite. Current tally: **486 checks** (see `memory.md`).
 - **NGX has ONE context per process** (rig runs 29/30 + Claude Sonnet 5): the FIRST `Init` pins the
   app id, the project id and the **feature-library search paths** - a later session can only re-use
   that context, never add a folder. Every ANTs session therefore goes through the same geometry:

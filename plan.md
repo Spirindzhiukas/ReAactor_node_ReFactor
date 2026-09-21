@@ -321,6 +321,27 @@ python and never registers callbacks.
       list and then closes/executes/waits on the RUNTIME's list - without that, nothing the DLSS core
       recorded ran and the stage returned a black frame (run 32's black output). The native path now
       reports the SR verdict too, and the identity test is a content digest.
+- [x] **PRE-DENOISE DEFAULT (owner, rig run 33)**: `pre_denoise_mode` defaults to `Denoise Model`
+      (the stage that actually denoises) and falls back to OFF - once per run, in words - when
+      nothing is wired to `denoise_model` (single-pass AND schedule). The UI greys
+      `pre_denoise_strength` as `(no model - stage OFF)` until a model is connected.
+- [ ] **SR STRENGTH QUESTION (rig run 33, open - measurement first)**: the 1:1 DLAA pass is a light
+      AA resolve by contract (no jitter sequence, zeroed MVs, `Reset` every pass - see the run-33
+      investigation in memory.md), so "very weak next to SCUNet" is expected. Two measurements say
+      whether anything of ours is also wrong:
+      (1) **the preset hint** - our route line now prints
+      `SR model preset: asked for DLSS.Hint.Render.Preset.DLAA = 12 - taken / REJECTED / not readable`,
+      next to the core's own `ModelPreset NN applied`. Run the same image with `sr_model` = K and M:
+      a core line that never changes means the hint (or the whole per-mode parameter) is not reaching
+      the feature; a line that follows the widget means a driver-side override wins.
+      (2) **the temporal half** - `ANTS_SR_ACCUM=1` keeps the DLAA history across the passes of ONE
+      image (only its first pass resets). If the image changes visibly with it, the weakness is the
+      reset pattern; if it does not, it is the synthetic contract.
+      The SR verdict's new `[mean |delta| x.xx/255 ...]` number quantifies both.
+- [ ] **DECISION AFTER THAT (not built)**: if a stronger SR stage is wanted, the only honest route is
+      a synthesized jitter sequence (guide's 8 phases for DLAA, pixel space, sub-pixel-shifted copies
+      of the still with matching `Jitter.Offset`, history kept) - ~8 evaluations per image. Otherwise
+      SR stays a light AA resolve and `Denoise Model` (the new default) is the denoise stage.
 - [ ] **SR + LEGACY ENGINE (rig run 32/33, open)**: with the SR image fix in, the remaining question
       is the `dlss5nr_process_cuda_v6` C++ throw from run 32 (`0xE06D7363`) - the engine's own
       handler swallows it, the destination is never written and the prompt used to end with a black

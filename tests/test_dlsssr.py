@@ -636,8 +636,11 @@ def _predenoise_off_check():
     src = (REPO / "ants" / "dlssnr" / "node.py").read_text()
     js = (REPO / "web" / "dlss5_nr_schedule.js").read_text()
     return ("OFF (no pre-denoise)" in modes
-            and modes[0] == nr_node.PRE_DENOISE_OFF
-            and modes.index(nr_node.PRE_DENOISE_OFF) == 0
+            # rig run 33: "Denoise Model" is the DEFAULT mode (the owner made
+            # it default because it is the stage that actually denoises), so it
+            # leads the list; OFF keeps its own behaviour
+            and modes[0] == nr_node.PRE_DENOISE_MODEL
+            and modes.index(nr_node.PRE_DENOISE_MODEL) == 0
             and "pre_denoise_mode == PRE_DENOISE_OFF" in src
             and "denoise_passes = [] if pre_denoise_mode == PRE_DENOISE_OFF" in src
             # the selection rule itself (2026-09-21): OFF never runs, whatever
@@ -646,7 +649,16 @@ def _predenoise_off_check():
             and nr_node.pre_denoise_action(nr_node.PRE_DENOISE_OFF, 1.0, True) is None
             and nr_node.pre_denoise_action(nr_node.PRE_DENOISE_OFF, 1.0, False) is None
             and nr_node.pre_denoise_action(nr_node.PRE_DENOISE_SR, 1.0, False) == "sr"
+            # the owner's fallback: the default mode without a model IS off
             and nr_node.pre_denoise_action(nr_node.PRE_DENOISE_MODEL, 1.0, False) is None
+            and nr_node.pre_denoise_action(nr_node.PRE_DENOISE_MODEL, 1.0, True) == "model"
+            and "falling back to OFF" in src
+            # the strength widget greys out for that fallback too (the model
+            # socket decides, re-evaluated whenever a link changes)
+            and "needs_input" in js
+            and "no model - stage OFF" in js
+            and "function inputLinked(node, name)" in js
+            and "if (!rule.greyed.includes(name)) continue;" in js
             and "action = pre_denoise_action(" in src
             and "stage OFF" in js
             and '"pre_denoise_strength"' in js
@@ -1516,6 +1528,22 @@ def main():
           and "d3d.state_name(uav)" in nr_src
           and "create_input_texture2d" in (REPO / "ants" / "dlsssr" / "sr.py").read_text())
     sr_src = (REPO / "ants" / "dlsssr" / "sr.py").read_text()
+    params_src = (REPO / "ants" / "dlsssr" / "parameters.py").read_text()
+    check("sr: the MODEL PRESET we ask for is reported after create, together "
+          "with whether the runtime took it (rig 33: the host asks for L=12 on "
+          "'DLSS.Hint.Render.Preset.DLAA' while the core's own log says "
+          "'ModelPreset 11 applied' - a rejected parameter means the runtime "
+          "never took the hint, a taken one pointing at another applied preset "
+          "means a driver-side override did)",
+          "def _report_preset_hint" in sr_src
+          and "self._report_preset_hint(session, quality, preset)" in sr_src
+          and '"DLSS.Hint.Render.Preset.Default"' in sr_src
+          and "set_report" in sr_src
+          and "def set_report" in params_src
+          and "REJECTED by the runtime" in params_src
+          and "set results not readable on this backend" in params_src
+          and "self.rejected = []" in params_src
+          and "if code is not None and code != NGX_SUCCESS:" in params_src)
     check("sr: the DLAA pass DRAINS our list before the feature call and "
           "closes/executes/waits on the RUNTIME's list afterwards (rig 32: "
           "without the drain the runtime gets a list that is not empty, and "

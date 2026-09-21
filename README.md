@@ -160,13 +160,25 @@ caps how many lines are printed). The probe arms it automatically, because that 
 which a sentence like "DENY_SHADER_RESOURCE can only be set with ALLOW_DEPTH_STENCIL" ends an
 investigation instead of starting one.
 
-**Pre-SR denoise (optional, and now switchable OFF):** `pre_denoise_mode` has three values — the
-ANTs SR host (`SR (DLSS denoise)`), a wired upscale/denoise model (`Denoise Model`), and
-**`OFF (no pre-denoise)`**, which disables the stage completely: a connected model and a
-`pre_denoise_strength` above zero are ignored (and said so in the console), and the widget greys out in
-the UI while keeping its value. connect a 1x denoising/restoration model — `ANTs Upscale Model Loader` →
-the node's `denoise_model` socket (SCUNet, PureScale2 `1x_PureVision`, …) — it runs through the
-comfy-native tiled pipeline *before* the DLSS-NR engine, with a `pre_denoise_strength` blend.
+**Pre-SR denoise (default: `Denoise Model`):** `pre_denoise_mode` has three values — the **default**
+`Denoise Model` (a wired upscale/denoise model, SCUNet-style, blended by `pre_denoise_strength`), the
+ANTs SR host (`SR (DLSS denoise)`) and **`OFF (no pre-denoise)`**, which disables the stage
+completely: a connected model and a `pre_denoise_strength` above zero are ignored (and said so in the
+console), and the widget greys out in the UI while keeping its value. **`Denoise Model` falls back to
+OFF when nothing is connected to the `denoise_model` socket** — the node says so once per run and the
+UI greys `pre_denoise_strength` as `(no model - stage OFF)` until a model is wired. Wire a 1x
+denoising/restoration model — `ANTs Upscale Model Loader` → the node's `denoise_model` socket (SCUNet,
+PureScale2 `1x_PureVision`, …) — and it runs through the comfy-native tiled pipeline *before* the
+DLSS-NR engine, with a `pre_denoise_strength` blend.
+
+**`SR (DLSS denoise)` is a different thing, and deliberately light:** it is a 1:1 DLAA pass through
+the ANTs NGX host (our own stage, so it runs before *either* engine). DLAA is the DLSS Super
+Resolution network at native resolution, whose job is to resolve a *jittered multi-frame history* into
+anti-aliased, stable detail — a single finished frame has no jitter phase and (here) no motion
+vectors, so what is left is a small spatial resolve, not a restoration. Expect a subtle change; use
+`Denoise Model` when you want SCUNet-class denoising. The pass prints its own number
+(`[ANTs] SR stage: ... [mean |delta| x.xx/255 over RGB ...]`), so "how weak" is measurable rather than
+a matter of opinion.
 
 **GPU acceleration needs a CUDA-capable helper engine.** The zero-copy path (`dlss5nr_process_cuda_v6`
 in the neuroframe engine) is ~20-25x faster than CPU staging. The node logs which engine build it

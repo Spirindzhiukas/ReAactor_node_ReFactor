@@ -16,8 +16,8 @@ live in `CLAUDE.md`; the active checklist lives in `plan.md`.
   itself now RUNS** (core init, feature 1, Evaluate all `hr=0x1`) while the legacy engine's own
   pass threw a swallowed C++ exception and returned a black frame with no error - both blind
   spots now have loud verdicts
-- **Suite:** ALL GREEN — 482 checks + 2 scanners + smoke_import (22 nodes)
-  (`test_dlssnr_bridge` 118, `test_dlsssr` 110, `test_native_flow` 67,
+- **Suite:** ALL GREEN — 486 checks + 2 scanners + smoke_import (22 nodes)
+  (`test_dlssnr_bridge` 121, `test_dlsssr` 111, `test_native_flow` 67,
   `test_runtime_surface` 58, `test_nr_schedule` 35, `test_upres` 27,
   `test_pure_helpers` 26, `test_facerestore_routing` 21, `test_swapper_state`
   13, `test_detection_state_dict` 7)
@@ -122,7 +122,7 @@ DLSS5 needs RTX 40/50 + driver ≥ 616.x.
 | smoke_import.py | — | import + 22-node assert + socket/execute wiring |
 | test_pyflakes.py, test_scope_check.py | — | gates |
 
-**Total: 482 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.9`; 22 nodes; package `ants/`).**
+**Total: 486 checks, all green (2026-09-21, `HOST_BUILD` `2026-09-21.10`; 22 nodes; package `ants/`).**
 Sandbox venv: numpy, opencv-python-headless, pillow, pyflakes, pefile (NO torch — stub harness only).
 huggingface.co is TLS-blocked from the sandbox (DLL zips can't be downloaded there — verify engine
 versions on the owner rig).
@@ -1336,9 +1336,83 @@ is why prompt 04:38 reached a black frame); (c) the verdict compares the frame t
 content digest (`_frame_digest`, 4096 sampled values) and reports an identity pass as a warning
 ("all-black stays all-black") without ever allocating a second full frame, so a legitimate
 all-black input cannot raise a false error while an all-black output from real input still does.
-- Suite: **482 checks** (dlsssr 110, dlssnr_bridge 118, native_flow 67, runtime_surface 58,
-  nr_schedule 35). `HOST_BUILD` `2026-09-21.9`. Rig confirmation of the SR image is PENDING - the
-  next prompt either shows a denoised frame or names what the pass left behind.
+- Suite: **482 checks** at that commit (dlsssr 110, dlssnr_bridge 118, native_flow 67,
+  runtime_surface 58, nr_schedule 35). `HOST_BUILD` `2026-09-21.9`.
+
+### 2026-09-21 (rig run 33, owner's reply) - the SR image is real and WEAK: default changed, and why 1:1 DLAA is a light pass
+**The submit fix worked**: the owner reports no crash and a *distinctly different* final image on BOTH
+engines with `pre_denoise_mode: SR`. His reading of the SR stage itself, though, is "very weak or it
+just simply sucks compared to something like scunet models" - which is the right question to ask, and
+it has two halves: a design one he answered himself, and an investigation.
+
+**Owner decision #1 (shipped, this commit): `pre_denoise_mode` DEFAULTS to `Denoise Model`.** The
+list now leads with it, `enhance()`'s default follows, and a mode that finds nothing on the
+`denoise_model` socket (single-pass AND schedule case: no pass carries a model) **falls back to OFF
+for that run** - said once, in plain words, because a default that silently does nothing is
+indistinguishable from a broken default. The UI follows suit: `pre_denoise_strength` greys out with
+the label `(no model - stage OFF)` whenever the model socket is empty, re-evaluated on every
+connection change, and `modeDisabled()` (the schedule's own greying path) uses the same rule.
+
+**Owner decision #2 (investigation result): the weakness is EXPECTED for this stage - it is not a
+wrong bit.** The SR pre-denoise is a **1:1 DLAA** pass: render size == output size, our own NGX host,
+with the synthetic contract a finished frame can offer - zeroed motion vectors + `MV.Scale 0`,
+`Jitter.Offset` 0, depth 0, `Reset` on every pass, no sharpening. Grounded in NVIDIA's own documents
+and in an independent implementation of exactly this geometry:
+
+* **DLAA is the DLSS SR network at native resolution, and its job is to RESOLVE a jittered
+  multi-frame history** - the DLSS guide's jitter table gives DLAA an **8-phase** sequence (quality
+  18 / balanced 24 / performance 32 / ultra performance 72), jitter offsets live in **pixel space at
+  the render-target size** (guide §3.7.3), and the recommended preset for DLAA is **K**. A still
+  image has none of that: one frame, no sub-pixel phase, no motion.
+* **The closest public analogue says the same thing in one sentence**: `DLSS5-Feeder` builds a
+  *synthetic* DLAA contract out of a finished frame (render = output, no jitter, estimated motion),
+  and states its ceiling plainly - with every jittered sample coming from the same frame, "the best
+  DLSS can converge to is the image you already had at 100%".
+* **Our contract is flatter still**: our MVs are ZEROS, so the temporal reprojection is a pure copy
+  of the previous frame, and `Reset=1` on every pass throws that history away anyway. All that is
+  left is the network's spatial resolve of an already-finished, already-AI-upscaled frame.
+* **SCUNet is a different class of operation, not a stronger setting of this one**: a blind
+  restoration CNN run at 100% strength erases compression/noise with a strong learned prior. That is
+  exactly what the `Denoise Model` mode is for - hence the new default.
+
+**Two real things the next run can still decide** (both shipped as measurement, not as behaviour):
+
+1. **The model preset hint.** The host asks for `DLSS.Hint.Render.Preset.DLAA` = **12 (sr_model
+   'L')**, while the core's own log for the same create says `NGXOverrideStatusCallback: ModelPreset
+   11 applied` - **K**, which is both the documented DLAA default and (community) the DLSS 4
+   transformer, where L is the DLSS 4.5 *Ultra Performance* model. Two causes, and one new line tells
+   them apart: `parameters.CoreParameterObject` now records the result of every `Set` made through
+   **NVIDIA's flat C parameter API** (the one route whose results are ABI-exact - the vtable route's
+   are not pinned, and a guess printed as fact is worse than saying so), and the SR session route
+   logs `SR model preset: asked for <name> = <value> - taken / REJECTED (0x...) / not readable on
+   this backend`. A rejection means the runtime never took our hint (our side, fixable); a taken hint
+   with another applied preset means a driver-side override wins (not our call path).
+2. **The reset pattern.** `Reset` on every pass is why the temporal half has nothing to accumulate.
+   `ANTS_SR_ACCUM=1` (opt-in, diagnostic) lets each image's FIRST pass keep the `temporal_history`
+   decision and evaluates every later pass WITHOUT reset - i.e. as an additional observation of the
+   same content, the shape DLAA is built for. That is the measurement that says how much of the
+   effect is temporal; it changes the image on purpose, so it is not the default.
+
+**And the weakness is now a NUMBER**: `sr_output_verdict` (used by all three engine paths) carries
+`[mean |delta| x.xx/255 over RGB (alpha excluded), y.y% of channels changed]` for a real change, a
+no-op and the all-black error alike. Next run's console line says how weak, instead of reproducing an
+impression. No wrong colour space was found (frames go out as the [0,1] values the rest of the pack
+uses), the create parameters are the documented ones (`PerfQualityValue 5` = DLAA, input == output -
+which is also the condition the DLAA preset hint requires), and the core's evaluate log shows the
+full `RunPrePass/RunPass/RunPostPass` with `NeedHistoryReset 1`, i.e. the network ran. One WART is
+documented and left alone: `DLSS.Feature.Create.Flags` sets `MVLowRes` (0x02) although our MVs are at
+render resolution - at 1:1 (render == output) and with zeroed MVs it cannot matter, and changing a
+working create contract on a hunch is how the last three rig runs were lost.
+
+**Not built, and the only honest way to a STRONGER SR stage**: a synthesized jitter sequence - the
+guide's 8 phases for DLAA, in pixel space, each phase a sub-pixel-shifted copy of the still fed with a
+matching `Jitter.Offset` and history kept - which is what would give the network the multi-sample
+contract it exists to resolve. That is 8 evaluations per image and a real design change, so it is an
+option with a price, tracked in plan.md, not a decision taken here.
+- Suite: **486 checks** (dlssnr_bridge 121, dlsssr 111, native_flow 67, runtime_surface 58,
+  nr_schedule 35, upres 27, pure_helpers 26, facerestore 21, swapper 13, detection 7).
+  `HOST_BUILD` `2026-09-21.10`. The next rig run decides the preset question and, with
+  `ANTS_SR_ACCUM=1`, the temporal one.
 
 ### 2026-09-21 (rig run 29) - the SR pre-denoise stage FAULTED at init; the route is fixed
 - **Owner's A/B**: `pre_denoise_strength` 0 = "ran as usual" (the rule skips the stage); strength 1
